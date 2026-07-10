@@ -231,3 +231,49 @@ absolute savings at this scale.
 All 25 tests pass (`python3 -m pytest tests/ -q`). This closes out the
 vectorization/JIT audit from 2026-07-09 — all 6 identified items shipped
 and validated.
+
+## 2026-07-09 — sklearn tier is ~15x slower than numpy on CPU; fixed default backend order
+
+Prompted by a question about whether `scikit-learn-intelex` (Intel's oneDAL
+patch for scikit-learn) is worth exploring to speed up the "sklearn" scoring
+tier. Before chasing that, benchmarked the "numpy" and "sklearn" tiers
+against each other directly (`scripts/bench_backends.py`, added this entry —
+run it to reproduce on other hardware): both call the same RBF-SVR math
+(`to_sklearn_svr()` reproduces `DREGModel.predict()`'s weights exactly,
+verified to agree to ~1e-10), but `sklearn.svm.SVR.predict()` (libsvm) is a
+single-threaded C loop over support vectors, while `DREGModel.predict`'s
+chunked `X_scaled @ sv_block.T` / `K @ coefs` dispatches to a multithreaded
+BLAS (Accelerate, on this Mac).
+
+Measured on this machine (605,187 SVs x 360 features, local safetensors,
+1 rep):
+
+| n | numpy | sklearn | ratio |
+|---|---|---|---|
+| 256 | 1.11s (231 pos/s) | 16.6s (15 pos/s) | 15.0x |
+| 1024 | 4.74s (216 pos/s) | 66.3s (15 pos/s) | 14.0x |
+
+**Conclusion on the original question**: not worth exploring intelex —
+even a large intelex speedup on libsvm's predict would need to close a 14-15x
+gap just to match the *already-CPU* numpy tier, and there's a real risk it
+wouldn't engage at all: intelex's SVM acceleration hooks in via oneDAL state
+built during `.fit()`, and `to_sklearn_svr()` deliberately skips `.fit()`
+(writing directly to libsvm's private `support_vectors_`/`_dual_coef_`/etc.,
+since this is a pretrained R model with no training data to refit from) —
+so the patched estimator may have no oneDAL-backed state to dispatch
+`.predict()` to.
+
+**More importantly, this surfaced an actual bug**: `backend.detect_backend()`
+preferred `"sklearn"` over `"numpy"` whenever `scikit-learn` was importable
+— but `scikit-learn` is a hard dependency (`pyproject.toml`), so every
+CPU-only user (i.e. anyone without cuML/a CUDA GPU, the common case per
+README's "Caveats") was being silently routed to the ~15x-slower tier by
+default. **Fixed**: `detect_backend()` no longer probes for/returns
+`"sklearn"` at all — CPU auto-detection now goes straight to `"numpy"` (cuML
+is still preferred first when a real GPU is usable). `"sklearn"` remains
+selectable via `--backend sklearn` for anyone who wants it, and
+`to_sklearn_svr()` is unchanged and still required as the input to
+`cuml.svm.SVR.from_sklearn()` for the cuML tier.
+
+No test relied on the old auto-detection order (`tests/test_pipeline.py`
+pins `backend_name="numpy"` explicitly); all 25 tests still pass.

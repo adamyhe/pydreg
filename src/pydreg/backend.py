@@ -32,8 +32,15 @@ class BackendUnavailable(RuntimeError):
 
 @functools.lru_cache(maxsize=1)
 def detect_backend():
-    """Probes once per process and returns "cuml", "sklearn", or "numpy" --
-    the best backend actually usable right now, in that preference order."""
+    """Probes once per process and returns "cuml" or "numpy" -- the best
+    backend actually usable right now.
+
+    "sklearn" is CPU-only and is never auto-selected: benchmarked at ~15x
+    slower than the "numpy" tier (libsvm's predict loop is single-threaded C,
+    vs. DREGModel.predict's chunked matmul, which dispatches to a
+    multithreaded BLAS) despite computing the same math (agrees to ~1e-10).
+    It remains selectable via --backend sklearn, and to_sklearn_svr() is
+    still required as the input to cuml.svm.SVR.from_sklearn()."""
     try:
         import cuml.svm
     except ModuleNotFoundError:
@@ -54,13 +61,6 @@ def detect_backend():
             )
         else:
             return "cuml"
-
-    try:
-        import sklearn.svm  # noqa: F401
-    except ModuleNotFoundError:
-        pass
-    else:
-        return "sklearn"
 
     return "numpy"
 
