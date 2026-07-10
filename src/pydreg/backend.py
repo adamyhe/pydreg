@@ -11,6 +11,7 @@ CUDA box.
 """
 
 import functools
+import importlib.util
 import logging
 
 import numpy as np
@@ -30,6 +31,26 @@ class BackendUnavailable(RuntimeError):
     (rather than silently falling back to the next tier)."""
 
 
+def _cuml_installed():
+    return importlib.util.find_spec("cuml") is not None
+
+
+def _cuda_runtime_available():
+    """Cheaply check CUDA visibility before asking cuML to initialize.
+
+    On machines with the RAPIDS wheel installed but no usable CUDA device,
+    tiny cuML operations can fail with low-level implementation details (for
+    example ZeroDivisionError). Keep those details out of the normal INFO log.
+    """
+    try:
+        from numba import cuda
+
+        return cuda.is_available()
+    except Exception:
+        logger.debug("CUDA runtime availability probe failed", exc_info=True)
+        return False
+
+
 @functools.lru_cache(maxsize=1)
 def detect_backend():
     """Probes once per process and returns "cuml" or "numpy" -- the best
@@ -41,26 +62,28 @@ def detect_backend():
     multithreaded BLAS) despite computing the same math (agrees to ~1e-10).
     It remains selectable via --backend sklearn, and to_sklearn_svr() is
     still required as the input to cuml.svm.SVR.from_sklearn()."""
+    if not _cuml_installed():
+        logger.info("cuml not installed -- install pydreg[gpu] for GPU scoring")
+        return "numpy"
+
+    if not _cuda_runtime_available():
+        logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
+        return "numpy"
+
     try:
         import cuml.svm
-    except ModuleNotFoundError:
-        logger.info("cuml not installed -- install pydreg[gpu] for GPU scoring")
+
+        probe = cuml.svm.SVR()
+        probe.fit(np.zeros((2, 1)), np.array([0.0, 1.0]))
+        probe.predict(np.zeros((1, 1)))
+    except Exception:
+        # A visible CUDA runtime still does not prove cuML can initialize and
+        # run. CUDA/cuML failures are not one clean exception type, hence the
+        # broad catch.
+        logger.debug("cuML runtime probe failed", exc_info=True)
+        logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
     else:
-        try:
-            probe = cuml.svm.SVR()
-            probe.fit(np.zeros((2, 1)), np.array([0.0, 1.0]))
-            probe.predict(np.zeros((1, 1)))
-        except Exception as e:
-            # cuml installs fine on a GPU-less box; only a real op proves a
-            # usable device. CUDA init failures aren't one clean exception
-            # type, hence the broad catch.
-            logger.info(
-                "cuml installed but no usable CUDA GPU detected at runtime (%s) "
-                "-- falling back to CPU",
-                e,
-            )
-        else:
-            return "cuml"
+        return "cuml"
 
     return "numpy"
 

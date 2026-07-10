@@ -35,7 +35,7 @@ Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest pea
 pydreg plus.bw minus.bw out_prefix --verbose
 ```
 
-- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline.
+- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. **`minus.bw` must use negative-signed values** (proseq2.0's default convention) — see Caveats below.
 - `out_prefix`: prefix for all output files (see below).
 
 Options:
@@ -98,6 +98,7 @@ The test suite (25 tests) covers each module in isolation plus a full synthetic 
 
 ## Caveats
 
+- **`minus.bw` must use negative-signed values, not unsigned/positive counts.** Informative-position detection is sign-invariant (it takes `abs()` of the minus-strand depth), but feature extraction is not: each strand's multi-scale bins are logistic-scaled independently and deliberately *without* `abs()` (ported verbatim from the original C, `get_max_d1`), since that's the exact transform the pretrained SVR's support vectors were fit against. A positive-signed `minus.bw` won't raise an error — positions are still found correctly — but every score will be silently wrong, because the reverse-strand features no longer match what the model expects.
 - The cuML GPU backend is implemented against cuML's documented `SVR.from_sklearn()` API but has not been exercised on real GPU hardware (none was available during development) — do a real smoke test on CUDA hardware before relying on it in production.
 - A handful of upstream R bugs/quirks are faithfully replicated rather than fixed, because the pretrained model's expected behavior was produced by that exact code (e.g. a `mean()`-argument-binding bug in the p-value calculation, an off-by-one in broad-peak merging that drops the last group per chromosome, and others) — see `docs/PLANNING.md` for the full list and reasoning.
 - Peak-calling p-values have small inherent run-to-run noise (`scipy.stats.multivariate_normal.cdf`'s underlying quasi-Monte-Carlo algorithm is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice.
