@@ -1,43 +1,48 @@
 # pydreg
 
+[![PyPI](https://img.shields.io/pypi/v/pydreg)](https://pypi.org/project/pydreg/)
+[![Tests](https://github.com/adamyhe/pydreg/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/tests.yml)
+[![Weights](https://img.shields.io/badge/%F0%9F%A4%97-Weights-yellow)](https://huggingface.co/adamyhe/pydreg)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pydreg?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pydreg)
+
 An inference-only Python port of [dREG](https://github.com/Danko-Lab/dREG) (Danko Lab) — detects active transcriptional regulatory elements (promoters and enhancers) from PRO-seq/GRO-seq nascent-transcription data.
 
 Given a pair of strand-specific bigWig files, `pydreg` scores every informative genomic position with a pretrained SVR model, then calls significant peaks with FDR control, mirroring the original R package's recommended `run_dREG.R` pipeline end to end. Training is out of scope — this project only ports inference.
 
 ## Installation
 
-Requires Python ≥3.11. Dependency management is via [uv](https://docs.astral.sh/uv/):
-
 ```bash
-uv sync
+pip install pydreg[gpu]
+pydreg --help
 ```
 
-For GPU-accelerated scoring on Linux with an NVIDIA GPU (via [cuML](https://docs.rapids.ai/api/cuml/stable/)):
+Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --extra gpu
+uv add pydreg[gpu]
+pydreg --help
 ```
 
-This is a no-op (not an error) on macOS/Windows or GPU-less machines — the `gpu` extra is a platform-restricted marker, not a hard requirement.
+`[gpu]` installs [cuML](https://docs.rapids.ai/api/cuml/stable/) and enables GPU-accelerated scoring on Linux with an NVIDIA GPU. It is not required, but CPU-only scoring is much slower.
 
-Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/dREG`](https://huggingface.co/adamyhe/dREG) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub` — no manual download step.
+Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/dREG`](https://huggingface.co/adamyhe/dREG) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub`.
 
 ## Usage
 
 ### CLI
 
 ```bash
-uv run pydreg plus.bw minus.bw out_prefix --verbose
+pydreg plus.bw minus.bw out_prefix --verbose
 ```
 
-- `plus.bw`/`minus.bw`: strand-specific bigWig files (5′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects).
+- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline.
 - `out_prefix`: prefix for all output files (see below).
 
 Options:
 
 | flag | default | meaning |
 |---|---|---|
-| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` tries cuML, then scikit-learn, then pure NumPy. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
+| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` tries cuML, then pure NumPy, then scikit-learn (sklearn is currently bugged and slower than numpy). An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
 | `--smoothwidth N` | `4` | Smoothing window used during peak-splitting. |
 | `--pv-adjust METHOD` | `fdr` | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name). |
 | `--pv-threshold P` | `0.05` | Significance threshold applied after correction. |
@@ -61,11 +66,11 @@ Given `out_prefix`, pydreg writes:
 
 | file | contents |
 |---|---|
-| `{prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw` | Every informative position and its raw dREG score. |
-| `{prefix}.dREG.raw.peak.bed.gz` (+`.tbi`) | All candidate peaks before FDR filtering. |
-| `{prefix}.dREG.peak.full.bed.gz` (+`.tbi`) | Significant peaks: chrom, start, end, score, p-value, center. |
-| `{prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only. |
-| `{prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' `1 - p-value`. |
+| `{out_prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw` | Every informative position and its raw dREG score. |
+| `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`) | All candidate peaks before FDR filtering. |
+| `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`) | Significant peaks: chrom, start, end, score, p-value, center. |
+| `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only. |
+| `{out_prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' `1 - p-value`. |
 
 `.bed.gz` files are bgzipped and tabix-indexed; `.bw` files are standard bigWig tracks.
 
@@ -80,8 +85,12 @@ See `docs/PLANNING.md` for the full algorithmic detail (this is a faithful port,
 
 ## Development
 
+Install `pydreg` from source:
+
 ```bash
-uv sync
+git clone https://github.com/adamyhe/pydreg.git
+cd pydreg
+uv sync --extra gpu --group dev
 uv run pytest tests/ -q
 ```
 
