@@ -1,0 +1,49 @@
+[project]
+name = "pydreg"
+version = "0.1.0"
+description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.0",
+  "scipy>=1.11",
+  "statsmodels>=0.14",
+  "scikit-learn>=1.4",
+  "pybigtools>=0.3",
+  "pysam>=0.22",
+  "huggingface-hub>=0.24",
+  "safetensors>=0.4",
+  "zstandard>=0.22",
+  "numba>=0.64.0",
+  "tqdm>=4.68.4",
+]
+
+[project.scripts]
+pydreg = "pydreg.cli:main"
+
+[project.optional-dependencies]
+# cuML/RAPIDS is Linux+CUDA only; the sys_platform/platform_machine marker
+# means `uv sync --extra gpu` simply omits this package on macOS/Windows/
+# unsupported architectures rather than failing. No custom package index is
+# needed as of RAPIDS 25.10 -- cuml-cu12 ships as a real wheel on plain PyPI
+# (confirmed via the PyPI JSON API). Never depend on the bare `cuml` name on
+# PyPI -- that's an unrelated, unmaintained, ancient package (v0.6.1).
+#
+# cuml-cu12 itself requires Python >=3.11, so this project's own floor is
+# set to >=3.11 too -- keeps `uv sync --extra gpu` from ever failing on a
+# Python-version mismatch.
+gpu = [
+  "cuml-cu12>=25.10; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pydreg"]
