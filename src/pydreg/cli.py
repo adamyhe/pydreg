@@ -17,9 +17,9 @@ def main(argv=None):
         "--backend",
         choices=["auto", "cuml", "sklearn", "numpy"],
         default="auto",
-        help="scoring backend; 'auto' tries cuml, then sklearn, then numpy. An "
-        "explicit choice raises if that backend isn't usable, rather than "
-        "silently falling back.",
+        help="scoring backend; 'auto' uses cuml when CuPy sees a CUDA device, "
+        "otherwise numpy. An explicit choice raises if that backend isn't "
+        "usable, rather than silently falling back.",
     )
     parser.add_argument("--smoothwidth", type=int, default=4)
     parser.add_argument("--pv-adjust", default="fdr")

@@ -42,7 +42,7 @@ Options:
 
 | flag | default | meaning |
 |---|---|---|
-| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` uses cuML when a tiny runtime probe succeeds, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
+| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` uses cuML when CuPy sees a CUDA device, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
 | `--smoothwidth N` | `4` | Smoothing window used during peak-splitting. |
 | `--pv-adjust METHOD` | `fdr` | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name). |
 | `--pv-threshold P` | `0.05` | Significance threshold applied after correction. |

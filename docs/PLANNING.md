@@ -132,9 +132,9 @@ Full output set: `infp.bed.gz` (chr,start,end,score,infp-flag), `peak.full.bed.g
 ## Backend dispatch (`backend.py`)
 
 - `detect_backend()`, `@functools.lru_cache(maxsize=1)` — probes once per process, lazily (never at module import time — importing `cuml` alone can take seconds and drags in cupy/numba-cuda/rmm, a bad tax on every invocation including `--help`).
-  - `try: import cuml.svm` → `ModuleNotFoundError` means not installed → tier 2. If the import *succeeds*, that only proves the library is present, not that a GPU is visible — RAPIDS wheels install fine on a GPU-less box. Confirm real GPU usability with a cheap real op (construct a tiny `cuml.svm.SVR()`, `.predict()` a 1-row dummy array) wrapped in a broad `except Exception` (CUDA init failures aren't one clean exception type).
+  - `importlib.util.find_spec("cuml") is None` means cuML is not installed. If cuML is installed, confirm CUDA visibility via CuPy (`cupy.cuda.runtime.getDeviceCount() > 0`), since CuPy is a cuML dependency and this avoids a brittle toy cuML fit/predict probe.
   - Log **different** messages for "cuml not installed" vs "cuml installed but no GPU detected" even though both fall through to the same next tier.
-  - Then `try: import sklearn.svm` → tier 2, else tier 3 (NumPy, always available, zero extra deps).
+  - scikit-learn is CPU-only and not auto-selected; NumPy is the CPU auto fallback.
 - `build_scorer(dreg_model, backend=None)` constructs the tier's model object exactly once per model instance and **caches it on the `DREGModel` instance itself** (e.g. `dreg_model._scorer_cache`) — both `to_sklearn_svr()`'s dummy-fit-then-overwrite and `cuml...from_sklearn()`'s ~1.7GB host→device copy are expensive enough to matter.
 - `Scorer` is a uniform `.predict(X_chunk) -> np.ndarray` wrapper — `pipeline.py` never branches on backend, only calls `scorer.predict(batch)`.
 - CLI flag `--backend {auto,cuml,sklearn,numpy}`, default `auto`. Explicit `--backend cuml` **raises** (doesn't silently fall back) if cuML isn't usable — a user who asked for GPU wants a loud failure, not a silent 50x slowdown on a job sized for GPU throughput.

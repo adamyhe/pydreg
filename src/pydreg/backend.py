@@ -35,6 +35,17 @@ def _cuml_installed():
     return importlib.util.find_spec("cuml") is not None
 
 
+def _cuda_runtime_available():
+    """Return whether CUDA is visible through CuPy, a cuML dependency."""
+    try:
+        import cupy
+
+        return cupy.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        logger.debug("CuPy CUDA runtime availability probe failed", exc_info=True)
+        return False
+
+
 @functools.lru_cache(maxsize=1)
 def detect_backend():
     """Probes once per process and returns "cuml" or "numpy" -- the best
@@ -50,22 +61,11 @@ def detect_backend():
         logger.info("cuml not installed -- install pydreg[gpu] for GPU scoring")
         return "numpy"
 
-    try:
-        import cuml.svm
-
-        probe = cuml.svm.SVR()
-        probe.fit(np.zeros((2, 1)), np.array([0.0, 1.0]))
-        probe.predict(np.zeros((1, 1)))
-    except Exception:
-        # Installing/importing cuML does not prove that CUDA is usable. The
-        # tiny model above is the real availability test; CUDA/cuML failures
-        # are not one clean exception type, hence the broad catch.
-        logger.debug("cuML runtime probe failed", exc_info=True)
+    if not _cuda_runtime_available():
         logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
-    else:
-        return "cuml"
+        return "numpy"
 
-    return "numpy"
+    return "cuml"
 
 
 class Scorer:
