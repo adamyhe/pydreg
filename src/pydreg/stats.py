@@ -6,6 +6,7 @@ before BH-FDR adjustment in pydreg.peaks).
 """
 
 import numpy as np
+import time
 from scipy.stats import multivariate_normal
 
 
@@ -114,6 +115,7 @@ def _z_grid():
 # (and avoids rebuilding the frozen multivariate_normal on every one of the
 # thousands of per-summit pmv_laplace calls in a run).
 _mvn_cache = {"cor_mat": None, "mvn": None}
+_pmv_laplace_profile = {"calls": 0, "seconds": 0.0}
 
 
 def _cached_mvn(cor_mat):
@@ -122,6 +124,15 @@ def _cached_mvn(cor_mat):
         _mvn_cache["mvn"] = multivariate_normal(mean=np.zeros(d), cov=cor_mat, allow_singular=True)
         _mvn_cache["cor_mat"] = cor_mat
     return _mvn_cache["mvn"]
+
+
+def reset_pmv_laplace_profile():
+    _pmv_laplace_profile["calls"] = 0
+    _pmv_laplace_profile["seconds"] = 0.0
+
+
+def get_pmv_laplace_profile():
+    return dict(_pmv_laplace_profile)
 
 
 def pmv_laplace(x, cor_mat):
@@ -147,21 +158,26 @@ def pmv_laplace(x, cor_mat):
     and the z-integration grid are cached across calls -- a whole call_peaks
     run shares one cor_mat, and the grid is a pure constant -- since this
     runs once per peak summit, genome-wide."""
-    x = np.asarray(x, dtype=float)
-    mvn = _cached_mvn(cor_mat)
+    t0 = time.perf_counter()
+    try:
+        x = np.asarray(x, dtype=float)
+        mvn = _cached_mvn(cor_mat)
 
-    abs_x = np.abs(x)
-    p_norm = float(mvn.cdf(abs_x, lower_limit=-abs_x))
-    if p_norm > 0.99:
-        return p_norm
+        abs_x = np.abs(x)
+        p_norm = float(mvn.cdf(abs_x, lower_limit=-abs_x))
+        if p_norm > 0.99:
+            return p_norm
 
-    z, widths = _z_grid()
-    p0 = np.array(
-        [
-            float(mvn.cdf(abs_x / np.sqrt(z0), lower_limit=-abs_x / np.sqrt(z0)))
-            * np.exp(-z0)
-            for z0 in z
-        ]
-    )
-    p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
-    return p_max
+        z, widths = _z_grid()
+        p0 = np.array(
+            [
+                float(mvn.cdf(abs_x / np.sqrt(z0), lower_limit=-abs_x / np.sqrt(z0)))
+                * np.exp(-z0)
+                for z0 in z
+            ]
+        )
+        p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
+        return p_max
+    finally:
+        _pmv_laplace_profile["calls"] += 1
+        _pmv_laplace_profile["seconds"] += time.perf_counter() - t0

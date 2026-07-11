@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from pydreg.peaks import _r_colon, find_gap_infp, merge_broad_peak
+from pydreg import peaks
+from pydreg.peaks import _r_colon, call_peaks, find_gap_infp, merge_broad_peak
 
 
 def test_r_colon_matches_r_semantics():
@@ -62,3 +63,55 @@ def test_find_gap_infp_no_gaps_below_threshold():
         {"chrom": ["chr1"] * 2, "start": [1000, 5000], "end": [1001, 5001], "score": [0.05, 0.05]}
     )
     assert find_gap_infp(df, threshold=0.2) is None
+
+
+def test_call_peaks_parallel_matches_serial(monkeypatch, rf_model):
+    x1 = np.arange(0, 2000, 10)
+    x2 = np.arange(3000, 5000, 10)
+    x = np.concatenate([x1, x2])
+    y1 = np.zeros_like(x1, dtype=float)
+    y1 += 0.8 * np.exp(-((x1 - 500) ** 2) / (2 * 80**2))
+    y1 += 0.9 * np.exp(-((x1 - 1500) ** 2) / (2 * 80**2))
+    y2 = np.zeros_like(x2, dtype=float)
+    y2 += 0.7 * np.exp(-((x2 - 3500) ** 2) / (2 * 80**2))
+    y2 += 0.85 * np.exp(-((x2 - 4500) ** 2) / (2 * 80**2))
+    y = np.concatenate([y1, y2])
+
+    dense_infp = pd.DataFrame(
+        {"chrom": "chr1", "start": x, "end": x + 1, "score": y, "infp": 1}
+    )
+    peak_broad = pd.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "start": [0, 3000],
+            "end": [1990, 4990],
+            "min": [0.0, 0.0],
+            "max": [float(y1.max()), float(y2.max())],
+            "mean": [float(y1.mean()), float(y2.mean())],
+            "sum": [float(y1.sum()), float(y2.sum())],
+            "stdev": [float(y1.std(ddof=1)), float(y2.std(ddof=1))],
+            "count": [len(y1), len(y2)],
+        }
+    )
+
+    monkeypatch.setattr(peaks, "PEAK_CALLING_BLOCK_WIDTH", 1)
+    monkeypatch.setattr(peaks.stats, "build_cormat", lambda starts, scores: np.eye(5) * 0.01)
+    serial_raw, serial_bed = call_peaks(
+        dense_infp, peak_broad, 0.05, rf_model,
+        pv_adjust="none", pv_threshold=1.0, peak_calling_cores=1,
+    )
+    parallel_raw, parallel_bed = call_peaks(
+        dense_infp, peak_broad, 0.05, rf_model,
+        pv_adjust="none", pv_threshold=1.0, peak_calling_cores=2,
+    )
+
+    assert serial_raw is not None
+    assert parallel_raw is not None
+    pd.testing.assert_frame_equal(
+        serial_raw.drop(columns=["prob"]).reset_index(drop=True),
+        parallel_raw.drop(columns=["prob"]).reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        serial_bed.drop(columns=["prob"]).reset_index(drop=True),
+        parallel_bed.drop(columns=["prob"]).reset_index(drop=True),
+    )

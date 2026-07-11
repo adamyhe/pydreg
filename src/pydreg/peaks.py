@@ -21,11 +21,20 @@ pretrained pipeline's expected behavior was produced by this exact code
   `_r_colon` below.
 """
 
+import logging
+import time
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
 from . import rfsplit, stats
+
+
+PEAK_CALLING_BLOCK_WIDTH = 500
+_WORKER_STATE = {}
+logger = logging.getLogger(__name__)
 
 
 def _r_colon(a, b):
@@ -256,17 +265,90 @@ def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col
     return newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(drop=True)
 
 
+def _init_peak_worker(rf_model, min_score, smoothwidth, cor_mat):
+    _WORKER_STATE["rf_model"] = rf_model
+    _WORKER_STATE["min_score"] = min_score
+    _WORKER_STATE["smoothwidth"] = smoothwidth
+    _WORKER_STATE["cor_mat"] = cor_mat
+
+
+def _call_peak_block(task):
+    chrom, peak_starts, peak_ends, infp_starts, infp_ends, infp_scores = task
+    rf_model = _WORKER_STATE["rf_model"]
+    min_score = _WORKER_STATE["min_score"]
+    smoothwidth = _WORKER_STATE["smoothwidth"]
+    cor_mat = _WORKER_STATE["cor_mat"]
+
+    t0 = time.perf_counter()
+    pmv_before = stats.get_pmv_laplace_profile()
+    raw_rows = []
+    for peak_start, peak_end in zip(peak_starts, peak_ends):
+        lo = np.searchsorted(infp_starts, peak_start, side="left")
+        hi = np.searchsorted(infp_ends, peak_end, side="right")
+        xp, yp = infp_starts[lo:hi], infp_scores[lo:hi]
+        if xp.shape[0] <= 3 or yp.max() <= min_score:
+            continue
+
+        result = rfsplit.find_rf_peaks(
+            rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
+        )
+        if result is None:
+            continue
+        result = result.copy()
+        result.insert(0, "chr", chrom)
+        raw_rows.append(result)
+
+    pmv_after = stats.get_pmv_laplace_profile()
+    profile = {
+        "peaks": len(peak_starts),
+        "seconds": time.perf_counter() - t0,
+        "pmv_calls": pmv_after["calls"] - pmv_before["calls"],
+        "pmv_seconds": pmv_after["seconds"] - pmv_before["seconds"],
+    }
+    if not raw_rows:
+        return None, profile
+    return pd.concat(raw_rows, ignore_index=True), profile
+
+
+def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col):
+    for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
+        chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
+        infp_starts = chr_infp[start_col].to_numpy()
+        infp_ends = chr_infp[end_col].to_numpy()
+        infp_scores = chr_infp.iloc[:, 3].to_numpy()
+        peak_starts_all = chr_peaks["start"].to_numpy()
+        peak_ends_all = chr_peaks["end"].to_numpy()
+
+        for start in range(0, len(chr_peaks), PEAK_CALLING_BLOCK_WIDTH):
+            end = min(start + PEAK_CALLING_BLOCK_WIDTH, len(chr_peaks))
+            block_starts = peak_starts_all[start:end]
+            block_ends = peak_ends_all[start:end]
+
+            # Mirror legacy dREG's block split: each worker gets only the
+            # dense informative points spanning its 500 broad peaks.
+            lo = np.searchsorted(infp_starts, block_starts[0], side="left")
+            hi = np.searchsorted(infp_ends, block_ends[-1], side="right")
+            yield (
+                chrom,
+                block_starts,
+                block_ends,
+                infp_starts[lo:hi],
+                infp_ends[lo:hi],
+                infp_scores[lo:hi],
+            )
+
+
 def call_peaks(
     dense_infp, peak_broad, min_score, rf_model,
     smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
+    peak_calling_cores=1,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
     rfsplit.find_rf_peaks() per broad peak whose max score clears
-    min_score. R's BLOCKWIDTH block-splitting + snowfall-cluster
-    parallelization is pure IPC infrastructure with no algorithmic content
-    -- this is a plain per-broad-peak loop (v1, single-process; see
-    docs/PLANNING.md).
+    min_score. When peak_calling_cores > 1, candidate broad peaks are split
+    into 500-peak blocks and processed in worker processes, matching legacy
+    dREG's BLOCKWIDTH/snowfall execution model.
 
     dense_infp: DataFrame with columns chrom, start, end, score (+ infp
     flag, unused here). peak_broad: DataFrame from get_broadpeak_summary
@@ -286,37 +368,63 @@ def call_peaks(
     if peak_broad is None or len(peak_broad) == 0:
         return None, None
     candidates = peak_broad[peak_broad["max"] >= min_score]
+    if len(candidates) == 0:
+        return None, None
 
     dense_sorted = dense_infp.sort_values([chrom_col, start_col], kind="stable")
+    tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col))
+    logger.info(
+        "calling %d broad peaks in %d blocks with %d peak-calling core(s)",
+        len(candidates), len(tasks), peak_calling_cores,
+    )
     raw_rows = []
+    profile_totals = {"peaks": 0, "seconds": 0.0, "pmv_calls": 0, "pmv_seconds": 0.0}
     pbar = tqdm(
         total=len(candidates), desc="calling peaks", unit="peak",
         disable=None if progress else True,
     )
-    for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
-        chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
-        infp_starts = chr_infp[start_col].to_numpy()
-        infp_ends = chr_infp[end_col].to_numpy()
-        infp_scores = chr_infp[score_col].to_numpy()
+    _init_peak_worker(rf_model, min_score, smoothwidth, cor_mat)
+    stats.reset_pmv_laplace_profile()
 
-        for _, peak in chr_peaks.iterrows():
-            lo = np.searchsorted(infp_starts, peak["start"], side="left")
-            hi = np.searchsorted(infp_ends, peak["end"], side="right")
-            xp, yp = infp_starts[lo:hi], infp_scores[lo:hi]
-            if xp.shape[0] <= 3 or yp.max() <= min_score:
-                pbar.update(1)
-                continue
+    def collect_profile(profile):
+        for key in profile_totals:
+            profile_totals[key] += profile[key]
 
-            result = rfsplit.find_rf_peaks(
-                rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
-            )
-            pbar.update(1)
+    if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
+        try:
+            with ProcessPoolExecutor(
+                max_workers=peak_calling_cores,
+                initializer=_init_peak_worker,
+                initargs=(rf_model, min_score, smoothwidth, cor_mat),
+            ) as pool:
+                for task, (result, profile) in zip(tasks, pool.map(_call_peak_block, tasks)):
+                    collect_profile(profile)
+                    pbar.update(len(task[1]))
+                    if result is not None:
+                        raw_rows.append(result)
+        except (OSError, NotImplementedError) as e:
+            logger.warning("parallel peak calling unavailable (%s); falling back to serial", e)
+            for task in tasks:
+                result, profile = _call_peak_block(task)
+                collect_profile(profile)
+                pbar.update(len(task[1]))
+                if result is not None:
+                    raw_rows.append(result)
+    else:
+        for task in tasks:
+            result, profile = _call_peak_block(task)
+            collect_profile(profile)
+            pbar.update(len(task[1]))
             if result is None:
                 continue
-            result = result.copy()
-            result.insert(0, chrom_col, chrom)
             raw_rows.append(result)
     pbar.close()
+    non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
+    logger.info(
+        "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s), %.2fs non-pmv",
+        profile_totals["seconds"], profile_totals["pmv_seconds"],
+        profile_totals["pmv_calls"], non_pmv_seconds,
+    )
 
     if not raw_rows:
         return None, None

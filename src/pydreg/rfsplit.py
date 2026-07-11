@@ -62,32 +62,32 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
         for li, ri in zip(LI, RI):
             vi = li + int(np.argmin(y[li : ri + 1]))
             rows.append(
-                dict(
-                    dist=x[ri] - x[li], LI=li, RI=ri, VI=vi,
-                    start=x[li], stop=x[ri], valley=x[vi],
-                    LS=y[li], RS=y[ri], VS=y[vi], ST=0,
-                )
+                {
+                    "dist": x[ri] - x[li], "LI": li, "RI": ri, "VI": vi,
+                    "start": x[li], "stop": x[ri], "valley": x[vi],
+                    "LS": y[li], "RS": y[ri], "VS": y[vi], "ST": 0,
+                }
             )
 
     first_pl, last_pl = int(peak_loci[0]), int(peak_loci[-1])
-    left_row = dict(
-        dist=x[first_pl] - x[0], LI=0, RI=first_pl, VI=0,
-        start=x[0], stop=x[first_pl], valley=x[0],
-        LS=y[0], RS=y[first_pl], VS=y[0], ST=-1,
-    )
-    right_row = dict(
-        dist=x[-1] - x[last_pl], LI=last_pl, RI=n - 1, VI=n - 1,
-        start=x[last_pl], stop=x[-1], valley=x[-1],
-        LS=y[last_pl], RS=y[-1], VS=y[-1], ST=1,
-    )
-    rp = pd.DataFrame([left_row, *rows, right_row])
+    left_row = {
+        "dist": x[first_pl] - x[0], "LI": 0, "RI": first_pl, "VI": 0,
+        "start": x[0], "stop": x[first_pl], "valley": x[0],
+        "LS": y[0], "RS": y[first_pl], "VS": y[0], "ST": -1,
+    }
+    right_row = {
+        "dist": x[-1] - x[last_pl], "LI": last_pl, "RI": n - 1, "VI": n - 1,
+        "start": x[last_pl], "stop": x[-1], "valley": x[-1],
+        "LS": y[last_pl], "RS": y[-1], "VS": y[-1], "ST": 1,
+    }
+    rp = [left_row, *rows, right_row]
 
     rp = _split_peak(model, rp)
     if rp is None or len(rp) == 0:
         return None
 
     out_rows = []
-    for _, region in rp.iterrows():
+    for region in rp:
         li, ri = int(region["LI"]), int(region["RI"])
         window = y[li : ri + 1]
         above = np.nonzero(window > amp_threshold)[0]
@@ -160,59 +160,55 @@ def _sample_indices(y, i_left, i_right, i_peak):
 
 
 def _split_peak(model, rp):
-    rp = rp.reset_index(drop=True)
-    rp["IDX"] = np.arange(1, len(rp) + 1)
-    rp["LD"] = rp["valley"] - rp["start"]
-    rp["RD"] = rp["stop"] - rp["valley"]
-    rp["maxy"] = rp[["LS", "RS"]].max(axis=1)
-    rp["d1"] = (rp["LS"] - rp["RS"]).abs()
-    rp["d2"] = rp[["LS", "RS"]].min(axis=1) - rp["VS"]
-    rp["d3"] = rp["VS"]
-    rp["dr"] = rp["d2"] / (rp["d1"] + rp["VS"])
+    for idx, row in enumerate(rp, start=1):
+        row["IDX"] = idx
+        _update_split_features(row)
 
-    feature_cols = ["dist", "LD", "RD", "LS", "RS", "maxy", "d1", "d2", "d3", "dr"]
-    while (rp["ST"] == 0).any():
-        newdata = rp.loc[rp["ST"] == 0, feature_cols].to_numpy()
+    feature_cols = ("dist", "LD", "RD", "LS", "RS", "maxy", "d1", "d2", "d3", "dr")
+    while any(row["ST"] == 0 for row in rp):
+        active = [row for row in rp if row["ST"] == 0]
+        newdata = np.array([[row[col] for col in feature_cols] for row in active], dtype=float)
         pred = model.predict(newdata)
-        rp.loc[rp["ST"] == 0, "ST"] = np.where(pred > 0.5, 3, 2)
+        for row, pred_i in zip(active, pred):
+            row["ST"] = 3 if pred_i > 0.5 else 2
 
-        st = rp["ST"].to_numpy()
-        adjacent_merge = np.nonzero((st[:-1] == 2) & (st[1:] == 2))[0]
-        if adjacent_merge.shape[0] == 0:
+        adjacent_merge = [
+            idx for idx in range(len(rp) - 1)
+            if rp[idx]["ST"] == 2 and rp[idx + 1]["ST"] == 2
+        ]
+        if not adjacent_merge:
             break
 
-        idx = int(adjacent_merge[0])
+        idx = adjacent_merge[0]
         idx1 = idx + 1
-        rp.loc[idx1, "ST"] = -2
-        rp.loc[idx, "ST"] = 0
-        rp.loc[idx, "stop"] = rp.loc[idx1, "stop"]
-        rp.loc[idx, "RI"] = rp.loc[idx1, "RI"]
-        rp.loc[idx, "RS"] = rp.loc[idx1, "RS"]
+        row = rp[idx]
+        row1 = rp[idx1]
+        row1["ST"] = -2
+        row["ST"] = 0
+        row["stop"] = row1["stop"]
+        row["RI"] = row1["RI"]
+        row["RS"] = row1["RS"]
         # R's which.min(c(a, b)) picks the first element on ties, i.e. a's
         # position when a <= b -- hence <=, not <, here.
-        take_idx1 = rp.loc[idx1, "VS"] <= rp.loc[idx, "VS"]
-        rp.loc[idx, "VI"] = rp.loc[idx1, "VI"] if take_idx1 else rp.loc[idx, "VI"]
-        rp.loc[idx, "valley"] = rp.loc[idx1, "valley"] if take_idx1 else rp.loc[idx, "valley"]
-        rp.loc[idx, "LD"] = rp.loc[idx, "valley"] - rp.loc[idx, "start"]
-        rp.loc[idx, "RD"] = rp.loc[idx, "stop"] - rp.loc[idx, "valley"]
-        rp.loc[idx, "dist"] = rp.loc[idx, "stop"] - rp.loc[idx, "start"]
-        rp.loc[idx, "VS"] = min(rp.loc[idx1, "VS"], rp.loc[idx, "VS"])
-        ls, rs = rp.loc[idx, "LS"], rp.loc[idx, "RS"]
-        rp.loc[idx, "d1"] = max(ls, rs) - min(ls, rs)
-        rp.loc[idx, "d2"] = min(ls, rs) - rp.loc[idx, "VS"]
-        rp.loc[idx, "d3"] = rp.loc[idx, "VS"]
-        rp.loc[idx, "dr"] = rp.loc[idx, "d2"] / (rp.loc[idx, "d1"] + rp.loc[idx, "d3"])
-        rp.loc[idx, "maxy"] = max(ls, rs)
+        take_idx1 = row1["VS"] <= row["VS"]
+        row["VI"] = row1["VI"] if take_idx1 else row["VI"]
+        row["valley"] = row1["valley"] if take_idx1 else row["valley"]
+        row["VS"] = min(row1["VS"], row["VS"])
+        _update_split_features(row)
 
-        rp = rp[rp["ST"] != -2].reset_index(drop=True)
-        rp["IDX"] = np.arange(1, len(rp) + 1)
+        rp = [row for row in rp if row["ST"] != -2]
+        for idx, row in enumerate(rp, start=1):
+            row["IDX"] = idx
 
-    rp["IDX"] = rp["IDX"] * 2
-    split_positions = np.nonzero((rp["ST"] == 3).to_numpy())[0]
-    if split_positions.shape[0] > 0:
+    for row in rp:
+        row["IDX"] *= 2
+
+    split_positions = [idx for idx, row in enumerate(rp) if row["ST"] == 3]
+    if split_positions:
+        split_set = set(split_positions)
         new_rows = []
         for i in split_positions:
-            row = rp.iloc[i]
+            row = rp[i]
             top = row.copy()
             top["ST"] = 1
             top["stop"] = row["valley"]
@@ -229,11 +225,20 @@ def _split_peak(model, rp):
             new_rows.append(top)
             new_rows.append(bottom)
 
-        keep = rp.iloc[[i for i in range(len(rp)) if i not in set(split_positions.tolist())]]
-        rp = pd.concat([keep, pd.DataFrame(new_rows)], ignore_index=True)
-        rp = rp.sort_values("IDX", kind="stable").reset_index(drop=True)
+        rp = [row for i, row in enumerate(rp) if i not in split_set] + new_rows
+        rp = sorted(rp, key=lambda row: row["IDX"])
 
     return _collapse_regions(rp)
+
+
+def _update_split_features(row):
+    row["LD"] = row["valley"] - row["start"]
+    row["RD"] = row["stop"] - row["valley"]
+    row["maxy"] = max(row["LS"], row["RS"])
+    row["d1"] = abs(row["LS"] - row["RS"])
+    row["d2"] = min(row["LS"], row["RS"]) - row["VS"]
+    row["d3"] = row["VS"]
+    row["dr"] = row["d2"] / (row["d1"] + row["VS"])
 
 
 def _collapse_regions(rp):
@@ -241,7 +246,7 @@ def _collapse_regions(rp):
     LI = LS = start = None
     center = center_s = center_i = []
 
-    for _, row in rp.iterrows():
+    for row in rp:
         st = row["ST"]
         if st == -1:
             LI, LS, start = row["LI"], row["LS"], row["start"]
@@ -279,4 +284,4 @@ def _collapse_regions(rp):
 
     if not rpeak_rows:
         return None
-    return pd.DataFrame(rpeak_rows)
+    return rpeak_rows

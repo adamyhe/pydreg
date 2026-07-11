@@ -63,6 +63,7 @@ def run(
     pv_adjust="fdr",
     pv_threshold=0.05,
     query_chunk=None,
+    peak_calling_cores=1,
     write_outputs=True,
     progress=False,
 ):
@@ -115,7 +116,7 @@ def run(
         raw_peak, peak_bed = peaks.call_peaks(
             dense_infp, peak_broad, min_score, rf_model,
             smoothwidth=smoothwidth, pv_adjust=pv_adjust, pv_threshold=pv_threshold,
-            progress=progress,
+            progress=progress, peak_calling_cores=peak_calling_cores,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",
