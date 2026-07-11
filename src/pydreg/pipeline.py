@@ -73,6 +73,7 @@ def run(
     query_chunk=None,
     cuml_query_chunk=800_000,
     peak_calling_cores=1,
+    peak_calling_block_width=100,
     write_outputs=True,
     progress=False,
 ):
@@ -126,6 +127,7 @@ def run(
             dense_infp, peak_broad, min_score, rf_model,
             smoothwidth=smoothwidth, pv_adjust=pv_adjust, pv_threshold=pv_threshold,
             progress=progress, peak_calling_cores=peak_calling_cores,
+            peak_calling_block_width=peak_calling_block_width,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",

@@ -23,7 +23,7 @@ pretrained pipeline's expected behavior was produced by this exact code
 
 import logging
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -310,7 +310,7 @@ def _call_peak_block(task):
     return pd.concat(raw_rows, ignore_index=True), profile
 
 
-def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col):
+def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width):
     for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
         chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
         infp_starts = chr_infp[start_col].to_numpy()
@@ -319,8 +319,8 @@ def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col)
         peak_starts_all = chr_peaks["start"].to_numpy()
         peak_ends_all = chr_peaks["end"].to_numpy()
 
-        for start in range(0, len(chr_peaks), PEAK_CALLING_BLOCK_WIDTH):
-            end = min(start + PEAK_CALLING_BLOCK_WIDTH, len(chr_peaks))
+        for start in range(0, len(chr_peaks), block_width):
+            end = min(start + block_width, len(chr_peaks))
             block_starts = peak_starts_all[start:end]
             block_ends = peak_ends_all[start:end]
 
@@ -341,14 +341,15 @@ def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col)
 def call_peaks(
     dense_infp, peak_broad, min_score, rf_model,
     smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
-    peak_calling_cores=1,
+    peak_calling_cores=1, peak_calling_block_width=100,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
     rfsplit.find_rf_peaks() per broad peak whose max score clears
     min_score. When peak_calling_cores > 1, candidate broad peaks are split
-    into 500-peak blocks and processed in worker processes, matching legacy
-    dREG's BLOCKWIDTH/snowfall execution model.
+    into blocks and processed in worker processes, matching legacy dREG's
+    BLOCKWIDTH/snowfall execution model but allowing smaller blocks for
+    better load balancing.
 
     dense_infp: DataFrame with columns chrom, start, end, score (+ infp
     flag, unused here). peak_broad: DataFrame from get_broadpeak_summary
@@ -372,13 +373,17 @@ def call_peaks(
         return None, None
 
     dense_sorted = dense_infp.sort_values([chrom_col, start_col], kind="stable")
-    tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col))
+    block_width = max(1, int(peak_calling_block_width))
+    tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width))
     logger.info(
-        "calling %d broad peaks in %d blocks with %d peak-calling core(s)",
-        len(candidates), len(tasks), peak_calling_cores,
+        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s)",
+        len(candidates), len(tasks), block_width, peak_calling_cores,
     )
     raw_rows = []
+    completed_results = [None] * len(tasks)
     profile_totals = {"peaks": 0, "seconds": 0.0, "pmv_calls": 0, "pmv_seconds": 0.0}
+    completed_blocks = 0
+    last_profile_log = time.perf_counter()
     pbar = tqdm(
         total=len(candidates), desc="calling peaks", unit="peak",
         disable=None if progress else True,
@@ -390,6 +395,20 @@ def call_peaks(
         for key in profile_totals:
             profile_totals[key] += profile[key]
 
+    def maybe_log_progress(force=False):
+        nonlocal last_profile_log
+        now = time.perf_counter()
+        if not force and now - last_profile_log < 60:
+            return
+        last_profile_log = now
+        non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
+        logger.info(
+            "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
+            "%.2fs in %d pmv_laplace call(s), %.2fs non-pmv",
+            completed_blocks, len(tasks), profile_totals["peaks"], profile_totals["seconds"],
+            profile_totals["pmv_seconds"], profile_totals["pmv_calls"], non_pmv_seconds,
+        )
+
     if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
         try:
             with ProcessPoolExecutor(
@@ -397,28 +416,35 @@ def call_peaks(
                 initializer=_init_peak_worker,
                 initargs=(rf_model, min_score, smoothwidth, cor_mat),
             ) as pool:
-                for task, (result, profile) in zip(tasks, pool.map(_call_peak_block, tasks)):
+                futures = {pool.submit(_call_peak_block, task): idx for idx, task in enumerate(tasks)}
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    task = tasks[idx]
+                    result, profile = future.result()
                     collect_profile(profile)
+                    completed_blocks += 1
+                    completed_results[idx] = result
                     pbar.update(len(task[1]))
-                    if result is not None:
-                        raw_rows.append(result)
+                    maybe_log_progress()
         except (OSError, NotImplementedError) as e:
             logger.warning("parallel peak calling unavailable (%s); falling back to serial", e)
-            for task in tasks:
+            for idx, task in enumerate(tasks):
                 result, profile = _call_peak_block(task)
                 collect_profile(profile)
+                completed_blocks += 1
+                completed_results[idx] = result
                 pbar.update(len(task[1]))
-                if result is not None:
-                    raw_rows.append(result)
+                maybe_log_progress()
     else:
-        for task in tasks:
+        for idx, task in enumerate(tasks):
             result, profile = _call_peak_block(task)
             collect_profile(profile)
+            completed_blocks += 1
+            completed_results[idx] = result
             pbar.update(len(task[1]))
-            if result is None:
-                continue
-            raw_rows.append(result)
+            maybe_log_progress()
     pbar.close()
+    raw_rows = [result for result in completed_results if result is not None]
     non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
     logger.info(
         "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s), %.2fs non-pmv",
