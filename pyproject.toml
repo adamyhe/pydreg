@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "pydreg"
 version = "0.1.0"
@@ -18,6 +22,16 @@ dependencies = [
   "zstandard>=0.22",
   "numba>=0.64.0",
   "tqdm>=4.68.4",
+]
+keywords = ["bioinformatics", "bigwig", "genomics", "kmer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
 [project.scripts]
@@ -41,9 +55,21 @@ gpu = [
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.urls]
+Homepage = "https://github.com/adamyhe/pydreg"
+Repository = "https://github.com/adamyhe/pydreg"
+Issues = "https://github.com/adamyhe/pydreg/issues"
+
+[tool.hatch.build]
+exclude = [
+  "/.uv-cache",
+  "/.venv",
+  "/dist",
+  "/CLAUDE.md",
+  "/AGENTS.md",
+  "/src/**/*.egg-info",
+  "/src/**/__pycache__",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pydreg"]
