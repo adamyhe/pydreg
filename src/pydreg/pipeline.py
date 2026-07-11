@@ -54,6 +54,14 @@ def _score_positions(bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=F
     return scores
 
 
+def _resolve_query_chunk(scorer_backend, query_chunk=None, cuml_query_chunk=800_000):
+    if query_chunk is not None:
+        return query_chunk
+    if scorer_backend == "cuml" and cuml_query_chunk is not None:
+        return cuml_query_chunk
+    return backend.DEFAULT_QUERY_CHUNK[scorer_backend]
+
+
 def run(
     plus_bw_path,
     minus_bw_path,
@@ -63,6 +71,7 @@ def run(
     pv_adjust="fdr",
     pv_threshold=0.05,
     query_chunk=None,
+    cuml_query_chunk=800_000,
     peak_calling_cores=1,
     write_outputs=True,
     progress=False,
@@ -82,7 +91,7 @@ def run(
     model = DREGModel.from_pretrained()
     rf_model = DREGPeakSplitForest.from_pretrained()
     scorer = backend.build_scorer(model, backend_name)
-    chunk = query_chunk or backend.DEFAULT_QUERY_CHUNK[scorer.backend]
+    chunk = _resolve_query_chunk(scorer.backend, query_chunk, cuml_query_chunk)
     logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)
 
     logger.info("scanning informative positions...")

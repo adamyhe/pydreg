@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Default query-position chunk sizes per backend tier. Sized for the
 # pretrained SVR's shape (605,187 support vectors x 360 features); see
 # docs/PLANNING.md "Batching" for the memory-bound reasoning behind each.
-DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 200_000}
+DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 800_000}
 
 
 class BackendUnavailable(RuntimeError):
@@ -33,22 +33,6 @@ class BackendUnavailable(RuntimeError):
 
 def _cuml_installed():
     return importlib.util.find_spec("cuml") is not None
-
-
-def _cuda_runtime_available():
-    """Cheaply check CUDA visibility before asking cuML to initialize.
-
-    On machines with the RAPIDS wheel installed but no usable CUDA device,
-    tiny cuML operations can fail with low-level implementation details (for
-    example ZeroDivisionError). Keep those details out of the normal INFO log.
-    """
-    try:
-        from numba import cuda
-
-        return cuda.is_available()
-    except Exception:
-        logger.debug("CUDA runtime availability probe failed", exc_info=True)
-        return False
 
 
 @functools.lru_cache(maxsize=1)
@@ -66,10 +50,6 @@ def detect_backend():
         logger.info("cuml not installed -- install pydreg[gpu] for GPU scoring")
         return "numpy"
 
-    if not _cuda_runtime_available():
-        logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
-        return "numpy"
-
     try:
         import cuml.svm
 
@@ -77,9 +57,9 @@ def detect_backend():
         probe.fit(np.zeros((2, 1)), np.array([0.0, 1.0]))
         probe.predict(np.zeros((1, 1)))
     except Exception:
-        # A visible CUDA runtime still does not prove cuML can initialize and
-        # run. CUDA/cuML failures are not one clean exception type, hence the
-        # broad catch.
+        # Installing/importing cuML does not prove that CUDA is usable. The
+        # tiny model above is the real availability test; CUDA/cuML failures
+        # are not one clean exception type, hence the broad catch.
         logger.debug("cuML runtime probe failed", exc_info=True)
         logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
     else:

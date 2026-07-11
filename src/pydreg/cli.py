@@ -30,6 +30,11 @@ def main(argv=None):
         "(see pydreg.backend.DEFAULT_QUERY_CHUNK)",
     )
     parser.add_argument(
+        "--cuml-query-chunk", type=int, default=800_000,
+        help="positions scored per batch for the cuml backend when --query-chunk "
+        "is not set; ignored by CPU backends",
+    )
+    parser.add_argument(
         "--peak-calling-cores", type=int, default=1,
         help="worker processes for the final CPU peak-calling stage; legacy "
         "dREG parallelized this stage in 500-peak blocks",
@@ -57,6 +62,7 @@ def main(argv=None):
         pv_adjust=args.pv_adjust,
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
+        cuml_query_chunk=args.cuml_query_chunk,
         peak_calling_cores=args.peak_calling_cores,
         progress=not args.no_progress,
     )

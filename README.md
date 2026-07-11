@@ -42,11 +42,12 @@ Options:
 
 | flag | default | meaning |
 |---|---|---|
-| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` tries cuML, then pure NumPy, then scikit-learn (sklearn is currently bugged and slower than numpy). An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
+| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` uses cuML when a tiny runtime probe succeeds, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
 | `--smoothwidth N` | `4` | Smoothing window used during peak-splitting. |
 | `--pv-adjust METHOD` | `fdr` | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name). |
 | `--pv-threshold P` | `0.05` | Significance threshold applied after correction. |
 | `--query-chunk N` | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`). |
+| `--cuml-query-chunk N` | `800000` | Positions scored per batch for cuML when `--query-chunk` is not set; ignored by CPU backends. |
 | `-v`, `--verbose` | off | Log progress at INFO level. |
 
 ### Python API
