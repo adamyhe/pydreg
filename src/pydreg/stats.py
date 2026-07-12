@@ -26,6 +26,8 @@ def get_laplace_sigma(ypred, y=None):
     valid = ~(np.isnan(ypred) | np.isnan(y))
     diff = ypred[valid] - y[valid]
     n = diff.shape[0]
+    if n == 0:
+        return np.nan
 
     std = np.sqrt(2) * (np.sum(np.abs(diff)) / n)
     outlier = np.abs(diff) > 5 * std
@@ -35,6 +37,8 @@ def get_laplace_sigma(ypred, y=None):
     else:
         mae = np.sum(np.abs(diff))
         denom = n
+    if denom == 0:
+        return np.nan
     return mae / denom
 
 

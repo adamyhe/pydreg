@@ -80,15 +80,39 @@ class Scorer:
         return self._predict_fn(X)
 
 
-def _wrap_sklearn_like(dreg_model, sk_predict):
+def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
     """Both the sklearn and cuml tiers predict in the SVR's internal scaled
     feature space and need the same x-scale / y-unscale wrapping DREGModel
     itself does -- see pydreg.models.DREGModel.predict."""
+    validated = False
 
     def predict_fn(X):
+        nonlocal validated
         X_scaled = (X - dreg_model.x_center) / dreg_model.x_scale
         y_scaled = np.asarray(sk_predict(X_scaled))
-        return y_scaled * dreg_model.y_scale + dreg_model.y_center
+        y = y_scaled * dreg_model.y_scale + dreg_model.y_center
+
+        if not validated:
+            sample = X[: min(len(X), 8)]
+            reference = dreg_model.predict(sample)
+            candidate = np.asarray(y[: len(sample)], dtype=float)
+            if (
+                candidate.shape != reference.shape
+                or not np.all(np.isfinite(candidate))
+                or not np.allclose(candidate, reference, rtol=1e-4, atol=1e-4)
+            ):
+                max_abs = (
+                    float(np.max(np.abs(candidate - reference)))
+                    if candidate.shape == reference.shape
+                    else float("nan")
+                )
+                raise BackendUnavailable(
+                    f"{backend_name} backend predictions do not match the NumPy reference "
+                    f"on a first-batch smoke test (max_abs_diff={max_abs:.6g}); "
+                    "use --backend numpy until this backend conversion is fixed"
+                )
+            validated = True
+        return y
 
     return predict_fn
 
@@ -116,14 +140,14 @@ def build_scorer(dreg_model, backend=None):
             gpu_model = cuml.svm.SVR.from_sklearn(to_sklearn_svr(dreg_model))
         except Exception as e:
             raise BackendUnavailable(f"cuml is installed but could not build a GPU model: {e}") from e
-        predict_fn = _wrap_sklearn_like(dreg_model, gpu_model.predict)
+        predict_fn = _wrap_sklearn_like(dreg_model, gpu_model.predict, "cuml")
 
     elif resolved == "sklearn":
         try:
             sk_model = to_sklearn_svr(dreg_model)
         except ModuleNotFoundError as e:
             raise BackendUnavailable("scikit-learn is not installed") from e
-        predict_fn = _wrap_sklearn_like(dreg_model, sk_model.predict)
+        predict_fn = _wrap_sklearn_like(dreg_model, sk_model.predict, "sklearn")
 
     else:  # numpy
         predict_fn = dreg_model.predict

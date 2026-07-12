@@ -200,6 +200,26 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
     noise = np.concatenate([negative, np.abs(negative), zeros])
     sigma = stats.get_laplace_sigma(noise)
     min_score = stats.get_laplace_quantile(sigma, 0.001)
+    score_values = infp_bed[score_col].to_numpy()
+    finite_scores = score_values[np.isfinite(score_values)]
+    if finite_scores.size:
+        logger.info(
+            "informative score distribution: min=%.4f q01=%.4f median=%.4f q99=%.4f max=%.4f; "
+            "negative=%d zero=%d noise=%d sigma=%s",
+            np.min(finite_scores), np.quantile(finite_scores, 0.01),
+            np.median(finite_scores), np.quantile(finite_scores, 0.99),
+            np.max(finite_scores), len(negative), len(zeros), len(noise),
+            f"{sigma:.6g}" if np.isfinite(sigma) else "nan",
+        )
+    else:
+        logger.warning("informative scores contain no finite values")
+
+    if not np.isfinite(min_score):
+        raise ValueError(
+            "could not estimate finite min_score from negative/zero score tail "
+            f"(negative={len(negative)}, zero={len(zeros)}); this usually means "
+            "the scoring backend or input/model convention is wrong"
+        )
 
     gap_bed = find_gap_infp(infp_bed[[chrom_col, start_col, end_col, score_col]], min_score)
     if gap_bed is not None and len(gap_bed) > 0:
@@ -364,6 +384,9 @@ def call_peaks(
     significant peaks only (columns chrom, start, end, score, prob,
     center)."""
     chrom_col, start_col, end_col, score_col = dense_infp.columns[:4]
+    if not np.isfinite(min_score):
+        raise ValueError(f"min_score must be finite before peak calling, got {min_score}")
+
     cor_mat = stats.build_cormat(dense_infp[start_col].to_numpy(), dense_infp[score_col].to_numpy())
 
     if peak_broad is None or len(peak_broad) == 0:

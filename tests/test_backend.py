@@ -2,6 +2,8 @@ import logging
 import sys
 import types
 
+import numpy as np
+
 from pydreg import backend
 
 
@@ -67,5 +69,48 @@ def test_explicit_cuml_build_scorer_raises_when_construction_fails(monkeypatch):
         backend.build_scorer(FakeModel(), "cuml")
     except backend.BackendUnavailable as e:
         assert "could not build a GPU model" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+class TinyDREGModel:
+    def __init__(self):
+        self.x_center = np.array([1.0, -1.0])
+        self.x_scale = np.array([2.0, 4.0])
+        self.y_scale = 3.0
+        self.y_center = -0.25
+
+    def predict(self, X):
+        X_scaled = (X - self.x_center) / self.x_scale
+        return (X_scaled[:, 0] - 2 * X_scaled[:, 1]) * self.y_scale + self.y_center
+
+
+def test_sklearn_like_wrapper_validates_matching_predictions():
+    model = TinyDREGModel()
+
+    def sk_predict(X_scaled):
+        return X_scaled[:, 0] - 2 * X_scaled[:, 1]
+
+    predict = backend._wrap_sklearn_like(model, sk_predict, "fake")
+    X = np.array([[1.0, -1.0], [3.0, 7.0], [5.0, -5.0]])
+
+    np.testing.assert_allclose(predict(X), model.predict(X))
+    # Second call uses the already-validated fast path.
+    np.testing.assert_allclose(predict(X), model.predict(X))
+
+
+def test_sklearn_like_wrapper_rejects_shifted_predictions():
+    model = TinyDREGModel()
+
+    def shifted_predict(X_scaled):
+        return X_scaled[:, 0] - 2 * X_scaled[:, 1] + 1.0
+
+    predict = backend._wrap_sklearn_like(model, shifted_predict, "fake")
+    X = np.array([[1.0, -1.0], [3.0, 7.0]])
+
+    try:
+        predict(X)
+    except backend.BackendUnavailable as e:
+        assert "do not match the NumPy reference" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from pydreg import peaks
-from pydreg.peaks import _r_colon, call_peaks, find_gap_infp, merge_broad_peak
+from pydreg.peaks import _r_colon, call_peaks, find_gap_infp, get_dense_infp, merge_broad_peak
 
 
 def test_r_colon_matches_r_semantics():
@@ -63,6 +63,25 @@ def test_find_gap_infp_no_gaps_below_threshold():
         {"chrom": ["chr1"] * 2, "start": [1000, 5000], "end": [1001, 5001], "score": [0.05, 0.05]}
     )
     assert find_gap_infp(df, threshold=0.2) is None
+
+
+def test_get_dense_infp_handles_no_negative_or_zero_scores():
+    df = pd.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "start": [100, 200, 300],
+            "end": [101, 201, 301],
+            "score": [0.1, 0.2, 0.3],
+        }
+    )
+
+    try:
+        get_dense_infp(df, lambda bed_df: np.full(len(bed_df), 0.1))
+    except ValueError as e:
+        assert "could not estimate finite min_score" in str(e)
+        assert "negative=0, zero=0" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_call_peaks_parallel_matches_serial(monkeypatch, rf_model):
