@@ -95,24 +95,35 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
             continue
         i_left = li + int(above.min())
         i_right = li + int(above.max())
-        i_peak = li + int(np.argmax(window))
 
-        w_left = x[i_peak] - x[i_left]
-        w_right = x[i_right] - x[i_peak]
+        if x[i_right] - x[i_left] < 100:
+            i_peak = i_left + int(np.argmax(y[i_left : i_right + 1]))
+            out_rows.append(
+                dict(
+                    start=x[i_left], stop=x[i_right],
+                    score=float(np.max(y_org[i_left : i_right + 1])),
+                    prob=-1.0, smooth_mode=x[i_peak], original_mode=0.0, centroid=0.0,
+                )
+            )
+            continue
+
+        y_max = float(np.max(y[i_left : i_right + 1]))
+        i_peak = i_left + int(np.argmax(y[i_left : i_right + 1]))
+        left_at_fifth = np.nonzero(y[i_left : i_peak + 1] >= y_max / 5)[0]
+        y_left = i_left + int(left_at_fifth[0]) if left_at_fifth.shape[0] else i_left
+        right_at_fifth = np.nonzero(y[i_peak : i_right + 1] <= y_max / 5)[0]
+        y_right = i_peak + int(right_at_fifth[0]) if right_at_fifth.shape[0] else i_right
+
+        w_left = x[i_peak] - x[y_left]
+        w_right = x[y_right] - x[i_peak]
         if w_left > 2 * w_right and w_right > 300:
             w_left = 2 * w_right
         if 2 * w_left < w_right and w_left > 300:
             w_right = 2 * w_left
 
-        if i_right - i_left < 5:
-            y_p = i_left + int(np.argmax(y[i_left : i_right + 1]))
-            out_rows.append(
-                dict(
-                    start=x[i_left], stop=x[i_right],
-                    score=float(np.max(y_org[i_left : i_right + 1])),
-                    prob=-1.0, smooth_mode=x[y_p], original_mode=0.0, centroid=0.0,
-                )
-            )
+        start = x[i_peak] - w_left + 10
+        stop = x[i_peak] + w_right - 10
+        if not (start < stop and (w_right + w_left) >= 100):
             continue
 
         i_sample = _sample_indices(y, i_left, i_right, i_peak)
@@ -128,7 +139,7 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
         original_mode = x[i_left + int(np.argmax(y_org[i_left : i_right + 1]))]
         out_rows.append(
             dict(
-                start=x[i_peak] - w_left + 10, stop=x[i_peak] + w_right - 10,
+                start=start, stop=stop,
                 score=float(np.max(y_org[i_left : i_right + 1])),
                 prob=1 - pv, smooth_mode=x[i_peak], original_mode=original_mode, centroid=x_wc,
             )
@@ -141,22 +152,17 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
 
 def _sample_indices(y, i_left, i_right, i_peak):
     """The 5 representative points used for the pmv_laplace p-value test."""
-    if i_right - i_left < 9:
-        window_idx = np.arange(i_left, i_right + 1)
-        order = np.argsort(-y[window_idx], kind="stable")
-        return np.sort(window_idx[order[:5]])
-
-    patterns = [
-        [i_peak - 4, i_peak - 2, i_peak, i_peak + 2, i_peak + 4],
-        [i_peak - 2, i_peak, i_peak + 2, i_peak + 4, i_peak + 6],
-        [i_peak - 6, i_peak - 4, i_peak - 2, i_peak, i_peak + 2],
-        [i_peak - 8, i_peak - 6, i_peak - 4, i_peak - 2, i_peak],
-        [i_peak, i_peak + 2, i_peak + 4, i_peak + 6, i_peak + 8],
-    ]
-    for pattern in patterns:
-        if all(i_left <= p <= i_right for p in pattern):
-            return np.array(pattern)
-    return None
+    best = None
+    best_sum = -np.inf
+    n = y.shape[0]
+    for offset in range(5):
+        sample = i_peak - offset * 2 + np.arange(0, 10, 2)
+        if np.all(sample >= 0) and np.all(sample < n):
+            sample_sum = np.nansum(y[sample])
+            if sample_sum > best_sum:
+                best = sample
+                best_sum = sample_sum
+    return best
 
 
 def _split_peak(model, rp):

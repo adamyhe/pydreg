@@ -93,6 +93,30 @@ def _r_seq(from_, to, by):
 # computed once, lazily, and reused by every pmv_laplace call in the process.
 _Z_GRID = None
 _Z_WIDTHS = None
+_PMV_CDF_MAXPTS = None
+_PMV_CDF_EPS = 1e-5
+
+
+def set_pmv_laplace_cdf_options(maxpts=None, eps=1e-5):
+    """Set SciPy multivariate-normal CDF controls used inside pmv_laplace().
+
+    eps=1e-5 and maxpts=None preserve SciPy's default accuracy behavior.
+    Larger eps and/or a finite maxpts give approximate p-values faster.
+    """
+    global _PMV_CDF_MAXPTS, _PMV_CDF_EPS
+    if maxpts is not None:
+        maxpts = int(maxpts)
+        if maxpts < 1:
+            raise ValueError(f"pmv_laplace_cdf_maxpts must be >= 1, got {maxpts}")
+    eps = float(eps)
+    if eps <= 0:
+        raise ValueError(f"pmv_laplace_cdf_eps must be > 0, got {eps}")
+    _PMV_CDF_MAXPTS = maxpts
+    _PMV_CDF_EPS = eps
+
+
+def get_pmv_laplace_cdf_options():
+    return {"maxpts": _PMV_CDF_MAXPTS, "eps": _PMV_CDF_EPS}
 
 
 def _z_grid():
@@ -119,7 +143,7 @@ def _z_grid():
 # (and avoids rebuilding the frozen multivariate_normal on every one of the
 # thousands of per-summit pmv_laplace calls in a run).
 _mvn_cache = {"cor_mat": None, "mvn": None}
-_pmv_laplace_profile = {"calls": 0, "seconds": 0.0}
+_pmv_laplace_profile = {"calls": 0, "seconds": 0.0, "cdf_evals": 0}
 
 
 def _cached_mvn(cor_mat):
@@ -130,9 +154,34 @@ def _cached_mvn(cor_mat):
     return _mvn_cache["mvn"]
 
 
+def _box_cdf(abs_x, cor_mat):
+    """Normal probability in [-abs_x, abs_x]^d.
+
+    The frozen scipy distribution is fastest for default high-accuracy calls
+    because it caches the covariance decomposition. When approximate controls
+    are requested, SciPy exposes them only on the unfrozen function form.
+    """
+    if _PMV_CDF_MAXPTS is None and _PMV_CDF_EPS == 1e-5:
+        return float(_cached_mvn(cor_mat).cdf(abs_x, lower_limit=-abs_x))
+    d = cor_mat.shape[0]
+    return float(
+        multivariate_normal.cdf(
+            abs_x,
+            mean=np.zeros(d),
+            cov=cor_mat,
+            allow_singular=True,
+            maxpts=_PMV_CDF_MAXPTS,
+            abseps=_PMV_CDF_EPS,
+            releps=_PMV_CDF_EPS,
+            lower_limit=-abs_x,
+        )
+    )
+
+
 def reset_pmv_laplace_profile():
     _pmv_laplace_profile["calls"] = 0
     _pmv_laplace_profile["seconds"] = 0.0
+    _pmv_laplace_profile["cdf_evals"] = 0
 
 
 def get_pmv_laplace_profile():
@@ -163,25 +212,28 @@ def pmv_laplace(x, cor_mat):
     run shares one cor_mat, and the grid is a pure constant -- since this
     runs once per peak summit, genome-wide."""
     t0 = time.perf_counter()
+    cdf_evals = 0
     try:
         x = np.asarray(x, dtype=float)
-        mvn = _cached_mvn(cor_mat)
 
         abs_x = np.abs(x)
-        p_norm = float(mvn.cdf(abs_x, lower_limit=-abs_x))
+        p_norm = _box_cdf(abs_x, cor_mat)
+        cdf_evals += 1
         if p_norm > 0.99:
             return p_norm
 
         z, widths = _z_grid()
         p0 = np.array(
             [
-                float(mvn.cdf(abs_x / np.sqrt(z0), lower_limit=-abs_x / np.sqrt(z0)))
+                _box_cdf(abs_x / np.sqrt(z0), cor_mat)
                 * np.exp(-z0)
                 for z0 in z
             ]
         )
+        cdf_evals += z.shape[0]
         p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
         return p_max
     finally:
         _pmv_laplace_profile["calls"] += 1
         _pmv_laplace_profile["seconds"] += time.perf_counter() - t0
+        _pmv_laplace_profile["cdf_evals"] += cdf_evals

@@ -62,6 +62,68 @@ def _resolve_query_chunk(scorer_backend, query_chunk=None, cuml_query_chunk=800_
     return backend.DEFAULT_QUERY_CHUNK[scorer_backend]
 
 
+def _check_minus_strand_sign(
+    bw_minus,
+    infp_bed,
+    flank=1000,
+    max_windows=512,
+    min_nonzero=50,
+    max_positive_fraction=0.99,
+):
+    """Fail early when the minus bigWig looks positive-signed.
+
+    dREG's pretrained feature scaling expects reverse-strand signal to be
+    negative. Positive-signed minus tracks can still pass informative-position
+    scanning, then produce an all-positive score distribution with no
+    negative/zero noise tail for min_score estimation. Sampling around already
+    discovered informative positions catches that convention mismatch before
+    the expensive model-scoring pass.
+    """
+    if infp_bed is None or len(infp_bed) == 0:
+        return
+
+    chrom_col, start_col = infp_bed.columns[:2]
+    take = min(max_windows, len(infp_bed))
+    sample_idx = np.linspace(0, len(infp_bed) - 1, take, dtype=int)
+
+    positive = 0
+    negative = 0
+    nonzero = 0
+    minus_sizes = io.chrom_sizes(bw_minus)
+    for _, row in infp_bed.iloc[sample_idx].iterrows():
+        chrom = row[chrom_col]
+        if chrom not in minus_sizes:
+            continue
+        center = int(row[start_col])
+        values = io.fetch_raw(bw_minus, chrom, center - flank, center + flank + 1)
+        finite = values[np.isfinite(values)]
+        observed = finite[finite != 0]
+        if observed.size == 0:
+            continue
+        positive += int(np.count_nonzero(observed > 0))
+        negative += int(np.count_nonzero(observed < 0))
+        nonzero += int(observed.size)
+
+    if nonzero == 0:
+        logger.info("minus-strand sign check skipped: no nonzero sampled minus signal")
+        return
+
+    positive_fraction = positive / nonzero
+    logger.info(
+        "minus-strand sign check: %d sampled nonzero bp, %d positive, %d negative",
+        nonzero, positive, negative,
+    )
+    if nonzero >= min_nonzero and negative == 0 and positive_fraction >= max_positive_fraction:
+        raise ValueError(
+            "minus-strand bigWig appears to be positive-signed "
+            f"({positive}/{nonzero} sampled nonzero values > 0, 0 < 0). "
+            "pydreg expects the minus-strand bigWig to contain negative-signed "
+            "reverse-strand signal, matching legacy dREG preprocessing. "
+            "Invert the minus track values or rerun with --no-check-minus-sign "
+            "if this dataset is intentionally nonstandard."
+        )
+
+
 def run(
     plus_bw_path,
     minus_bw_path,
@@ -74,8 +136,11 @@ def run(
     cuml_query_chunk=800_000,
     peak_calling_cores=1,
     peak_calling_block_width=100,
+    pmv_laplace_cdf_maxpts=None,
+    pmv_laplace_cdf_eps=1e-5,
     write_outputs=True,
     progress=False,
+    check_minus_sign=True,
 ):
     """Runs the full dREG peak-calling pipeline on a pair of bigWig files
     and (by default) writes the standard output set alongside `out_prefix`.
@@ -99,6 +164,8 @@ def run(
     with _timed("scanning informative positions"):
         infp_bed = infp.get_informative_positions(bw_plus, bw_minus, progress=progress)
     logger.info("%d informative positions found", len(infp_bed))
+    if check_minus_sign:
+        _check_minus_strand_sign(bw_minus, infp_bed)
 
     logger.info("scoring informative positions...")
     with _timed("scoring informative positions"):
@@ -128,6 +195,8 @@ def run(
             smoothwidth=smoothwidth, pv_adjust=pv_adjust, pv_threshold=pv_threshold,
             progress=progress, peak_calling_cores=peak_calling_cores,
             peak_calling_block_width=peak_calling_block_width,
+            pmv_laplace_cdf_maxpts=pmv_laplace_cdf_maxpts,
+            pmv_laplace_cdf_eps=pmv_laplace_cdf_eps,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",

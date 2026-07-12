@@ -26,3 +26,14 @@ def test_find_rf_peaks_returns_none_with_no_signal(rf_model):
     y = np.random.default_rng(0).normal(scale=0.01, size=len(x))
     result = rfsplit.find_rf_peaks(rf_model, x, y, amp_threshold=0.5, smoothwidth=4, cor_mat=np.eye(5))
     assert result is None
+
+
+def test_find_rf_peaks_uses_narrow_peak_sentinel(rf_model):
+    x = np.arange(0, 400, 10)
+    y = np.exp(-((x - 200) ** 2) / (2 * 20**2))
+
+    result = rfsplit.find_rf_peaks(rf_model, x, y, amp_threshold=0.2, smoothwidth=4, cor_mat=np.eye(5))
+
+    assert result is not None
+    assert len(result) == 1
+    assert result["prob"].iloc[0] == -1

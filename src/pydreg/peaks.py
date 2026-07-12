@@ -285,11 +285,19 @@ def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col
     return newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(drop=True)
 
 
-def _init_peak_worker(rf_model, min_score, smoothwidth, cor_mat):
+def _init_peak_worker(
+    rf_model,
+    min_score,
+    smoothwidth,
+    cor_mat,
+    pmv_laplace_cdf_maxpts=None,
+    pmv_laplace_cdf_eps=1e-5,
+):
     _WORKER_STATE["rf_model"] = rf_model
     _WORKER_STATE["min_score"] = min_score
     _WORKER_STATE["smoothwidth"] = smoothwidth
     _WORKER_STATE["cor_mat"] = cor_mat
+    stats.set_pmv_laplace_cdf_options(pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps)
 
 
 def _call_peak_block(task):
@@ -324,6 +332,7 @@ def _call_peak_block(task):
         "seconds": time.perf_counter() - t0,
         "pmv_calls": pmv_after["calls"] - pmv_before["calls"],
         "pmv_seconds": pmv_after["seconds"] - pmv_before["seconds"],
+        "pmv_cdf_evals": pmv_after["cdf_evals"] - pmv_before["cdf_evals"],
     }
     if not raw_rows:
         return None, profile
@@ -362,6 +371,7 @@ def call_peaks(
     dense_infp, peak_broad, min_score, rf_model,
     smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
     peak_calling_cores=1, peak_calling_block_width=100,
+    pmv_laplace_cdf_maxpts=None, pmv_laplace_cdf_eps=1e-5,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
@@ -397,21 +407,39 @@ def call_peaks(
 
     dense_sorted = dense_infp.sort_values([chrom_col, start_col], kind="stable")
     block_width = max(1, int(peak_calling_block_width))
+    if pmv_laplace_cdf_maxpts is not None:
+        pmv_laplace_cdf_maxpts = int(pmv_laplace_cdf_maxpts)
+    pmv_laplace_cdf_eps = float(pmv_laplace_cdf_eps)
     tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width))
     logger.info(
-        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s)",
+        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s) "
+        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g)",
         len(candidates), len(tasks), block_width, peak_calling_cores,
+        pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps,
     )
     raw_rows = []
     completed_results = [None] * len(tasks)
-    profile_totals = {"peaks": 0, "seconds": 0.0, "pmv_calls": 0, "pmv_seconds": 0.0}
+    profile_totals = {
+        "peaks": 0,
+        "seconds": 0.0,
+        "pmv_calls": 0,
+        "pmv_seconds": 0.0,
+        "pmv_cdf_evals": 0,
+    }
     completed_blocks = 0
     last_profile_log = time.perf_counter()
     pbar = tqdm(
         total=len(candidates), desc="calling peaks", unit="peak",
         disable=None if progress else True,
     )
-    _init_peak_worker(rf_model, min_score, smoothwidth, cor_mat)
+    _init_peak_worker(
+        rf_model,
+        min_score,
+        smoothwidth,
+        cor_mat,
+        pmv_laplace_cdf_maxpts,
+        pmv_laplace_cdf_eps,
+    )
     stats.reset_pmv_laplace_profile()
 
     def collect_profile(profile):
@@ -427,9 +455,10 @@ def call_peaks(
         non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
         logger.info(
             "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
-            "%.2fs in %d pmv_laplace call(s), %.2fs non-pmv",
+            "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv",
             completed_blocks, len(tasks), profile_totals["peaks"], profile_totals["seconds"],
-            profile_totals["pmv_seconds"], profile_totals["pmv_calls"], non_pmv_seconds,
+            profile_totals["pmv_seconds"], profile_totals["pmv_calls"],
+            profile_totals["pmv_cdf_evals"], non_pmv_seconds,
         )
 
     if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
@@ -437,7 +466,14 @@ def call_peaks(
             with ProcessPoolExecutor(
                 max_workers=peak_calling_cores,
                 initializer=_init_peak_worker,
-                initargs=(rf_model, min_score, smoothwidth, cor_mat),
+                initargs=(
+                    rf_model,
+                    min_score,
+                    smoothwidth,
+                    cor_mat,
+                    pmv_laplace_cdf_maxpts,
+                    pmv_laplace_cdf_eps,
+                ),
             ) as pool:
                 futures = {pool.submit(_call_peak_block, task): idx for idx, task in enumerate(tasks)}
                 for future in as_completed(futures):
@@ -470,9 +506,10 @@ def call_peaks(
     raw_rows = [result for result in completed_results if result is not None]
     non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
     logger.info(
-        "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s), %.2fs non-pmv",
+        "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s) / "
+        "%d CDF eval(s), %.2fs non-pmv",
         profile_totals["seconds"], profile_totals["pmv_seconds"],
-        profile_totals["pmv_calls"], non_pmv_seconds,
+        profile_totals["pmv_calls"], profile_totals["pmv_cdf_evals"], non_pmv_seconds,
     )
 
     if not raw_rows:

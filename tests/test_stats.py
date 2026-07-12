@@ -1,6 +1,15 @@
 import numpy as np
 
-from pydreg.stats import build_cormat, get_laplace_quantile, get_laplace_sigma, pmv_laplace, qlaplace
+from pydreg.stats import (
+    build_cormat,
+    get_laplace_quantile,
+    get_laplace_sigma,
+    get_pmv_laplace_profile,
+    pmv_laplace,
+    qlaplace,
+    reset_pmv_laplace_profile,
+    set_pmv_laplace_cdf_options,
+)
 
 
 def test_qlaplace_median_is_zero():
@@ -41,6 +50,26 @@ def test_pmv_laplace_in_unit_interval_and_saturates_for_large_x():
 
     p_large = pmv_laplace(np.full(5, 5.0), cor_mat)
     assert p_large == 1.0
+
+
+def test_pmv_laplace_tracks_cdf_evals():
+    cor_mat = np.eye(5) * 0.01
+    x = np.array([0.1, 0.15, 0.12, 0.09, 0.11])
+    reset_pmv_laplace_profile()
+    pmv_laplace(x, cor_mat)
+    assert get_pmv_laplace_profile()["cdf_evals"] > 1
+    reset_pmv_laplace_profile()
+
+
+def test_pmv_laplace_cdf_options_keep_result_in_unit_interval():
+    cor_mat = np.eye(5) * 0.01
+    x = np.array([0.1, 0.15, 0.12, 0.09, 0.11])
+    try:
+        set_pmv_laplace_cdf_options(maxpts=500, eps=1e-3)
+        p = pmv_laplace(x, cor_mat)
+    finally:
+        set_pmv_laplace_cdf_options()
+    assert 0.0 <= p <= 1.0
 
 
 def test_pmv_laplace_z_grid_matches_r_seq_exactly():

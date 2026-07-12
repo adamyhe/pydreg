@@ -53,12 +53,31 @@ def main(argv=None):
         help="candidate broad peaks per peak-calling worker task; smaller "
         "blocks improve load balancing on uneven broad peaks",
     )
+    parser.add_argument(
+        "--pmv-laplace-cdf-maxpts",
+        type=int,
+        default=None,
+        help="maximum integration points for each SciPy multivariate-normal "
+        "CDF inside pmv_laplace; unset preserves SciPy's default",
+    )
+    parser.add_argument(
+        "--pmv-laplace-cdf-eps",
+        type=float,
+        default=1e-5,
+        help="absolute/relative tolerance for each SciPy multivariate-normal "
+        "CDF inside pmv_laplace; 1e-5 preserves SciPy's default",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--no-progress",
         action="store_true",
         help="disable tqdm progress bars (shown by default on a terminal; "
         "auto-hidden anyway when stdout is redirected, e.g. to a log file)",
+    )
+    parser.add_argument(
+        "--no-check-minus-sign",
+        action="store_true",
+        help="skip the preflight check that minus-strand signal is negative-signed",
     )
     args = parser.parse_args(argv)
 
@@ -80,7 +99,10 @@ def main(argv=None):
         cuml_query_chunk=args.cuml_query_chunk,
         peak_calling_cores=args.peak_calling_cores,
         peak_calling_block_width=args.peak_calling_block_width,
+        pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
+        pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
         progress=not args.no_progress,
+        check_minus_sign=not args.no_check_minus_sign,
     )
 
 
