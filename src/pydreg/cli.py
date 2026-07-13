@@ -74,11 +74,6 @@ def main(argv=None):
         help="disable tqdm progress bars (shown by default on a terminal; "
         "auto-hidden anyway when stdout is redirected, e.g. to a log file)",
     )
-    parser.add_argument(
-        "--no-check-minus-sign",
-        action="store_true",
-        help="skip the preflight check that minus-strand signal is negative-signed",
-    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -102,7 +97,6 @@ def main(argv=None):
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
         progress=not args.no_progress,
-        check_minus_sign=not args.no_check_minus_sign,
     )
 
 

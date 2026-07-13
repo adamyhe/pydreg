@@ -95,9 +95,18 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
             continue
         i_left = li + int(above.min())
         i_right = li + int(above.max())
+        i_peak = i_left + int(np.argmax(y[i_left : i_right + 1]))
 
-        if x[i_right] - x[i_left] < 100:
-            i_peak = i_left + int(np.argmax(y[i_left : i_right + 1]))
+        w_left = x[i_peak] - x[i_left]
+        w_right = x[i_right] - x[i_peak]
+        if w_left > 2 * w_right and w_right > 300:
+            w_left = 2 * w_right
+        if 2 * w_left < w_right and w_left > 300:
+            w_right = 2 * w_left
+
+        if i_right - i_left < 5:
+            # y.p, R's re-derived argmax over this same [i_left,i_right]
+            # window, is always equal to i_peak (identical window) -- reuse it.
             out_rows.append(
                 dict(
                     start=x[i_left], stop=x[i_right],
@@ -105,25 +114,6 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
                     prob=-1.0, smooth_mode=x[i_peak], original_mode=0.0, centroid=0.0,
                 )
             )
-            continue
-
-        y_max = float(np.max(y[i_left : i_right + 1]))
-        i_peak = i_left + int(np.argmax(y[i_left : i_right + 1]))
-        left_at_fifth = np.nonzero(y[i_left : i_peak + 1] >= y_max / 5)[0]
-        y_left = i_left + int(left_at_fifth[0]) if left_at_fifth.shape[0] else i_left
-        right_at_fifth = np.nonzero(y[i_peak : i_right + 1] <= y_max / 5)[0]
-        y_right = i_peak + int(right_at_fifth[0]) if right_at_fifth.shape[0] else i_right
-
-        w_left = x[i_peak] - x[y_left]
-        w_right = x[y_right] - x[i_peak]
-        if w_left > 2 * w_right and w_right > 300:
-            w_left = 2 * w_right
-        if 2 * w_left < w_right and w_left > 300:
-            w_right = 2 * w_left
-
-        start = x[i_peak] - w_left + 10
-        stop = x[i_peak] + w_right - 10
-        if not (start < stop and (w_right + w_left) >= 100):
             continue
 
         i_sample = _sample_indices(y, i_left, i_right, i_peak)
@@ -139,7 +129,7 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
         original_mode = x[i_left + int(np.argmax(y_org[i_left : i_right + 1]))]
         out_rows.append(
             dict(
-                start=start, stop=stop,
+                start=x[i_peak] - w_left + 10, stop=x[i_peak] + w_right - 10,
                 score=float(np.max(y_org[i_left : i_right + 1])),
                 prob=1 - pv, smooth_mode=x[i_peak], original_mode=original_mode, centroid=x_wc,
             )
@@ -151,18 +141,34 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
 
 
 def _sample_indices(y, i_left, i_right, i_peak):
-    """The 5 representative points used for the pmv_laplace p-value test."""
-    best = None
-    best_sum = -np.inf
-    n = y.shape[0]
-    for offset in range(5):
-        sample = i_peak - offset * 2 + np.arange(0, 10, 2)
-        if np.all(sample >= 0) and np.all(sample < n):
-            sample_sum = np.nansum(y[sample])
-            if sample_sum > best_sum:
-                best = sample
-                best_sum = sample_sum
-    return best
+    """The 5 representative points used for the pmv_laplace p-value test,
+    ported from find_rf_peaks() itself (peak_calling_rf.R:83-116) -- NOT
+    from the disabled find_peaks() (peak_calling.R:576-584), which uses a
+    different search space (global array bounds, not [i_left,i_right]) and
+    a different selection rule (maximize sum, not first-fit).
+
+    i_right - i_left < 9: sort the 5 highest-y points in [i_left,i_right] by
+    position. Otherwise: 5 fixed offset patterns anchored at i_peak, spaced
+    2bp apart; return the first pattern fully contained in [i_left,i_right]
+    (R's `x %in% i.left:i.right`, an integer-range containment test), or
+    None if none fit (R leaves the sample as NA in this case; the caller's
+    NaN check produces the same "no p-value" outcome either way)."""
+    if i_right - i_left < 9:
+        window = np.arange(i_left, i_right + 1)
+        top5 = np.argsort(-y[window], kind="stable")[:5]
+        return np.sort(window[top5])
+
+    patterns = (
+        i_peak + np.array([-4, -2, 0, 2, 4]),
+        i_peak + np.array([-2, 0, 2, 4, 6]),
+        i_peak + np.array([-6, -4, -2, 0, 2]),
+        i_peak + np.array([-8, -6, -4, -2, 0]),
+        i_peak + np.array([0, 2, 4, 6, 8]),
+    )
+    for pattern in patterns:
+        if np.all(pattern >= i_left) and np.all(pattern <= i_right):
+            return pattern
+    return None
 
 
 def _split_peak(model, rp):
@@ -238,6 +244,7 @@ def _split_peak(model, rp):
 
 
 def _update_split_features(row):
+    row["dist"] = row["stop"] - row["start"]
     row["LD"] = row["valley"] - row["start"]
     row["RD"] = row["stop"] - row["valley"]
     row["maxy"] = max(row["LS"], row["RS"])
