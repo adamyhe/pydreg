@@ -277,3 +277,74 @@ selectable via `--backend sklearn` for anyone who wants it, and
 
 No test relied on the old auto-detection order (`tests/test_pipeline.py`
 pins `backend_name="numpy"` explicitly); all 25 tests still pass.
+
+## 2026-07-14 — `pmv_laplace`'s default CDF precision was ~100-200x tighter than R's own reference, dominating peak-calling runtime
+
+A real production run (`--peak-calling-cores 16`) reported: 40/807 blocks
+done, 9817.23s of summed block CPU, with **9539.59s (97.2%) inside
+`stats.pmv_laplace`** across 6859 calls / 1,245,449
+`scipy.stats.multivariate_normal.cdf` evaluations (~7.7ms/eval). Extrapolated
+to the full 807 blocks, this was many hours of wall-clock even parallelized
+across 16 cores — parallelism (`peaks.py`'s `ProcessPoolExecutor`-based block
+splitting, confirmed embarrassingly-parallel with no serialization
+bottleneck) was already maxed out as a lever; the fix had to reduce the
+actual per-CDF-eval cost.
+
+**Root cause, not a tradeoff**: `pmv_laplace` calls `_box_cdf` up to 291
+times per invocation (1 initial check + a fixed 290-point z-integration
+grid — both counts confirmed exactly against the observed
+1,245,449 = 291×4271 + 1×2588 split). The original R
+(`_reference/dREG/dREG/R/peak_calling.R`'s `pmvLaplace`, calling
+`pmvnorm(...)` with no `algorithm=` override) runs on R's `mvtnorm`
+package's own default: `GenzBretz(maxpts=25000, abseps=1e-3, releps=0)`
+— confirmed directly from `mvtnorm`'s R source (`R/mvt.R`) and its
+`algorithms.Rd` doc, cross-checked via two independent sources. SciPy's own
+defaults when `maxpts`/`abseps` are left unset (pydreg's previous behavior)
+are `maxpts=1,000,000*dim=5,000,000`, `abseps=releps=1e-5` — **200x more
+points and 100x tighter error tolerance than R's own reference
+implementation ever used**. (`releps` is confirmed to have zero effect in
+SciPy's actual d≥3 dispatch code either way — only `abseps`/`maxpts`
+matter — so R's `releps=0` is moot.) So pydreg's previous "default" behavior
+wasn't faithful to R at all; it was needlessly over-precise, and that
+over-precision was the actual bottleneck.
+
+**Fix**: `stats.py`'s `_PMV_CDF_MAXPTS`/`_PMV_CDF_EPS` module defaults (and
+`set_pmv_laplace_cdf_options`'s parameter defaults) changed from
+`None`/`1e-5` (SciPy's unset defaults) to `25000`/`1e-3` (R's real
+`GenzBretz` defaults), propagated through every duplicate default (`cli.py`'s
+two flags, `pipeline.py:run()`, `peaks.py`'s `_init_peak_worker`/`call_peaks`
+— 6 signatures total, confirmed via grep). Also deleted `_box_cdf`'s
+unfrozen-fallback branch entirely: confirmed against SciPy 1.18.0's actual
+source that the frozen `multivariate_normal` constructor fully supports
+custom `maxpts`/`abseps`/`releps` (the old comment claiming otherwise was
+wrong), so there's now one code path, always frozen/cached, ~9% faster on
+its own. The cache is now keyed on a version counter incremented by
+`set_pmv_laplace_cdf_options()` rather than comparing option values for
+equality, avoiding a float-equality-as-cache-key smell.
+
+**Measured** (representative order-5 Toeplitz `cor_mat`, a "hard"
+mid-probability `x`, 5 reps each):
+
+| | mean time/call | std(p_max) | cdf_evals/call |
+|---|---|---|---|
+| old (SciPy unset defaults) | 3.03s | 8.4e-7 | 291 |
+| new (R's real defaults) | 0.235s | 2.6e-5 | 291 |
+
+**~12.9x speedup**, matching the ~13x predicted from isolated per-eval
+benchmarking during investigation. The absolute difference between the old
+and new mean `p_max` (1.0e-6) is far smaller than the pipeline's own
+pre-existing, already-documented QMC run-to-run noise band (~1e-4 to 1e-8,
+this file's 2026-07-09 entry) — i.e. the new, faster default is not less
+accurate in any way that matters; it's simply no longer computing precision
+R's own reference implementation never asked for.
+
+Excluded from this fix (real but smaller/riskier wins, not pursued):
+batching the 290 z-grid evals into one 2D SciPy call (~16% extra, measured
+during investigation, but needs its own validation that SciPy's 2D batching
+doesn't correlate QMC randomness across grid points); monkeypatching
+SciPy's private `_qmvnt._cbc_lattice` to cache lattice construction across
+calls (~1.5-2x extra at low `maxpts`, but couples to unstable private SciPy
+internals). Worth revisiting if `pmv_laplace` is still the dominant cost
+after this fix at real genome-wide scale.
+
+All 38 tests pass.

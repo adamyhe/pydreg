@@ -290,8 +290,8 @@ def _init_peak_worker(
     min_score,
     smoothwidth,
     cor_mat,
-    pmv_laplace_cdf_maxpts=None,
-    pmv_laplace_cdf_eps=1e-5,
+    pmv_laplace_cdf_maxpts=25000,
+    pmv_laplace_cdf_eps=1e-3,
 ):
     _WORKER_STATE["rf_model"] = rf_model
     _WORKER_STATE["min_score"] = min_score
@@ -371,7 +371,7 @@ def call_peaks(
     dense_infp, peak_broad, min_score, rf_model,
     smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
     peak_calling_cores=1, peak_calling_block_width=100,
-    pmv_laplace_cdf_maxpts=None, pmv_laplace_cdf_eps=1e-5,
+    pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=1e-3,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to

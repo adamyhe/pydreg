@@ -56,16 +56,20 @@ def main(argv=None):
     parser.add_argument(
         "--pmv-laplace-cdf-maxpts",
         type=int,
-        default=None,
+        default=25000,
         help="maximum integration points for each SciPy multivariate-normal "
-        "CDF inside pmv_laplace; unset preserves SciPy's default",
+        "CDF inside pmv_laplace; 25000 matches R's mvtnorm::pmvnorm()/"
+        "GenzBretz() default. Lower values trade fidelity for further speed; "
+        "higher values exceed what R's own reference implementation ever computed",
     )
     parser.add_argument(
         "--pmv-laplace-cdf-eps",
         type=float,
-        default=1e-5,
+        default=1e-3,
         help="absolute/relative tolerance for each SciPy multivariate-normal "
-        "CDF inside pmv_laplace; 1e-5 preserves SciPy's default",
+        "CDF inside pmv_laplace; 1e-3 matches R's mvtnorm::pmvnorm()/"
+        "GenzBretz() default. Lower values increase precision beyond R's own "
+        "reference implementation, at a large speed cost",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(

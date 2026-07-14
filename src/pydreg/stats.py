@@ -93,17 +93,29 @@ def _r_seq(from_, to, by):
 # computed once, lazily, and reused by every pmv_laplace call in the process.
 _Z_GRID = None
 _Z_WIDTHS = None
-_PMV_CDF_MAXPTS = None
-_PMV_CDF_EPS = 1e-5
+# R's mvtnorm::pmvnorm() (called with no `algorithm=` override by peak_calling.R's
+# pmvLaplace()) runs on mvtnorm's own GenzBretz(maxpts=25000, abseps=1e-3, releps=0)
+# default -- confirmed from mvtnorm's R source (R/mvt.R) and its algorithms.Rd doc.
+# SciPy's own unset defaults (maxpts=1e6*dim, abseps=releps=1e-5) are 200x/100x
+# tighter than that -- i.e. far MORE precise than what the R reference this is
+# ported from ever actually computed, which is why leaving these unset was both
+# unfaithful and (consequently) the dominant cost in peak calling. releps has no
+# effect on SciPy's actual d>=3 dispatch either way, so R's releps=0 is moot.
+_PMV_CDF_MAXPTS = 25000
+_PMV_CDF_EPS = 1e-3
+_pmv_cdf_version = 0
 
 
-def set_pmv_laplace_cdf_options(maxpts=None, eps=1e-5):
+def set_pmv_laplace_cdf_options(maxpts=25000, eps=1e-3):
     """Set SciPy multivariate-normal CDF controls used inside pmv_laplace().
 
-    eps=1e-5 and maxpts=None preserve SciPy's default accuracy behavior.
-    Larger eps and/or a finite maxpts give approximate p-values faster.
+    maxpts=25000, eps=1e-3 (for both abseps and releps) are R's own
+    mvtnorm::pmvnorm()/GenzBretz() defaults -- the exact precision the
+    pretrained model's p-values were produced under, not an approximation.
+    Lower values trade fidelity for further speed; higher values exceed
+    what R's own reference implementation ever computed.
     """
-    global _PMV_CDF_MAXPTS, _PMV_CDF_EPS
+    global _PMV_CDF_MAXPTS, _PMV_CDF_EPS, _pmv_cdf_version
     if maxpts is not None:
         maxpts = int(maxpts)
         if maxpts < 1:
@@ -113,6 +125,7 @@ def set_pmv_laplace_cdf_options(maxpts=None, eps=1e-5):
         raise ValueError(f"pmv_laplace_cdf_eps must be > 0, got {eps}")
     _PMV_CDF_MAXPTS = maxpts
     _PMV_CDF_EPS = eps
+    _pmv_cdf_version += 1
 
 
 def get_pmv_laplace_cdf_options():
@@ -139,43 +152,37 @@ def _z_grid():
 
 
 # Single-slot cache: a whole call_peaks run reuses one genome-wide cor_mat
-# object, so identity comparison against the last-seen array is sufficient
-# (and avoids rebuilding the frozen multivariate_normal on every one of the
-# thousands of per-summit pmv_laplace calls in a run).
-_mvn_cache = {"cor_mat": None, "mvn": None}
+# object and one set of CDF options, so identity/version comparison against
+# the last-seen values is sufficient (and avoids rebuilding the frozen
+# multivariate_normal on every one of the thousands of per-summit pmv_laplace
+# calls in a run). Keyed on a version counter rather than the option values
+# themselves to avoid float-equality-as-cache-key.
+_mvn_cache = {"cor_mat": None, "version": None, "mvn": None}
 _pmv_laplace_profile = {"calls": 0, "seconds": 0.0, "cdf_evals": 0}
 
 
 def _cached_mvn(cor_mat):
-    if _mvn_cache["cor_mat"] is not cor_mat:
+    if _mvn_cache["cor_mat"] is not cor_mat or _mvn_cache["version"] != _pmv_cdf_version:
         d = cor_mat.shape[0]
-        _mvn_cache["mvn"] = multivariate_normal(mean=np.zeros(d), cov=cor_mat, allow_singular=True)
-        _mvn_cache["cor_mat"] = cor_mat
-    return _mvn_cache["mvn"]
-
-
-def _box_cdf(abs_x, cor_mat):
-    """Normal probability in [-abs_x, abs_x]^d.
-
-    The frozen scipy distribution is fastest for default high-accuracy calls
-    because it caches the covariance decomposition. When approximate controls
-    are requested, SciPy exposes them only on the unfrozen function form.
-    """
-    if _PMV_CDF_MAXPTS is None and _PMV_CDF_EPS == 1e-5:
-        return float(_cached_mvn(cor_mat).cdf(abs_x, lower_limit=-abs_x))
-    d = cor_mat.shape[0]
-    return float(
-        multivariate_normal.cdf(
-            abs_x,
+        _mvn_cache["mvn"] = multivariate_normal(
             mean=np.zeros(d),
             cov=cor_mat,
             allow_singular=True,
             maxpts=_PMV_CDF_MAXPTS,
             abseps=_PMV_CDF_EPS,
             releps=_PMV_CDF_EPS,
-            lower_limit=-abs_x,
         )
-    )
+        _mvn_cache["cor_mat"] = cor_mat
+        _mvn_cache["version"] = _pmv_cdf_version
+    return _mvn_cache["mvn"]
+
+
+def _box_cdf(abs_x, cor_mat):
+    """Normal probability in [-abs_x, abs_x]^d. The frozen scipy distribution
+    fully supports custom maxpts/abseps/releps (confirmed against SciPy's own
+    source -- it is not restricted to the unfrozen function form), so this is
+    always the fast, cached path regardless of which CDF options are active."""
+    return float(_cached_mvn(cor_mat).cdf(abs_x, lower_limit=-abs_x))
 
 
 def reset_pmv_laplace_profile():
@@ -207,10 +214,16 @@ def pmv_laplace(x, cor_mat):
     (unaveraged) function, so this returns `p_max` only, not the mean --
     not a bug to fix here.
 
-    Perf note: the frozen `multivariate_normal` (keyed on cor_mat's identity)
-    and the z-integration grid are cached across calls -- a whole call_peaks
-    run shares one cor_mat, and the grid is a pure constant -- since this
-    runs once per peak summit, genome-wide."""
+    Perf note: the frozen `multivariate_normal` (keyed on cor_mat's identity
+    and the current CDF-option version) and the z-integration grid are cached
+    across calls -- a whole call_peaks run shares one cor_mat, and the grid
+    is a pure constant -- since this runs once per peak summit, genome-wide.
+    The dominant cost is the up to 291 CDF evaluations per call themselves;
+    see set_pmv_laplace_cdf_options()'s docstring -- their default precision
+    now matches R's own mvtnorm::pmvnorm()/GenzBretz() defaults exactly
+    (previously left at SciPy's own, ~100-200x tighter, unset defaults,
+    which was both unfaithful to R and the actual root cause of a severe
+    peak-calling performance bottleneck -- see docs/PERF_LOG.md)."""
     t0 = time.perf_counter()
     cdf_evals = 0
     try:

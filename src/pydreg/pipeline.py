@@ -74,8 +74,8 @@ def run(
     cuml_query_chunk=800_000,
     peak_calling_cores=1,
     peak_calling_block_width=100,
-    pmv_laplace_cdf_maxpts=None,
-    pmv_laplace_cdf_eps=1e-5,
+    pmv_laplace_cdf_maxpts=25000,
+    pmv_laplace_cdf_eps=1e-3,
     write_outputs=True,
     progress=False,
 ):
