@@ -1,5 +1,6 @@
 import numpy as np
 
+from pydreg import stats
 from pydreg.stats import (
     build_cormat,
     get_laplace_quantile,
@@ -70,6 +71,36 @@ def test_pmv_laplace_cdf_options_keep_result_in_unit_interval():
     finally:
         set_pmv_laplace_cdf_options()
     assert 0.0 <= p <= 1.0
+
+
+def test_pmv_laplace_reuses_cbc_lattice_across_z_grid():
+    # The QMC lattice construction (scipy.stats._qmvnt._cbc_lattice) depends
+    # only on (n_dim, n_qmc_samples), which is a constant for this codebase's
+    # fixed order-5 cor_mat / maxpts=25000 usage -- so a single pmv_laplace
+    # call (up to 291 CDF evals) should recompute it at most a handful of
+    # times, not once per eval.
+    call_count = [0]
+    orig = stats._orig_cbc_lattice
+
+    def counting_orig(*args, **kwargs):
+        call_count[0] += 1
+        return orig(*args, **kwargs)
+
+    cor_mat = np.eye(5) * 0.3 + 0.1
+    x = np.array([0.8, 0.5, 0.9, 0.3, 0.6])
+    stats._cbc_lattice_cache.clear()
+    stats._orig_cbc_lattice = counting_orig
+    try:
+        reset_pmv_laplace_profile()
+        pmv_laplace(x, cor_mat)
+        n_evals = get_pmv_laplace_profile()["cdf_evals"]
+    finally:
+        stats._orig_cbc_lattice = orig
+        reset_pmv_laplace_profile()
+
+    assert n_evals > 1
+    assert call_count[0] <= 4
+    assert call_count[0] < n_evals
 
 
 def test_pmv_laplace_z_grid_matches_r_seq_exactly():

@@ -7,7 +7,7 @@ before BH-FDR adjustment in pydreg.peaks).
 
 import numpy as np
 import time
-from scipy.stats import multivariate_normal
+from scipy.stats import _qmvnt
 
 
 def qlaplace(p, m=0.0, s=1.0):
@@ -151,38 +151,115 @@ def _z_grid():
     return _Z_GRID, _Z_WIDTHS
 
 
-# Single-slot cache: a whole call_peaks run reuses one genome-wide cor_mat
-# object and one set of CDF options, so identity/version comparison against
-# the last-seen values is sufficient (and avoids rebuilding the frozen
-# multivariate_normal on every one of the thousands of per-summit pmv_laplace
-# calls in a run). Keyed on a version counter rather than the option values
-# themselves to avoid float-equality-as-cache-key.
-_mvn_cache = {"cor_mat": None, "version": None, "mvn": None}
+# SciPy's Genz-Bretz CDF integration (scipy.stats._qmvnt, used internally by
+# multivariate_normal.cdf for d>=3) builds a QMC lattice (_cbc_lattice) on
+# every box-probability evaluation, but that lattice depends only on
+# (n_dim, n_qmc_samples) -- and for this codebase's fixed order-5 cor_mat /
+# maxpts=25000 usage, scipy's adaptive point-growth loop (_qauto) always
+# converges on its first try with an identical n_qmc_samples, verified
+# empirically (see docs/PERF_LOG.md) to be a single reused constant across
+# every eval, in every call, in a whole process's run -- so this is a pure
+# performance win with zero numerical risk: it only reuses exactly the
+# value SciPy would otherwise have recomputed, never approximates anything,
+# and never touches the randomized QMC shift/kernel evaluation itself
+# (scipy's `_qmvn` draws that fresh, per eval, from its own RNG state,
+# entirely independent of this cached deterministic setup step) -- so
+# pmv_laplace's existing run-to-run QMC noise is unaffected.
+#
+# _permuted_cholesky (the other per-eval setup step, box-reordering +
+# Cholesky factorization) was tried the same way and DELIBERATELY DROPPED:
+# although its *output* is highly repetitive (empirically only 2-4 distinct
+# results across a whole 291-point z-grid), its *inputs* (the box bounds
+# themselves, continuously rescaled by 1/sqrt(z0) per z-grid point) are
+# essentially always unique -- so caching keyed on the literal input values
+# almost never hits (measured: 290/291 calls still recomputed) despite the
+# real redundancy in the output. Safely exploiting that redundancy would
+# require cheaply detecting which permutation a given box falls into
+# *without* running the expensive pivot-selection algorithm -- i.e. partially
+# reimplementing scipy's private algorithm, not just wrapping it in a cache.
+# That's real reimplementation risk (the ~7-9% minority of evals that use a
+# different permutation are not numerically negligible -- an incorrect
+# quantized/approximate cache key could silently misclassify some of them),
+# better scoped to a from-scratch implementation (where this logic gets
+# reimplemented deliberately and validated end-to-end) than bolted on here
+# as a "safe wrapper."
+#
+# _cbc_lattice is a private SciPy API (`scipy.stats._qmvnt`, underscore-
+# prefixed). Saving the original below fails loudly (AttributeError at
+# import time) if a future SciPy version renames/removes it, rather than
+# silently reverting to uncached-but-still-correct behavior.
+_orig_cbc_lattice = _qmvnt._cbc_lattice
+
+_cbc_lattice_cache = {}
+
+
+def _cached_cbc_lattice(n_dim, n_qmc_samples):
+    key = (n_dim, n_qmc_samples)
+    cached = _cbc_lattice_cache.get(key)
+    if cached is None:
+        cached = _orig_cbc_lattice(n_dim, n_qmc_samples)
+        _cbc_lattice_cache[key] = cached
+    q, n_qmc_samples_actual = cached
+    # Return a copy: the lattice array must never be mutated in place by a
+    # caller, or every future cache hit would silently return corrupted data.
+    return q.copy(), n_qmc_samples_actual
+
+
+_qmvnt._cbc_lattice = _cached_cbc_lattice
+
+
+# SciPy's own public adaptive driver (_qmvnt._qauto, used internally by
+# multivariate_normal.cdf) always starts its search at
+# min(maxpts, n_dim*1000) samples -- for this codebase's fixed 5-dim
+# cor_mat, a hardcoded floor of ~5000 raw samples (n_qmc_samples~=701 per
+# batch x 10 batches) *per box*, regardless of how far that box is from the
+# 50/50 boundary. R's actual algorithm (mvtnorm's Fortran MVKBRV, read
+# directly from mvtnorm's mvt.f) has no such floor: it grows through a fine
+# table of lattice sizes starting near ~100-200 points for a problem this
+# size, and stops as soon as the error target is met -- which is why R
+# converges in a few hundred samples for most boxes while forcing SciPy's
+# public API into the same target precision costs ~7000+ regardless.
+#
+# _qmvn_adaptive below reuses SciPy's own trusted `_qmvn` kernel (lattice
+# construction, Cholesky reordering, randomized QMC evaluation) completely
+# unchanged -- it only changes *how many* samples are requested before the
+# first convergence check, mirroring the *shape* of R's schedule (start
+# small, grow only as needed) without reusing any of R's actual lattice-
+# generator data. Same stopping condition as SciPy's own _qauto (est_error
+# <= abseps), so the same final-precision guarantee holds regardless of
+# starting point. Validated empirically (docs/PERF_LOG.md) across 25 random
+# order-5 cor_mat/box cases: results agree with the SciPy-floor approach to
+# within ordinary QMC noise (max diff ~5e-5) while cutting wall-clock time
+# per pmv_laplace call by ~4.3x.
+_QAUTO_START = 150
+
+
+def _qmvn_adaptive(cor_mat, low, high, rng, maxpts, abseps, n_batches=10):
+    """Box probability P(low < X < high), X ~ N(0, cor_mat), via SciPy's
+    private randomized-QMC kernel (_qmvnt._qmvn) driven by our own small-
+    start adaptive loop (see _QAUTO_START above) instead of SciPy's public
+    _qauto. Returns (prob, n_calls) -- n_calls counts how many times the
+    underlying kernel was invoked (usually 1, occasionally more for boxes
+    that need extra growth rounds to hit abseps), used for profiling. Only
+    valid for cor_mat.shape[0] >= 3 (this codebase's build_cormat always
+    produces order=5)."""
+    n_samples = 0
+    n_calls = 0
+    mi = _QAUTO_START
+    prob = 0.0
+    est_error = 1.0
+    while est_error > abseps and n_samples < maxpts:
+        mi = round(np.sqrt(2) * mi)
+        pi, ei, ni = _qmvnt._qmvn(mi, cor_mat, low, high, rng=rng, n_batches=n_batches)
+        n_samples += ni
+        n_calls += 1
+        wt = 1.0 / (1 + (ei / est_error) ** 2)
+        prob += wt * (pi - prob)
+        est_error = np.sqrt(wt) * ei
+    return prob, n_calls
+
+
 _pmv_laplace_profile = {"calls": 0, "seconds": 0.0, "cdf_evals": 0}
-
-
-def _cached_mvn(cor_mat):
-    if _mvn_cache["cor_mat"] is not cor_mat or _mvn_cache["version"] != _pmv_cdf_version:
-        d = cor_mat.shape[0]
-        _mvn_cache["mvn"] = multivariate_normal(
-            mean=np.zeros(d),
-            cov=cor_mat,
-            allow_singular=True,
-            maxpts=_PMV_CDF_MAXPTS,
-            abseps=_PMV_CDF_EPS,
-            releps=_PMV_CDF_EPS,
-        )
-        _mvn_cache["cor_mat"] = cor_mat
-        _mvn_cache["version"] = _pmv_cdf_version
-    return _mvn_cache["mvn"]
-
-
-def _box_cdf(abs_x, cor_mat):
-    """Normal probability in [-abs_x, abs_x]^d. The frozen scipy distribution
-    fully supports custom maxpts/abseps/releps (confirmed against SciPy's own
-    source -- it is not restricted to the unfrozen function form), so this is
-    always the fast, cached path regardless of which CDF options are active."""
-    return float(_cached_mvn(cor_mat).cdf(abs_x, lower_limit=-abs_x))
 
 
 def reset_pmv_laplace_profile():
@@ -214,36 +291,39 @@ def pmv_laplace(x, cor_mat):
     (unaveraged) function, so this returns `p_max` only, not the mean --
     not a bug to fix here.
 
-    Perf note: the frozen `multivariate_normal` (keyed on cor_mat's identity
-    and the current CDF-option version) and the z-integration grid are cached
-    across calls -- a whole call_peaks run shares one cor_mat, and the grid
-    is a pure constant -- since this runs once per peak summit, genome-wide.
-    The dominant cost is the up to 291 CDF evaluations per call themselves;
-    see set_pmv_laplace_cdf_options()'s docstring -- their default precision
-    now matches R's own mvtnorm::pmvnorm()/GenzBretz() defaults exactly
-    (previously left at SciPy's own, ~100-200x tighter, unset defaults,
-    which was both unfaithful to R and the actual root cause of a severe
-    peak-calling performance bottleneck -- see docs/PERF_LOG.md)."""
+    Perf note: the z-integration grid and SciPy's QMC lattice construction
+    (see the `_cbc_lattice` caching above) are cached across calls -- a whole
+    call_peaks run shares one cor_mat, and the grid/lattice are pure
+    constants -- since this runs once per peak summit, genome-wide. The up
+    to 291 box-CDF evaluations themselves are driven by `_qmvn_adaptive`'s
+    small-start schedule (see its docstring) rather than SciPy's public
+    `multivariate_normal.cdf`, which forces every evaluation through a
+    ~5000-sample floor regardless of how easy the box is -- this was the
+    dominant cost in peak calling and the main reason it ran much slower
+    than R's own pmvnorm(), which has no such floor. `cdf_evals` in the
+    profile now counts actual underlying `_qmvn` kernel invocations
+    (usually one per box, occasionally more), not a fixed 291 -- a more
+    direct measure of real work than the previous batched-call version's
+    count."""
     t0 = time.perf_counter()
     cdf_evals = 0
     try:
         x = np.asarray(x, dtype=float)
-
         abs_x = np.abs(x)
-        p_norm = _box_cdf(abs_x, cor_mat)
-        cdf_evals += 1
+        rng = np.random.default_rng()
+
+        p_norm, n_calls = _qmvn_adaptive(cor_mat, -abs_x, abs_x, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS)
+        cdf_evals += n_calls
         if p_norm > 0.99:
             return p_norm
 
         z, widths = _z_grid()
-        p0 = np.array(
-            [
-                _box_cdf(abs_x / np.sqrt(z0), cor_mat)
-                * np.exp(-z0)
-                for z0 in z
-            ]
-        )
-        cdf_evals += z.shape[0]
+        p0 = np.empty_like(z)
+        for i, z0 in enumerate(z):
+            scaled = abs_x / np.sqrt(z0)
+            pi, n_calls = _qmvn_adaptive(cor_mat, -scaled, scaled, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS)
+            p0[i] = pi * np.exp(-z0)
+            cdf_evals += n_calls
         p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
         return p_max
     finally:
