@@ -23,15 +23,25 @@ dependencies = [
   "numba>=0.64.0",
   "tqdm>=4.68.4",
 ]
-keywords = ["bioinformatics", "bigwig", "genomics", "kmer"]
+keywords = [
+  "bioinformatics",
+  "bigwig",
+  "genomics",
+  "transcriptional regulation",
+  "pro-seq",
+  "chro-seq",
+  "gro-seq",
+  "peak calling",
+  "svm",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
 [project.scripts]
