@@ -1,7 +1,7 @@
 # pydreg
 
 [![PyPI](https://img.shields.io/pypi/v/pydreg)](https://pypi.org/project/pydreg/)
-[![Tests](https://github.com/adamyhe/pydreg/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/tests.yml)
+[![Tests](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml)
 [![Weights](https://img.shields.io/badge/%F0%9F%A4%97-Weights-yellow)](https://huggingface.co/adamyhe/pydreg)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/pydreg?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pydreg)
 
@@ -40,15 +40,15 @@ pydreg plus.bw minus.bw out_prefix --verbose
 
 Options:
 
-| flag | default | meaning |
-|---|---|---|
-| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` uses cuML when CuPy sees a CUDA device, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
-| `--smoothwidth N` | `4` | Smoothing window used during peak-splitting. |
-| `--pv-adjust METHOD` | `fdr` | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name). |
-| `--pv-threshold P` | `0.05` | Significance threshold applied after correction. |
-| `--query-chunk N` | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`). |
-| `--cuml-query-chunk N` | `800000` | Positions scored per batch for cuML when `--query-chunk` is not set; ignored by CPU backends. |
-| `-v`, `--verbose` | off | Log progress at INFO level. |
+| flag                                  | default          | meaning                                                                                                                                                                                                                                                   |
+| ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--backend {auto,cuml,sklearn,numpy}` | `auto`           | Scoring backend. `auto` uses cuML when CuPy sees a CUDA device, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
+| `--smoothwidth N`                     | `4`              | Smoothing window used during peak-splitting.                                                                                                                                                                                                              |
+| `--pv-adjust METHOD`                  | `fdr`            | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name).                                                                                                                                                         |
+| `--pv-threshold P`                    | `0.05`           | Significance threshold applied after correction.                                                                                                                                                                                                          |
+| `--query-chunk N`                     | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`).                                                                                                                                                  |
+| `--cuml-query-chunk N`                | `800000`         | Positions scored per batch for cuML when `--query-chunk` is not set; ignored by CPU backends.                                                                                                                                                             |
+| `-v`, `--verbose`                     | off              | Log progress at INFO level.                                                                                                                                                                                                                               |
 
 ### Python API
 
@@ -65,13 +65,13 @@ Pass `write_outputs=False` to get the result dict back without writing files, if
 
 Given `out_prefix`, pydreg writes:
 
-| file | contents |
-|---|---|
-| `{out_prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw` | Every informative position and its raw dREG score. |
-| `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`) | All candidate peaks before FDR filtering. |
-| `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`) | Significant peaks: chrom, start, end, score, p-value, center. |
-| `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only. |
-| `{out_prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' `1 - p-value`. |
+| file                                                  | contents                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------- |
+| `{out_prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw`      | Every informative position and its raw dREG score.            |
+| `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`)         | All candidate peaks before FDR filtering.                     |
+| `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`)        | Significant peaks: chrom, start, end, score, p-value, center. |
+| `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only.                               |
+| `{out_prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`)  | Significant peaks' `1 - p-value`.                             |
 
 `.bed.gz` files are bgzipped and tabix-indexed; `.bw` files are standard bigWig tracks.
 
