@@ -27,6 +27,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
+import threadpoolctl
 from tqdm.auto import tqdm
 
 from . import rfsplit, stats
@@ -293,6 +294,17 @@ def _init_peak_worker(
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
 ):
+    # Each pmv_laplace call does a handful of tiny (order-5) Cholesky
+    # decompositions inside SciPy's Genz-Bretz CDF integration -- far too
+    # small to benefit from BLAS multithreading, but with peak_calling_cores
+    # worker processes each independently defaulting to a full-machine-sized
+    # BLAS thread pool, this oversubscribes real cores by a large factor
+    # (e.g. 16 workers x 48-thread default on a 48-core box) for zero
+    # benefit. Pin every worker (and the main process, for the
+    # peak_calling_cores<=1 serial fallback -- this is called there too) to
+    # a single BLAS thread; persists process-wide since this isn't used as a
+    # context manager (see threadpoolctl.threadpool_limits's own docs).
+    threadpoolctl.threadpool_limits(limits=1)
     _WORKER_STATE["rf_model"] = rf_model
     _WORKER_STATE["min_score"] = min_score
     _WORKER_STATE["smoothwidth"] = smoothwidth

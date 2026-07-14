@@ -348,3 +348,64 @@ internals). Worth revisiting if `pmv_laplace` is still the dominant cost
 after this fix at real genome-wide scale.
 
 All 38 tests pass.
+
+## 2026-07-14 — real-world speedup was only ~2.9x, not ~12.9x: BLAS thread oversubscription across peak_calling_cores workers
+
+A follow-up production run (same `--peak-calling-cores 16` machine, after
+the above fix) reported: 2790.07s block CPU / 33 blocks = 84.6s/block and
+2748.05s / 1,050,041 CDF evals = 2.62ms/eval — a real ~2.9x improvement over
+the pre-fix numbers (245.4s/block, 7.66ms/eval), but far short of the
+~12.9x measured in isolation on a single synthetic benchmark case.
+
+**Hypothesis 1, tested and disproven: real boxes are "harder" (hit the
+`maxpts=25000` ceiling more often) than the one synthetic case benchmarked
+previously.** Monkeypatched `scipy.stats._qmvnt._qauto` to record
+`n_samples`/`limit` for every CDF evaluation, then swept 5 correlation
+structures (weak/mid/strong correlation × small/large variance) × 5 x-scales
+(25 combinations total) through `pmv_laplace` at production settings
+(`maxpts=25000, abseps=1e-3`). Result: **0/291 evals hit the ceiling in
+every single combination** (average ~7010 of the 25000-point budget used),
+and measured cost (0.64-0.95ms/eval) was *lower* than the original single-
+case benchmark (0.808ms/eval), not higher. This directly rules out
+ceiling-hitting as the explanation — real boxes converge comfortably within
+budget across a wide difficulty range.
+
+**Hypothesis 2, well-supported, not directly measurable from this sandbox
+but consistent with all evidence: BLAS thread oversubscription across the
+16 concurrent worker processes.** `_box_cdf`'s Genz-Bretz integration does
+a handful of order-5 (5x5) Cholesky decompositions per call -- far too
+small a matrix to benefit from BLAS multithreading at all, but on Linux
+pip/conda installs (the likely production environment, vs. this sandbox's
+Accelerate-backed macOS build) OpenBLAS/MKL default their thread pool size
+to the *total visible core count*, independently, per process. With 16
+worker processes on a reported 48-core remote machine, each defaulting to
+~48 threads, that's up to 16x768 threads contending for 48 real cores --
+pure scheduling/context-switch overhead with zero computational benefit,
+repeated on the order of a million times. This matches the evidence
+exactly: `peaks.py`'s profiling measures wall-clock (`time.perf_counter()`)
+inside each worker, which inflates under contention even though the
+underlying computation is unchanged -- explaining why a clean, uncontended
+single-process sweep measured *lower* per-eval cost than production despite
+deliberately testing harder cases.
+
+**Fix**: pin every peak-calling worker to a single BLAS thread via
+`threadpoolctl.threadpool_limits(limits=1)`, called once at the top of
+`peaks.py`'s `_init_peak_worker` (the `ProcessPoolExecutor` `initializer=`,
+also called directly in the main process for the `peak_calling_cores<=1`
+serial fallback path). Per `threadpoolctl`'s own docs, calling this
+(without using it as a context manager) applies process-wide and persists
+for that process's lifetime -- exactly "once per worker at startup" is the
+right idiom. `threadpoolctl` was already a transitive dependency (via
+scikit-learn); added explicitly to `pyproject.toml` since `peaks.py` now
+imports it directly. 16 single-threaded workers on a 48-core machine uses
+16/48 cores with zero contention, and leaves headroom to raise
+`--peak-calling-cores` further on that hardware.
+
+Not verified end-to-end on the actual production machine (this sandbox has
+no way to reproduce 16-way contention meaningfully) -- the diagnostic above
+(disproving hypothesis 1) plus the well-established nature of this exact
+BLAS-oversubscription failure mode in numpy/scipy multiprocessing workflows
+is the basis for this fix; worth confirming with a real before/after
+progress-log comparison on that machine.
+
+All 38 tests pass.

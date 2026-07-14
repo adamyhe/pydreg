@@ -22,6 +22,7 @@ dependencies = [
   "zstandard>=0.22",
   "numba>=0.64.0",
   "tqdm>=4.68.4",
+  "threadpoolctl>=3.6.0",
 ]
 keywords = [
   "bioinformatics",

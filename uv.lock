@@ -976,6 +976,7 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "statsmodels" },
+    { name = "threadpoolctl" },
     { name = "tqdm" },
     { name = "zstandard" },
 ]
@@ -1003,6 +1004,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.4" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "statsmodels", specifier = ">=0.14" },
+    { name = "threadpoolctl", specifier = ">=3.6.0" },
     { name = "tqdm", specifier = ">=4.68.4" },
     { name = "zstandard", specifier = ">=0.22" },
 ]
