@@ -125,3 +125,44 @@ def test_pmv_laplace_z_grid_matches_r_seq_exactly():
     assert z.shape[0] == 290
     np.testing.assert_allclose(z[:5], [1e-100, 1e-20, 1e-19, 1e-18, 1e-17])
     np.testing.assert_allclose(z[-5:], [1e17, 1e18, 1e19, 1e20, 1e100])
+
+
+def test_permuted_cholesky_numba_matches_scipy_exactly():
+    # _permuted_cholesky is a deterministic pivoted-Cholesky algorithm (no
+    # randomization), so the numba port must agree with SciPy's own
+    # pure-Python implementation to near machine precision on every case,
+    # not just "within QMC noise" like the kernel-adjacent tests above.
+    rng = np.random.default_rng(0)
+
+    def random_cormat():
+        while True:
+            a = rng.uniform(0.2, 0.85)
+            rho = a ** np.arange(5)
+            rho = rho * (1 + rng.uniform(-0.05, 0.05, size=5))
+            rho[0] = 1.0
+            idx = np.arange(5)
+            lag = np.abs(idx[:, None] - idx[None, :])
+            sigma2 = rng.uniform(0.05, 0.5)
+            cormat = sigma2 * rho[lag]
+            if np.all(np.linalg.eigvalsh(cormat) > 1e-9):
+                return cormat
+
+    max_diff = 0.0
+    for _ in range(100):
+        cor_mat = random_cormat()
+        abs_x = rng.uniform(0.01, 3.0, size=5)
+        z0 = 10 ** rng.uniform(-3, 3)
+        low = -abs_x / np.sqrt(z0)
+        high = abs_x / np.sqrt(z0)
+
+        cho_s, lo_s, hi_s = stats._orig_permuted_cholesky(cor_mat, low, high)
+        cho_n, lo_n, hi_n = stats._permuted_cholesky_numba(cor_mat, low, high)
+
+        max_diff = max(
+            max_diff,
+            np.max(np.abs(cho_s - cho_n)),
+            np.max(np.abs(lo_s - lo_n)),
+            np.max(np.abs(hi_s - hi_n)),
+        )
+
+    assert max_diff < 1e-12

@@ -321,6 +321,7 @@ def _call_peak_block(task):
 
     t0 = time.perf_counter()
     pmv_before = stats.get_pmv_laplace_profile()
+    find_rf_peaks_seconds = 0.0
     raw_rows = []
     for peak_start, peak_end in zip(peak_starts, peak_ends):
         lo = np.searchsorted(infp_starts, peak_start, side="left")
@@ -329,9 +330,11 @@ def _call_peak_block(task):
         if xp.shape[0] <= 3 or yp.max() <= min_score:
             continue
 
+        t_find_rf_peaks = time.perf_counter()
         result = rfsplit.find_rf_peaks(
             rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
         )
+        find_rf_peaks_seconds += time.perf_counter() - t_find_rf_peaks
         if result is None:
             continue
         result = result.copy()
@@ -342,6 +345,7 @@ def _call_peak_block(task):
     profile = {
         "peaks": len(peak_starts),
         "seconds": time.perf_counter() - t0,
+        "find_rf_peaks_seconds": find_rf_peaks_seconds,
         "pmv_calls": pmv_after["calls"] - pmv_before["calls"],
         "pmv_seconds": pmv_after["seconds"] - pmv_before["seconds"],
         "pmv_cdf_evals": pmv_after["cdf_evals"] - pmv_before["cdf_evals"],
@@ -434,6 +438,7 @@ def call_peaks(
     profile_totals = {
         "peaks": 0,
         "seconds": 0.0,
+        "find_rf_peaks_seconds": 0.0,
         "pmv_calls": 0,
         "pmv_seconds": 0.0,
         "pmv_cdf_evals": 0,
@@ -458,19 +463,31 @@ def call_peaks(
         for key in profile_totals:
             profile_totals[key] += profile[key]
 
+    def _profile_breakdown():
+        # 3-way split of block CPU time: pmv_laplace itself, the rest of
+        # find_rf_peaks (smoothing + RF-split merge/split logic + result
+        # building), and everything else in the per-block loop (searchsorted/
+        # slicing, the skip check, per-peak DataFrame assembly).
+        find_rf_peaks_non_pmv = max(
+            profile_totals["find_rf_peaks_seconds"] - profile_totals["pmv_seconds"], 0.0
+        )
+        other_block = max(profile_totals["seconds"] - profile_totals["find_rf_peaks_seconds"], 0.0)
+        return find_rf_peaks_non_pmv, other_block
+
     def maybe_log_progress(force=False):
         nonlocal last_profile_log
         now = time.perf_counter()
         if not force and now - last_profile_log < 60:
             return
         last_profile_log = now
-        non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
+        find_rf_peaks_non_pmv, other_block = _profile_breakdown()
         logger.info(
             "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
-            "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv",
+            "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv find_rf_peaks, "
+            "%.2fs other block overhead",
             completed_blocks, len(tasks), profile_totals["peaks"], profile_totals["seconds"],
             profile_totals["pmv_seconds"], profile_totals["pmv_calls"],
-            profile_totals["pmv_cdf_evals"], non_pmv_seconds,
+            profile_totals["pmv_cdf_evals"], find_rf_peaks_non_pmv, other_block,
         )
 
     if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
@@ -516,12 +533,13 @@ def call_peaks(
             maybe_log_progress()
     pbar.close()
     raw_rows = [result for result in completed_results if result is not None]
-    non_pmv_seconds = max(profile_totals["seconds"] - profile_totals["pmv_seconds"], 0.0)
+    find_rf_peaks_non_pmv, other_block = _profile_breakdown()
     logger.info(
         "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s) / "
-        "%d CDF eval(s), %.2fs non-pmv",
+        "%d CDF eval(s), %.2fs non-pmv find_rf_peaks, %.2fs other block overhead",
         profile_totals["seconds"], profile_totals["pmv_seconds"],
-        profile_totals["pmv_calls"], profile_totals["pmv_cdf_evals"], non_pmv_seconds,
+        profile_totals["pmv_calls"], profile_totals["pmv_cdf_evals"],
+        find_rf_peaks_non_pmv, other_block,
     )
 
     if not raw_rows:

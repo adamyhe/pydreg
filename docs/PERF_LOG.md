@@ -788,3 +788,115 @@ fixed 291-per-batched-call constant -- a more direct measure of real work,
 worth knowing when reading old vs. new progress-log numbers side by side.
 
 All 39 tests pass.
+
+## 2026-07-14 — numba port of `_permuted_cholesky`: bit-exact, 28x faster in isolation, ~1.85x on real `pmv_laplace`
+
+Asked to look at whether `smoothing.py`/`rfsplit.py` were the next bottleneck
+(a real production log showed non-pmv at 24.4% of block CPU, up from 2.8%/
+1.5% in earlier logs, now that `pmv_laplace` itself is so much faster).
+`smoothing.py`'s boxcar smoothing is already cumsum-vectorized -- profiling
+confirmed it's not a bottleneck. But profiling `pmv_laplace` itself
+(cProfile over 1000 calls) turned up something bigger: `_permuted_cholesky`
+-- the box-reordering/Cholesky-factorization setup step SciPy's `_qmvn`
+runs before every QMC evaluation -- was **15.991s tottime / 21.859s cumtime
+out of 51.659s total (~42%)**. This step was deliberately left uncached in
+an earlier entry above, when it was only ~5-8% of a much larger total; the
+small-start adaptive fix shrank the kernel's own cost so much that this
+previously-minor setup step is now proportionally dominant.
+
+Unlike `_qmvn_inner` (the QMC kernel, already compiled Cython -- a numba
+port of that was tried and found no win, see the B1 entry above),
+`_permuted_cholesky` is **pure Python** (confirmed by reading the installed
+source directly). A numba port has real room to win here specifically
+because the original was never compiled at all -- this is a different
+situation from B1's numba-vs-Cython comparison, not a re-litigation of it.
+
+**Implementation**: `_permuted_cholesky_numba` in `stats.py` is a
+line-for-line `@numba.njit` translation of SciPy's own `_permuted_cholesky`
+(read directly from the installed `scipy.stats._qmvnt` source), using a
+hand-rolled `_ndtr` (`0.5*(1+erf(x/sqrt(2)))`) matching SciPy's `phi`.
+Monkeypatched onto `_qmvnt._permuted_cholesky` at import time, same pattern
+as the existing `_cbc_lattice` cache (original saved as
+`_orig_permuted_cholesky`, so a future SciPy rename/removal fails loudly
+rather than silently falling back to uncached-but-correct behavior).
+
+**Correctness**: this is a deterministic pivoted-Cholesky algorithm with no
+randomization involved at all -- so unlike every other change in this log,
+there's no "within QMC noise" caveat: the numba port must match SciPy's own
+output to near machine precision on every input. Validated across 200
+random `(cor_mat, low, high)` cases (AR(1)-decay correlation structure,
+box scales spanning `z0` from `1e-3` to `1e3`): **max diff = 0.0** (bit-exact).
+A permanent regression test (`test_permuted_cholesky_numba_matches_scipy_exactly`)
+checks this on 100 cases with a `1e-12` tolerance (loosened slightly from
+literal bit-exactness only to avoid being a flaky float-ULP-sensitive test).
+
+**Speed**: 53.9us/call (SciPy's pure Python) -> 1.9us/call (numba) in
+isolation, a **28x** speedup.
+
+**Measured end-to-end effect on real `pmv_laplace`** (4 representative
+cases, caches/JIT warm, 40 reps each):
+
+| case | before (scipy Cholesky) | after (numba Cholesky) |
+|---|---|---|
+| hard_mid_prob | 32.1ms | 17.5ms |
+| small_x | 33.7ms | 17.1ms |
+| wide_x | 31.8ms | 17.7ms |
+| asymmetric | 33.4ms | 17.6ms |
+
+**~1.85x additional speedup**, landing consistently across all 4 cases
+(an earlier ad-hoc monkeypatch test during investigation showed uneven
+per-case results, apparently a measurement artifact -- the properly wired
+version above is consistent). Combined with everything else this session
+(R-fidelity precision fix + lattice caching + small-start adaptive sample
+schedule): **~3.03s -> ~17.5ms per call, ~173x total**, on this
+(uncontended, Apple Silicon) machine -- as always, judge real production
+hardware by its own before/after progress-log numbers.
+
+All 40 tests pass.
+
+## 2026-07-14 — 3-way block-CPU profiling breakdown (diagnostic only, no behavior change)
+
+Synthetic profiling of `rfsplit.find_rf_peaks` (see the entry above) found a
+real inefficiency in `_split_peak`'s sequential merge loop (repeated tiny
+`model.predict()` calls, each rebuilding its input array from a list of
+Python dicts), but even an extreme synthetic case (4000 points, 160 local
+maxima) only produced ~13ms/call of non-pmv cost -- about 3x less than the
+~42.7ms/peak implied by a real production log's 24.4%-non-pmv share. Rather
+than guess which of several candidates (that RF-split inefficiency, or
+something in `_call_peak_block`'s per-peak `searchsorted`/DataFrame handling
+outside `find_rf_peaks` entirely) actually dominates in production, added a
+3-way timing breakdown so the next real run answers this directly instead.
+
+**Change**: `_call_peak_block` (`peaks.py`) now also accumulates
+`find_rf_peaks_seconds` -- a timer bracketing only the
+`rfsplit.find_rf_peaks(...)` call itself, separate from the existing
+whole-block timer (`seconds`) and the existing `pmv_seconds` (from
+`stats.get_pmv_laplace_profile()` deltas, unaffected). `call_peaks()`'s
+progress-log line and final summary now report:
+- `pmv_seconds` (unchanged) -- time inside `pmv_laplace`.
+- `find_rf_peaks_non_pmv = find_rf_peaks_seconds - pmv_seconds` -- smoothing +
+  `_split_peak` (incl. the `model.predict` merge-loop overhead) + result
+  building, *inside* `find_rf_peaks`.
+- `other_block = seconds - find_rf_peaks_seconds` -- `np.searchsorted`/
+  slicing per peak, the `xp.shape[0] <= 3` skip check, and the per-peak
+  `result.copy()`/`.insert()`/`raw_rows.append` DataFrame handling, all
+  *outside* `find_rf_peaks` within `_call_peak_block`'s loop.
+
+Purely additive (new timers only, no behavior change). **Verified the
+3-way split is exact by construction** (`pmv_seconds + find_rf_peaks_non_pmv
++ other_block` telescopes algebraically back to `seconds`, since
+`find_rf_peaks_non_pmv` and `other_block` are defined as differences of
+nested supersets) and confirmed numerically on a small local `call_peaks`
+run: `seconds=0.000937s`, reconstructed sum `=0.000937s`, diff `0.00e+00`;
+breakdown was `pmv=0.33ms`, `find_rf_peaks_non_pmv=0.45ms`,
+`other_block=0.16ms` for that run.
+
+**Next step**: run a real production peak-calling job and read the new
+3-way split in its progress log -- whichever of `find_rf_peaks_non_pmv` or
+`other_block` dominates tells us precisely where to target a follow-up fix
+(the `_split_peak`/`model.predict` call-overhead issue if the former; the
+`_call_peak_block` DataFrame-assembly path if the latter), instead of
+guessing further from synthetic data that couldn't reproduce the observed
+production magnitude.
+
+All 40 tests pass.

@@ -5,8 +5,11 @@ multivariate-Laplace tail-probability integral (the per-summit p-value used
 before BH-FDR adjustment in pydreg.peaks).
 """
 
-import numpy as np
+import math
 import time
+
+import numba
+import numpy as np
 from scipy.stats import _qmvnt
 
 
@@ -208,6 +211,119 @@ def _cached_cbc_lattice(n_dim, n_qmc_samples):
 _qmvnt._cbc_lattice = _cached_cbc_lattice
 
 
+# _permuted_cholesky (box-reordering + Cholesky factorization, run once per
+# _qmvn call before the QMC kernel) is pure Python in SciPy -- unlike
+# _qmvn_inner (the QMC kernel itself), which is already compiled Cython and
+# for which a numba port was tried and found no win (see docs/PERF_LOG.md).
+# Now that the small-start adaptive sample schedule above has shrunk the
+# kernel's own cost dramatically, this previously-minor (~5-8%) setup step
+# is proportionally dominant (~42% of pmv_laplace's time, measured). A numba
+# port has real room to win here specifically because the original was never
+# compiled at all. This is a line-for-line translation of SciPy's own
+# `_permuted_cholesky` (read directly from the installed source) -- a
+# deterministic pivoted-Cholesky algorithm with no randomization, so its
+# output must match SciPy's own to near machine precision, not just "within
+# QMC noise" (validated: bit-exact, max diff 0.0, across 200 random cases;
+# see docs/PERF_LOG.md and the accompanying test).
+@numba.njit(cache=True, inline="always")
+def _ndtr(x):
+    # inline="always": numba doesn't inline njit-to-njit calls by default,
+    # and this runs inside _permuted_cholesky_numba's innermost loop --
+    # measured ~4-5% faster this way (1.9us -> ~1.8us/call), bit-exact
+    # either way since inlining is purely a compilation hint.
+    return 0.5 * (1.0 + math.erf(x / 1.4142135623730951))
+
+
+@numba.njit(cache=True)
+def _permuted_cholesky_numba(covar, low, high, tol=1e-10):
+    cho = covar.copy()
+    new_lo = low.copy()
+    new_hi = high.copy()
+    n = cho.shape[0]
+
+    dc = np.zeros(n)
+    for i in range(n):
+        dc[i] = math.sqrt(max(cho[i, i], 0.0))
+        if dc[i] == 0.0:
+            dc[i] = 1.0
+    for i in range(n):
+        new_lo[i] /= dc[i]
+        new_hi[i] /= dc[i]
+    for i in range(n):
+        for j in range(n):
+            cho[i, j] /= dc[j]
+            cho[i, j] /= dc[i]
+
+    y = np.zeros(n)
+    sqtp = math.sqrt(2 * math.pi)
+    for k in range(n):
+        epk = (k + 1) * tol
+        im = k
+        ck = 0.0
+        dem = 1.0
+        lo_m = 0.0
+        hi_m = 0.0
+        for i in range(k, n):
+            if cho[i, i] > tol:
+                ci = math.sqrt(cho[i, i])
+                s = 0.0
+                if i > 0:
+                    for j in range(k):
+                        s += cho[i, j] * y[j]
+                lo_i = (new_lo[i] - s) / ci
+                hi_i = (new_hi[i] - s) / ci
+                de = _ndtr(hi_i) - _ndtr(lo_i)
+                if de <= dem:
+                    ck = ci
+                    dem = de
+                    lo_m = lo_i
+                    hi_m = hi_i
+                    im = i
+        if im > k:
+            cho[im, im] = cho[k, k]
+            for j in range(k):
+                cho[im, j], cho[k, j] = cho[k, j], cho[im, j]
+            for j in range(im + 1, n):
+                cho[j, im], cho[j, k] = cho[j, k], cho[j, im]
+            for j in range(k + 1, im):
+                cho[j, k], cho[im, j] = cho[im, j], cho[j, k]
+            new_lo[k], new_lo[im] = new_lo[im], new_lo[k]
+            new_hi[k], new_hi[im] = new_hi[im], new_hi[k]
+        if ck > epk:
+            cho[k, k] = ck
+            for j in range(k + 1, n):
+                cho[k, j] = 0.0
+            for i in range(k + 1, n):
+                cho[i, k] /= ck
+                for j in range(k + 1, i + 1):
+                    cho[i, j] -= cho[i, k] * cho[j, k]
+            if abs(dem) > tol:
+                y[k] = (math.exp(-lo_m * lo_m / 2) - math.exp(-hi_m * hi_m / 2)) / (
+                    sqtp * dem
+                )
+            else:
+                y[k] = (lo_m + hi_m) / 2
+                if lo_m < -10:
+                    y[k] = hi_m
+                elif hi_m > 10:
+                    y[k] = lo_m
+            for j in range(k + 1):
+                cho[k, j] /= ck
+            new_lo[k] /= ck
+            new_hi[k] /= ck
+        else:
+            for i in range(k, n):
+                cho[i, k] = 0.0
+            y[k] = (new_lo[k] + new_hi[k]) / 2
+    return cho, new_lo, new_hi
+
+
+# Private SciPy API, same "fail loudly if renamed/removed" reasoning as
+# _orig_cbc_lattice above.
+_orig_permuted_cholesky = _qmvnt._permuted_cholesky
+_qmvnt._permuted_cholesky = _permuted_cholesky_numba
+
+
 # SciPy's own public adaptive driver (_qmvnt._qauto, used internally by
 # multivariate_normal.cdf) always starts its search at
 # min(maxpts, n_dim*1000) samples -- for this codebase's fixed 5-dim
@@ -312,7 +428,9 @@ def pmv_laplace(x, cor_mat):
         abs_x = np.abs(x)
         rng = np.random.default_rng()
 
-        p_norm, n_calls = _qmvn_adaptive(cor_mat, -abs_x, abs_x, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS)
+        p_norm, n_calls = _qmvn_adaptive(
+            cor_mat, -abs_x, abs_x, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS
+        )
         cdf_evals += n_calls
         if p_norm > 0.99:
             return p_norm
@@ -321,7 +439,9 @@ def pmv_laplace(x, cor_mat):
         p0 = np.empty_like(z)
         for i, z0 in enumerate(z):
             scaled = abs_x / np.sqrt(z0)
-            pi, n_calls = _qmvn_adaptive(cor_mat, -scaled, scaled, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS)
+            pi, n_calls = _qmvn_adaptive(
+                cor_mat, -scaled, scaled, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS
+            )
             p0[i] = pi * np.exp(-z0)
             cdf_evals += n_calls
         p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
