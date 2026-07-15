@@ -1,4 +1,5 @@
 import logging
+import re
 import sys
 import types
 
@@ -149,15 +150,19 @@ def _tiny_svr_model():
 class _FakeElementwiseKernel:
     # Real cupy.ElementwiseKernel compiles `operation` (CUDA C) into a
     # single broadcasting kernel; this stand-in instead `eval`s it as a
-    # Python expression against NumPy arrays standing in for CuPy ones --
-    # valid because _build_cupy_predict_fn's kernel body ("exp(-<gamma> *
-    # (sq_x + sq_sv - 2 * cross))") happens to be syntactically identical
-    # Python. This exercises the actual formula/broadcasting these tests
-    # care about, not cupy's own kernel compilation (which needs a real GPU
-    # to mean anything).
+    # Python expression against NumPy arrays standing in for CuPy ones.
+    # The kernel body is CUDA C, not Python -- expf(...) and float literals
+    # with an "f" suffix (e.g. "0.05f") are valid CUDA C but not valid
+    # Python syntax, so both get normalized away before eval. This
+    # exercises the actual formula/broadcasting/dtype these tests care
+    # about, not cupy's own kernel compilation (which needs a real GPU to
+    # mean anything).
     def __init__(self, in_params, out_params, operation, name):
         self._in_names = [p.strip().split()[-1] for p in in_params.split(",")]
-        self._rhs = operation.split("=", 1)[1].strip()
+        rhs = operation.split("=", 1)[1].strip()
+        rhs = rhs.replace("expf(", "exp(")
+        rhs = re.sub(r"(?<=[0-9.])f\b", "", rhs)
+        self._rhs = rhs
 
     def __call__(self, *args):
         ns = {"exp": np.exp, **dict(zip(self._in_names, args))}
@@ -176,6 +181,8 @@ def _fake_cupy_module():
         exp=np.exp,
         asnumpy=np.asarray,
         ElementwiseKernel=_FakeElementwiseKernel,
+        float32=np.float32,
+        float64=np.float64,
     )
 
 
@@ -189,7 +196,10 @@ def test_build_cupy_predict_fn_matches_dreg_model_predict(monkeypatch):
 
     y_scaled = predict(X_scaled)
     reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
-    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-10)
+    # atol loosened from 1e-10: the GEMMs/kernel are now deliberately
+    # float32 (see _build_cupy_predict_fn's docstring), so some genuine
+    # ~1e-7-relative rounding is expected here, not just formula agreement.
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
 
 
 def test_build_cupy_predict_fn_chunks_over_support_vectors(monkeypatch):
@@ -204,7 +214,7 @@ def test_build_cupy_predict_fn_chunks_over_support_vectors(monkeypatch):
 
     y_scaled = predict(X_scaled)
     reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
-    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-10)
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
 
 
 def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
@@ -215,7 +225,7 @@ def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
     X_raw = np.random.default_rng(3).normal(size=(4, model.n_features))
 
     assert scorer.backend == "cupy"
-    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-8)
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
 def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
@@ -234,7 +244,7 @@ def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
     X_raw = np.random.default_rng(4).normal(size=(3, model.n_features))
 
     assert seen_kwargs == {"sv_chunk": 2}
-    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-8)
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
 def test_explicit_cupy_build_scorer_raises_when_not_installed():

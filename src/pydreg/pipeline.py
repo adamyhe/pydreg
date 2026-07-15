@@ -27,7 +27,9 @@ def _timed(name):
     logger.info("%s done in %.2fs", name, time.perf_counter() - t0)
 
 
-def _score_positions(bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=False, desc="scoring"):
+def _score_positions(
+    bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=False, desc="scoring"
+):
     """Scores every row of bed_df (columns chrom, start, ... positionally)
     and returns scores in the same row order. Groups by chromosome first
     (only peaks.py's gap-fill/densify steps can produce a multi-chromosome
@@ -39,14 +41,21 @@ def _score_positions(bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=F
     chrom_col, start_col = bed_df.columns[0], bed_df.columns[1]
     scores = np.empty(len(bed_df))
 
-    pbar = tqdm(total=len(bed_df), desc=desc, unit="pos", disable=None if progress else True)
+    pbar = tqdm(
+        total=len(bed_df), desc=desc, unit="pos", disable=None if progress else True
+    )
     for chrom, group in bed_df.groupby(chrom_col, sort=False):
         positions = group.index.to_numpy()
         centers = group[start_col].to_numpy()
         for start in range(0, centers.shape[0], chunk):
             sl = slice(start, start + chunk)
             X = features.extract_features_batch(
-                bw_plus, bw_minus, chrom, centers[sl], model.window_sizes, model.half_n_windows
+                bw_plus,
+                bw_minus,
+                chrom,
+                centers[sl],
+                model.window_sizes,
+                model.half_n_windows,
             )
             scores[positions[sl]] = scorer.predict(X)
             pbar.update(len(centers[sl]))
@@ -106,14 +115,26 @@ def run(
     logger.info("scoring informative positions...")
     with _timed("scoring informative positions"):
         infp_bed["score"] = _score_positions(
-            bw_plus, bw_minus, model, scorer, infp_bed, chunk,
-            progress=progress, desc="scoring informative positions",
+            bw_plus,
+            bw_minus,
+            model,
+            scorer,
+            infp_bed,
+            chunk,
+            progress=progress,
+            desc="scoring informative positions",
         )
 
     def score_fn(bed_df, desc="scoring"):
         return _score_positions(
-            bw_plus, bw_minus, model, scorer, bed_df, chunk,
-            progress=progress, desc=desc,
+            bw_plus,
+            bw_minus,
+            model,
+            scorer,
+            bed_df,
+            chunk,
+            progress=progress,
+            desc=desc,
         )
 
     logger.info("densifying and merging into broad peaks...")
@@ -121,29 +142,40 @@ def run(
         dense_infp, peak_broad, min_score = peaks.get_dense_infp(infp_bed, score_fn)
     logger.info(
         "min_score=%.4f, %d dense positions, %s broad peaks",
-        min_score, len(dense_infp), "0" if peak_broad is None else len(peak_broad),
+        min_score,
+        len(dense_infp),
+        "0" if peak_broad is None else len(peak_broad),
     )
 
     logger.info("calling peaks...")
     with _timed("calling peaks"):
         raw_peak, peak_bed = peaks.call_peaks(
-            dense_infp, peak_broad, min_score, rf_model,
-            smoothwidth=smoothwidth, pv_adjust=pv_adjust, pv_threshold=pv_threshold,
-            progress=progress, peak_calling_cores=peak_calling_cores,
+            dense_infp,
+            peak_broad,
+            min_score,
+            rf_model,
+            smoothwidth=smoothwidth,
+            pv_adjust=pv_adjust,
+            pv_threshold=pv_threshold,
+            progress=progress,
+            peak_calling_cores=peak_calling_cores,
             peak_calling_block_width=peak_calling_block_width,
             pmv_laplace_cdf_maxpts=pmv_laplace_cdf_maxpts,
             pmv_laplace_cdf_eps=pmv_laplace_cdf_eps,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",
-        "0" if raw_peak is None else len(raw_peak), "0" if peak_bed is None else len(peak_bed),
+        "0" if raw_peak is None else len(raw_peak),
+        "0" if peak_bed is None else len(peak_bed),
     )
 
     if write_outputs:
         with _timed("writing outputs"):
             _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed)
 
-    return dict(dense_infp=dense_infp, raw_peak=raw_peak, peak_bed=peak_bed, min_score=min_score)
+    return dict(
+        dense_infp=dense_infp, raw_peak=raw_peak, peak_bed=peak_bed, min_score=min_score
+    )
 
 
 def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed):
@@ -162,9 +194,13 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed):
 
         score_bed = peak_bed[["chr", "start", "end", "score"]]
         io.write_bed_gz(score_bed, f"{out_prefix}.dREG.peak.score.bed.gz")
-        io.write_bigwig(f"{out_prefix}.dREG.peak.score.bw", sizes, score_bed, value_col="score")
+        io.write_bigwig(
+            f"{out_prefix}.dREG.peak.score.bw", sizes, score_bed, value_col="score"
+        )
 
         prob_bed = peak_bed[["chr", "start", "end", "prob"]].copy()
         prob_bed["prob"] = 1 - prob_bed["prob"]
         io.write_bed_gz(prob_bed, f"{out_prefix}.dREG.peak.prob.bed.gz")
-        io.write_bigwig(f"{out_prefix}.dREG.peak.prob.bw", sizes, prob_bed, value_col="prob")
+        io.write_bigwig(
+            f"{out_prefix}.dREG.peak.prob.bw", sizes, prob_bed, value_col="prob"
+        )

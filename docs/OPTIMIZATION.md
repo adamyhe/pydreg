@@ -150,16 +150,81 @@ Two independent levers, in the order they're worth pulling:
    as tunables rather than hardcoded — worth sweeping a few `--cupy-sv-chunk`
    values on the actual target GPU and picking the fastest that doesn't OOM.
 
-A further-out, riskier lever not implemented here: **float32 instead of
-float64**. This SVR is inherently float64 (exported that way from R), and
-`_wrap_sklearn_like`'s smoke test tolerance (`rtol=atol=1e-4`) would likely
-still pass at float32 precision, but this hasn't been tried — it would need
-its own explicit validation pass before trusting it, since it changes the
-actual arithmetic precision rather than just its scheduling. It would matter
-most on exactly the hardware that motivated this whole tier: consumer Pascal
-GPUs (e.g. the TITAN X) have crippled float64 throughput (~1:32 vs float32),
-so this could be a large win there specifically, separate from and additive
-to the fusion/batching levers above.
+A further lever, since implemented: **float32 instead of float64** for the
+two GEMMs and the fused RBF kernel (`y_scaled` still accumulates in
+float64, cheap insurance against cross-chunk summation error). This
+changes actual arithmetic precision rather than just scheduling, so it
+needed its own justification, not just "the smoke test tolerance is
+generous" — see below. It matters most on exactly the hardware that
+motivated this whole tier: consumer Pascal GPUs (e.g. the TITAN X) have
+crippled float64 throughput (~1:32 vs float32), so this is a large win
+there specifically, separate from and additive to the fusion/batching
+levers above.
+
+That said, the risk here is smaller than "changes arithmetic precision"
+usually implies, once you know where these model weights actually came
+from. The current pretrained dREG models are trained via **Rgtsvm**
+(dREG's GPU-accelerated SVM tool; `e1071` now exists purely as an
+S3-compatibility layer around it, not as the thing that actually fits the
+model). Traced Rgtsvm/GTSVM's actual C++/CUDA source
+(`github.com/Danko-Lab/Rgtsvm`) to check for exactly this: does it use
+float32 internally despite R passing `double`s across the API boundary?
+It does, unconditionally, with no build-time opt-out ever exercised:
+
+- `gtsvmpredict_epsregression_C` (`Rgtsvm.cpp:398-401`) narrows
+  `gamma`/`coef0`/`degree`/`cost` straight from `double*` to a local
+  `float`, with no double-precision code path at all for these.
+- The support-vector matrix itself is stored internally as
+  `SparseVector = std::vector<std::pair<unsigned int, float>>`
+  (`svm.hpp:280`) — `InitializeDense`/`InitializeSparse` convert the
+  incoming `GTSVM_TYPE_DOUBLE`-tagged R data down into this float-based
+  representation on the way in; the `DOUBLE` tag just describes the input
+  buffer's element type for reading purposes.
+- The SVM optimizer's own internal type, `CUDA_FLOAT_DOUBLE`
+  (`cuda_helpers.hpp:40-44`), is `float` unless the `CUDA_USE_DOUBLE`
+  macro is defined at compile time — checked `configure.ac` end-to-end
+  and that macro is never defined anywhere in the actual build.
+
+So the alphas/support-vectors/rho this project exports to safetensors as
+float64 were themselves *produced* by a training process with no
+double-precision arithmetic anywhere internally — their real accuracy
+ceiling was already float32, before pydreg's float64 storage ever enters
+the picture. Running cupy-tier **inference** at float32 wouldn't trade away
+precision the model actually has; there isn't more precision there to
+trade away. If anything it would move pydreg's GPU behavior *closer* to
+how real GPU-accelerated dREG behaved historically, not further from it.
+
+This doesn't extend to the CPU tiers, though, and shouldn't be read as "so
+just make everything float32." Checked libsvm's actual source too
+(`cjlin1/libsvm`, what both `e1071` and `sklearn.svm.SVR` bind to for CPU
+prediction): `svm_node.value` is `double`, `Kernel::k_function` and
+`svm_predict_values` operate in `double` throughout. `Qfloat` (`typedef
+float`) exists in libsvm but only for the *training*-time kernel cache
+(`Cache`/`SVC_Q`/`SVR_Q`) — never in the predict path. So dREG's CPU
+inference mode (`e1071`) has always been genuinely double-precision, and
+pydreg's own NumPy/scikit-learn tiers already match that exactly. Down
+casting those to float32 would be a real fidelity regression relative to
+the actual historical CPU reference, for a speed motivation (crippled FP64
+throughput) that's GPU-specific and doesn't apply to CPUs at all — not
+recommended.
+
+**Deliberately not done for the `cuml` tier.** `cuml.svm.SVR.from_sklearn()`
+takes no dtype parameter (`cuml/internals/base.pyx`'s `from_sklearn(cls,
+model)` signature has none, and `SVMBase.__init__` doesn't expose `dtype`
+as a constructor option either — it's only ever set internally during
+`.fit()`/`cpu_to_gpu()`, hardcoded to `np.float64` when converting from a
+CPU model). Getting a genuinely float32 cuML SVR would mean bypassing
+`from_sklearn()` and manually setting `dtype`/`support_vectors_`/
+`dual_coef_`/etc. directly, replicating cuML's own private
+`_attrs_from_cpu` logic. That's a specific, real risk, not just "more
+private-API surface": `_get_svm_model()` picks its C++ template
+(`SvmModel<float>` vs `SvmModel<double>`) from the `dtype` flag, then
+raw-pointer-reinterprets the underlying array's memory accordingly. If
+that flag and the array's actual dtype ever disagreed, it wouldn't
+silently lose precision — it would read the wrong bytes entirely (garbage
+or a crash), with no GPU available here to catch it. Given the `cupy` tier
+already does float32 correctly and is the same math either way, it's the
+better home for a float32 GPU path than hacking `cuml`'s internals.
 
 ## Batching
 

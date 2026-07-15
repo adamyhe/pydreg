@@ -75,11 +75,13 @@ import numpy as np
 
 from ._safetensors_io import open_safetensors
 
-DEFAULT_REPO_ID = "adamyhe/dREG"
+DEFAULT_REPO_ID = "adamyhe/pydreg"
 
 
 @numba.njit(cache=True)
-def _forest_predict(nodestatus, bestvar, left_daughter, right_daughter, xbestsplit, nodepred, X):
+def _forest_predict(
+    nodestatus, bestvar, left_daughter, right_daughter, xbestsplit, nodepred, X
+):
     """JIT-compiled literal translation of src/regTree.c's predictRegTree(),
     looped over trees x queries x node-depth in compiled code -- see
     DREGPeakSplitForest's module docstring. Called with tiny X (a handful of
@@ -222,6 +224,11 @@ class DREGPeakSplitForest:
         split_peak() to decide merge vs. split)."""
         X = np.asarray(X, dtype=np.float64)
         return _forest_predict(
-            self.nodestatus, self.bestvar, self.left_daughter, self.right_daughter,
-            self.xbestsplit, self.nodepred, X,
+            self.nodestatus,
+            self.bestvar,
+            self.left_daughter,
+            self.right_daughter,
+            self.xbestsplit,
+            self.nodepred,
+            X,
         )

@@ -62,7 +62,9 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
 
     rows = []
     for chrom in tqdm(
-        chroms, desc="scanning chromosomes", unit="chrom",
+        chroms,
+        desc="scanning chromosomes",
+        unit="chrom",
         disable=None if progress else True,
     ):
         chrom_size = plus_sizes[chrom]
@@ -74,7 +76,9 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
         # per-phase bw.values() calls per chromosome (see
         # _windowed_sums_from_fine's docstring for the exactness proof).
         fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
-        fine_minus = io.windowed_sum(bw_minus, chrom, 0, step, chrom_size) if has_minus else None
+        fine_minus = (
+            io.windowed_sum(bw_minus, chrom, 0, step, chrom_size) if has_minus else None
+        )
 
         for phase in phases:
             plus_or = _windowed_sums_from_fine(fine_plus, phase, WINDOW_OR, step)

@@ -1279,3 +1279,62 @@ compilation, not in pydreg's formula/wiring), which is exactly why real
 end-to-end hardware validation caught it and the NumPy-standin unit tests
 didn't, and why this kind of change needs that real validation loop before
 being trusted. 52 tests pass.
+
+## 2026-07-15 — cupy tier downcast to float32; cuml tier deliberately not touched
+
+Motivated by confirming that the current pretrained dREG models are
+trained via Rgtsvm (not `e1071` -- `e1071` is now purely an
+S3-compatibility shim around it), and that Rgtsvm's own CUDA
+implementation has no double-precision path at all (traced through
+`Rgtsvm.cpp`/`svm.hpp`/`cuda_helpers.hpp`/`configure.ac` on GitHub -- see
+`docs/OPTIMIZATION.md`'s cupy-tier section for the full citation trail).
+The exported alphas/support-vectors/rho were themselves produced by a
+float32-limited training process, so their real accuracy ceiling was
+already float32 before ever reaching pydreg's float64 storage -- inference
+at float32 doesn't trade away precision the model actually has.
+
+Also checked libsvm's actual source (`cjlin1/libsvm`) to confirm the
+NumPy/scikit-learn tiers should NOT follow suit: `svm_node.value` is
+`double`, and `Kernel::k_function`/`svm_predict_values` (the predict path)
+operate in `double` throughout. `Qfloat` (`typedef float`) exists but only
+for the training-time kernel cache, never at predict time. So `e1071`'s
+CPU inference has always been genuinely double-precision, and pydreg's CPU
+tiers already match that -- downcasting them would be a real fidelity
+regression with no corresponding hardware motivation (the FP64-throughput
+problem is GPU-specific).
+
+**Implemented for `cupy`**: `_build_cupy_predict_fn`'s two GEMMs and fused
+RBF kernel now run in float32 (`SV`/`coefs`/`X` cast to `cp.float32`, the
+`ElementwiseKernel`'s types changed to `float32`, gamma's literal in the
+kernel source given an explicit `f` suffix -- an unsuffixed float literal
+is `double` in CUDA C, which would have silently promoted the whole
+expression back to double and defeated the point). `y_scaled` still
+accumulates in float64 (each chunk's small per-query contribution is
+upcast before adding) as cheap insurance against cross-chunk summation
+error, independent of the GEMM/kernel precision itself.
+
+Tests: `tests/test_backend.py`'s fake `ElementwiseKernel` needed two fixes
+to keep exercising this on NumPy -- the kernel body is CUDA C, not Python,
+so `expf(...)` (not a Python name) and `f`-suffixed float literals (not
+valid Python syntax) both get normalized away before `eval`. Tolerances in
+the four cupy-path tests loosened from `atol=1e-10`/`1e-8` to `1e-5`,
+reflecting genuinely-expected float32 rounding rather than a bug -- same
+reasoning as the earlier Cholesky pivot-order tolerance fix, not a
+weakening of the safety net. 52 tests pass.
+
+**Deliberately not implemented for `cuml`**: investigated whether
+`cuml.svm.SVR.from_sklearn()` could be coaxed into float32 and concluded
+it can't be done safely without real hardware to validate against.
+`from_sklearn(cls, model)` takes no dtype parameter at all
+(`cuml/internals/base.pyx`), and `dtype` is only ever set internally
+during `.fit()`/`cpu_to_gpu()` (hardcoded to `np.float64` when converting
+from a CPU model, per the earlier Pascal investigation's source read of
+`_attrs_from_cpu`). A working float32 path would require bypassing
+`from_sklearn()` and manually replicating that private attribute-setting
+logic -- and `_get_svm_model()` picks its C++ template
+(`SvmModel<float>`/`SvmModel<double>`) from the `dtype` flag, then
+raw-pointer-reinterprets the array's memory accordingly. Getting the flag
+and the actual underlying array dtype out of sync wouldn't just lose
+precision, it would read the wrong bytes entirely -- a real risk with zero
+way to catch it without a GPU. Recommended `cupy` as the float32 GPU path
+instead, since it's the same math and already correct.
