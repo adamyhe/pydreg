@@ -1451,3 +1451,48 @@ would be a genuinely bigger, riskier change (features.py is shared by
 every backend, would need a dual NumPy/CuPy path, and would need its own
 correctness validation the same way the RBF kernel did) for a much
 smaller remaining return than this fix already captured.
+
+**Update, same day**: a closer look at the utilization graph showed it's
+actually spikier than "steady 90-100%" -- and, notably, landing in a
+similar 50-80% band on *both* the TITAN Xp and an A100. That cross-hardware
+consistency is itself informative: it argues against a GPU-architecture-
+specific explanation (e.g. Pascal's weak FP64, irrelevant to the A100) and
+for the CPU-extraction-throughput hypothesis instead -- if feature
+extraction's throughput is now the shared limiting factor, any GPU fast
+enough to be waiting on it should show a similar pattern regardless of
+its own architecture.
+
+Mechanism: the prefetch is one chunk deep with a single background
+worker. If per-chunk extraction now takes *longer* on average than a
+chunk's `scorer.predict()` (very plausible after cutting predict's cost by
+~12x while extraction is unchanged), every cycle looks like: GPU busy
+during predict(), then idle while the main thread waits for that cycle's
+already-behind extraction -- a spiky trace, not a plateau. Deepening the
+prefetch queue with the same single worker wouldn't fix this: a bigger
+queue only smooths *variance* between chunks, it can't fix a *systematic*
+throughput mismatch where one worker's total extraction rate is below the
+GPU's now-much-faster consumption rate. The two real levers would be
+bigger chunks (spreads `_extract_features_cluster`'s fixed per-chunk setup
+cost over more positions, though not guaranteed to fix a rate mismatch if
+both stages scale ~linearly with chunk size) or parallelizing extraction
+across multiple background workers (directly addresses a throughput
+mismatch, but reopens a correctness question the single-worker design
+deliberately avoided: whether pybigtools bigWig reads are safe to run
+concurrently from multiple threads against the same reader object --
+unverified, and getting it wrong would be a real bug, not just a
+performance one).
+
+Rather than guess further from a utilization percentage, added direct
+timing instead: `_score_positions` now accumulates `extract_seconds`
+(summed on the background worker) and `predict_seconds` (timed on the main
+thread) and logs both once at the end of the call (INFO level, one line,
+not a repeated progress log -- explicitly not the kind of noise just
+demoted to DEBUG elsewhere in this same session). Since the two run
+concurrently by design, they intentionally don't sum to the call's wall
+time -- the log message says so directly, to head off reading them as a
+serial breakdown. New test in `tests/test_pipeline.py` injects real
+`time.sleep()` delays into fake extract/predict functions and asserts the
+logged numbers reflect them (loose lower bounds, since this is real
+wall-clock timing, not a mocked clock; ran 3x locally with no flakiness).
+58 tests pass. Next real run's log line will give the actual
+extract-vs-predict ratio instead of inferring it from `nvidia-smi`.

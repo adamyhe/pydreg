@@ -1,4 +1,6 @@
+import logging
 import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -55,6 +57,38 @@ def test_score_positions_matches_naive_sequential_result_across_chunks_and_chrom
     # returns [[center]] per row -- so the expected score IS each position's own
     # start value, in the DataFrame's original row order.
     np.testing.assert_array_equal(scores, [10, 20, 30, 5, 15])
+
+
+def test_score_positions_logs_accumulated_extract_and_predict_seconds(monkeypatch, caplog):
+    def slow_extract(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+        time.sleep(0.05)
+        return np.asarray(centers, dtype=float)[:, None]
+
+    class SlowScorer:
+        backend = "fake"
+
+        def predict(self, X):
+            time.sleep(0.02)
+            return X.sum(axis=1)
+
+    monkeypatch.setattr(pipeline.features, "extract_features_batch", slow_extract)
+    bed_df = pd.DataFrame({"chrom": ["chr1"] * 4, "start": list(range(4))})
+
+    with caplog.at_level(logging.INFO, logger="pydreg.pipeline"):
+        pipeline._score_positions(
+            None, None, _FakeModel(), SlowScorer(), bed_df, chunk=2, desc="scoring testcase"
+        )
+
+    (record,) = [r for r in caplog.records if "scoring testcase" in r.getMessage()]
+    message = record.getMessage()
+    assert "extracting features" in message
+    assert "scorer.predict" in message
+    # 2 chunks each -- loose lower bounds (not tight equality) since this
+    # is real wall-clock timing, not a mocked clock.
+    extract_seconds = float(message.split("s extracting")[0].split()[-1])
+    predict_seconds = float(message.split("s in scorer.predict")[0].split()[-1])
+    assert extract_seconds >= 0.09
+    assert predict_seconds >= 0.03
 
 
 def test_score_positions_prefetches_next_chunk_while_scoring_current(monkeypatch):

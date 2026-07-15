@@ -69,16 +69,31 @@ def _score_positions(
     overlap as usefully since there's no GPU wait to hide behind.
 
     progress: show a tqdm progress bar over positions scored
-    (auto-hidden if stdout isn't a terminal)."""
+    (auto-hidden if stdout isn't a terminal).
+
+    Logs accumulated extract_seconds/predict_seconds once at the end (not
+    per-chunk -- that would be exactly the kind of noisy progress line
+    just demoted to DEBUG elsewhere): extract_seconds is the sum of the
+    background thread's own per-chunk timings (nonlocal, but never written
+    by more than one thread at a time -- see the prefetch note above);
+    predict_seconds is timed on the main thread same as any other call.
+    Since the two run concurrently, they don't sum to this call's wall
+    time -- that's the whole point, and worth seeing directly rather than
+    inferred from GPU-utilization graphs alone."""
     bed_df = bed_df.reset_index(drop=True)
     chrom_col, start_col = bed_df.columns[0], bed_df.columns[1]
     scores = np.empty(len(bed_df))
+    extract_seconds = 0.0
+    predict_seconds = 0.0
 
     def extract(item):
+        nonlocal extract_seconds
+        t0 = time.perf_counter()
         chrom, positions, centers = item
         X = features.extract_features_batch(
             bw_plus, bw_minus, chrom, centers, model.window_sizes, model.half_n_windows
         )
+        extract_seconds += time.perf_counter() - t0
         return positions, X
 
     pbar = tqdm(
@@ -94,9 +109,18 @@ def _score_positions(
             next_item = next(chunks, None)
             future = pool.submit(extract, next_item) if next_item is not None else None
 
+            t0 = time.perf_counter()
             scores[positions] = scorer.predict(X)
+            predict_seconds += time.perf_counter() - t0
             pbar.update(len(positions))
     pbar.close()
+    logger.info(
+        "%s: %.2fs extracting features, %.2fs in scorer.predict "
+        "(these overlap, so they don't sum to this step's wall time)",
+        desc,
+        extract_seconds,
+        predict_seconds,
+    )
     return scores
 
 
