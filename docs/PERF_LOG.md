@@ -11,6 +11,10 @@ scores, same peaks, same faithfully-replicated R quirks documented in
 `docs/PLANNING.md`) — verified via the existing test suite plus a full CLI
 diff, not just "looks right."
 
+This is a comprehensive, chronological research log (every benchmark, every
+dead end, every number), not user-facing documentation. For a plain-language
+summary of the resulting design choices, see `docs/OPTIMIZATION.md` instead.
+
 ## 2026-07-09 — initial vectorization/JIT audit
 
 Full audit of `src/pydreg/` (`io.py`, `infp.py`, `features.py`, `models.py`,
@@ -240,10 +244,17 @@ tier. Before chasing that, benchmarked the "numpy" and "sklearn" tiers
 against each other directly (`scripts/bench_backends.py`, added this entry —
 run it to reproduce on other hardware): both call the same RBF-SVR math
 (`to_sklearn_svr()` reproduces `DREGModel.predict()`'s weights exactly,
-verified to agree to ~1e-10), but `sklearn.svm.SVR.predict()` (libsvm) is a
-single-threaded C loop over support vectors, while `DREGModel.predict`'s
-chunked `X_scaled @ sv_block.T` / `K @ coefs` dispatches to a multithreaded
-BLAS (Accelerate, on this Mac).
+verified to agree to ~1e-10), but `sklearn.svm.SVR.predict()` (libsvm) computes
+one query-SV kernel value at a time in a C loop, while `DREGModel.predict`'s
+chunked `X_scaled @ sv_block.T` / `K @ coefs` computes all of them at once via
+BLAS.
+
+**Correction (2026-07-14)**: the line above originally attributed this to
+"single-threaded C loop vs. multithreaded BLAS" -- that's not the real
+reason (see the 2026-07-14 entry below for the actual root cause, found by
+reading libsvm's C++ source directly: forcing single-threaded BLAS via
+`VECLIB_MAXIMUM_THREADS=1` doesn't change `DREGModel.predict`'s wall-clock
+time at all, ruling out threading as the explanation).
 
 Measured on this machine (605,187 SVs x 360 features, local safetensors,
 1 rep):
@@ -900,3 +911,145 @@ guessing further from synthetic data that couldn't reproduce the observed
 production magnitude.
 
 All 40 tests pass.
+
+## 2026-07-14 — why is sklearn so much slower than the numpy/numba tiers? (SVM correction + new RF finding)
+
+Asked to explore *why*, not just confirm *that*, sklearn is slower than
+pydreg's own numpy (SVM) and numba (RF) implementations, for both models --
+this corrects the 2026-07-09 entry's SVM explanation and adds a new RF
+finding neither entry covered before.
+
+**SVM: not actually about threading.** Tested the 2026-07-09 entry's
+"single-threaded C loop vs. multithreaded BLAS" claim directly:
+`VECLIB_MAXIMUM_THREADS=1` (forcing single-threaded Accelerate BLAS) gives
+the *same* wall-clock time as the default (1.10s vs. 1.15s on a 256-query
+batch), and the default run's own `cpu_time/wall_time` ratio is only ~1.2x
+-- nowhere near saturating this machine's 10 cores. So multithreading isn't
+the differentiator at all. Reading libsvm's actual C++ source
+(`sklearn/svm/src/libsvm/svm.cpp`, `svm_predict_values` -> `Kernel::k_function`)
+shows the real shape of the computation: for *each* query point, it loops
+over all 605,187 support vectors and calls `k_function` once per pair, and
+each call does `malloc(sizeof(double)*360)` + a single BLAS **level-1**
+`dot()` (360 elements) + `free()` -- i.e. 605,187 heap-alloc/free round trips
+and 605,187 tiny vector-vector BLAS calls, per query. `DREGModel.predict`
+instead issues one BLAS **level-3** `X_scaled @ sv_block.T` GEMM call that
+computes every query x SV dot product at once. Level-3 GEMM is cache-blocked
+and SIMD-vectorized across the whole computation; repeated tiny level-1
+calls (plus the allocator overhead) can't get anywhere near that throughput
+regardless of thread count -- a genuinely different computational shape, not
+a parallelism gap.
+
+**RF: pure per-call Python/joblib orchestration overhead, confirmed via a
+same-scale sklearn model built for direct comparison.** Fit a
+`RandomForestRegressor(n_estimators=500, max_depth=8)` (matching pydreg's
+real forest's 500 trees) on synthetic data and benchmarked `.predict()`
+against `DREGPeakSplitForest.predict()` (numba) at matched row counts:
+
+| n rows | sklearn (n_jobs=1) | sklearn (n_jobs=-1) | numba | ratio (1job/numba) |
+|---|---|---|---|---|
+| 1 | 9.9ms | 26.5ms | 0.016ms | **624x** |
+| 20 | 10.2ms | 25.8ms | 0.26ms | 40x |
+| 1000 | 28.8ms | 38.3ms | 13.0ms | 2.2x |
+| 10000 | 176.7ms | 52.1ms | 131.9ms | 0.4x (parallel sklearn is *faster*) |
+
+A flat ~10-26ms regardless of `n` until `n` reaches the thousands, then it
+scales with real work -- the fixed-overhead signature. `cProfile` on the
+`n=1` case (200 reps) pins it down exactly: `RandomForestRegressor.predict()`
+dispatches **one joblib `Parallel`/`delayed()` task per tree** (500 tasks for
+one top-level `.predict()` call), and each tree's own
+`DecisionTreeRegressor.predict()` independently re-runs sklearn's full
+estimator-API machinery from scratch: `check_is_fitted` (500 calls),
+`get_tags()`/`__sklearn_tags__()` introspection (500-700+ calls),
+`functools.update_wrapper` decorator rebuilding (500 calls), even
+`warnings.filterwarnings()` and `re.compile()` (2500 calls *each*). None of
+that is tree-traversal math -- it's the validated/introspectable general-
+purpose estimator API, paid 500 times per prediction call. `_forest_predict`
+does the whole 500-tree traversal inside one compiled numba function with
+zero per-tree Python overhead, which is why it wins by 2-3 orders of
+magnitude at pydreg's actual call shape (1-20 rows per call, confirmed in
+the 2026-07-14 RF-split entry above) and only loses once `n` reaches the
+thousands and multi-core parallelism has enough real work to amortize its
+own dispatch cost.
+
+**Common thread, not a coincidence**: sklearn's estimators are built and
+tuned for a few large-batch calls (typical training/serving shape); pydreg's
+actual workload -- confirmed independently for both models in this and
+earlier sessions -- is many tiny calls. For SVM the mismatch is algorithmic
+(libsvm's predict path has no batched-kernel-matrix option at all); for RF
+it's pure API/orchestration overhead that happens to fully amortize past
+~1000 rows. Neither is a bug in sklearn -- both are the wrong tool for this
+specific call shape, which is exactly why pydreg carries its own numpy/numba
+implementations instead of depending on sklearn's for the hot path.
+
+Research only, no code changed; `backend.py`'s `detect_backend()` docstring
+and the correction above already reflect this.
+
+## 2026-07-14 — end-to-end validation: 0.999728 Jaccard index vs. real dREG on test data
+
+The user ran pydreg's full peak-calling pipeline against real dREG (the
+original R package) on test data and compared the resulting peak sets:
+**Jaccard index (|pydreg ∩ dREG| / |pydreg ∪ dREG|) = 0.999728.**
+
+This is the real-world fidelity check the "Ground rule" above asks for --
+not literal bit-identical output (not expected, given `pmv_laplace`'s
+inherent QMC randomization and the already-documented CBC-vs-Korobov
+lattice-algorithm difference between SciPy and R's `mvtnorm`, see the
+2026-07-14 B0 entry above), but near-total agreement on the actual called
+peak set after this session's full run of changes: the R-fidelity
+`maxpts`/`abseps` precision fix, `_cbc_lattice` caching, the small-start
+adaptive QMC sample schedule (the biggest behavioral change of the session,
+since it alters exactly how many samples `pmv_laplace` draws per box), and
+the `_permuted_cholesky` numba port (bit-exact vs. SciPy's own
+implementation, so not expected to move this number at all). None of that
+work traded away correctness for speed -- this is the empirical confirmation.
+
+## 2026-07-14 — correction: the `_permuted_cholesky` numba port is not *always* bit-exact, and that's fine
+
+`test_permuted_cholesky_numba_matches_scipy_exactly` (from the entry above)
+failed intermittently in CI/other runs despite passing repeatedly here --
+`assert max_diff < 1e-12` failing with `max_diff` in the single-to-low-
+hundreds range, not a tiny precision miss. Root-caused by searching 200,000
+random cases directly on this machine (not a cross-platform artifact):
+`_permuted_cholesky`'s greedy pivot search picks the dimension with the
+smallest remaining marginal probability range (`de = phi(hi_i) - phi(lo_i)`)
+at each step. For a near-saturated box -- every dimension's marginal
+probability already ~1, exactly what happens at the small-z0 tail of
+`pmv_laplace`'s own z-grid -- every candidate's `de` is a near-tie
+simultaneously, not just two candidates against each other. At that point,
+which pivot wins is decided by sub-ULP floating-point differences between
+NumPy's `@` (used inside SciPy's own pure-Python implementation) and this
+port's explicit summation loop -- found a concrete case where this flips
+the chosen pivot order, producing intermediate `cho`/`lo`/`hi` arrays that
+differ by up to ~196 (roughly 1-in-40000 random draws in the search).
+
+**This is not a correctness bug.** Verified directly on the worst case
+found: feeding *either* pivot choice's resulting `(cho, lo, hi)` into
+SciPy's own unmodified `_qmvn_inner` kernel (same lattice, same random
+shift, isolating the decomposition as the only variable) produces the same
+final probability (0.9999999999999998 vs. 1.0), matching a high-precision
+`scipy.stats.multivariate_normal.cdf` reference computed independently
+(0.9999999999999999). The pivot order is a variance-reduction heuristic for
+the subsequent QMC integration, not something the final integral's
+correctness depends on -- any valid pivot choice, correctly decomposed,
+gives a statistically valid estimate. Bit-identical *intermediates* was
+simply the wrong invariant to assert: even SciPy's own algorithm isn't
+guaranteed to reproduce this exact pivot choice across different BLAS
+backends at this kind of degenerate input, so holding a from-scratch port
+to a stricter bar than SciPy holds itself to was the actual mistake in the
+2026-07-14 entry above, not the port's math.
+
+**Fix**: split the one overreaching test into two in `tests/test_stats.py`:
+`test_permuted_cholesky_numba_matches_scipy_exactly_for_typical_boxes`
+(unchanged bit-exactness assertion, restricted to a moderate z0 range where
+the pivot search has a real signal to discriminate on -- still catches a
+genuine implementation bug in the common case) and
+`test_permuted_cholesky_numba_agrees_with_scipy_on_final_probability_at_saturated_boxes`
+(the full z0 range including saturating tails, asserting agreement on the
+*downstream probability* via a shared-lattice/shared-shift `_qmvn_inner`
+call, which is the invariant that actually matters -- includes the exact
+worst case found as a permanent, non-random regression case, since random
+draws essentially never reproduce a ~1-in-40000 divergence on their own).
+
+No production code changed -- `_permuted_cholesky_numba` itself is
+unmodified; this was purely a test-correctness fix. All 41 tests pass,
+stable across repeated runs.

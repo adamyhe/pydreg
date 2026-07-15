@@ -9,6 +9,11 @@
 > implementation and is *not* reflected in the algorithm descriptions below,
 > since they were performance-only changes with no behavioral difference —
 > see `docs/PERF_LOG.md` for that history instead.
+>
+> This document (and `docs/PERF_LOG.md`) is a comprehensive, chronological
+> design/research record, not user-facing documentation. For a plain-language
+> overview of the algorithm and the performance work, see `docs/METHODS.md`
+> and `docs/OPTIMIZATION.md` instead.
 
 ## Context
 
@@ -166,7 +171,7 @@ Chunking responsibility lives in **`pipeline.py`**, not inside `DREGModel.predic
 
 - **NumPy CPU tier**: existing SV-chunking (`chunk=20_000`) stays as-is; bound the *outer* query-chunk so the three same-shaped `(query_chunk, sv_chunk)` float64 temporaries (`cross`, `sqdist`, `K`) stay ≤~2GB transient: `query_chunk ≈ 4096`.
 - **sklearn CPU tier**: libsvm's C predict loop evaluates row-by-row internally (not memory-bound the way the NumPy tier is) — chunk mainly for streaming/checkpointing consistency: `query_chunk ≈ 50,000`.
-- **cuML GPU tier**: pass the full 605,187×360 SV matrix to `from_sklearn()` once, don't re-chunk over SVs; chunk only over queries to bound host→device transfer size. The CLI exposes a cuML-only `--cuml-query-chunk` defaulting to 800,000; `--query-chunk` still overrides all backends when set. Tune this on real GPUs by watching VRAM and throughput.
+- **cuML GPU tier**: pass the full 605,187×360 SV matrix to `from_sklearn()` once, don't re-chunk over SVs; chunk only over queries to bound host→device transfer size. The query-chunk-sized feature matrix is built as a plain NumPy array on the host first (`pipeline.py`'s `_score_positions`, before any GPU involvement), then handed to cuML's `.predict()`, which has to transfer that same-sized array to the device — so this bounds host RAM as much as VRAM, sequentially. The CLI exposes a cuML-only `--cuml-query-chunk` defaulting to `2**20` (~1.05M, ~3GB of host RAM at 360 float64 features/query); `--query-chunk` still overrides all backends when set. This default (like the cuML tier as a whole) has never been tuned/validated on real GPU hardware — watch VRAM and throughput and adjust if needed.
 
 This also sets up future multiprocessing cleanly (each worker owns one query batch) without touching `DREGModel` or `backend.py`.
 

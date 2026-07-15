@@ -2,13 +2,13 @@ from pydreg import pipeline
 
 
 def test_resolve_query_chunk_uses_cuml_specific_default():
-    assert pipeline._resolve_query_chunk("cuml") == 800_000
+    assert pipeline._resolve_query_chunk("cuml") == 2**20
     assert pipeline._resolve_query_chunk("cuml", cuml_query_chunk=400_000) == 400_000
-    assert pipeline._resolve_query_chunk("cuml", cuml_query_chunk=None) == 800_000
+    assert pipeline._resolve_query_chunk("cuml", cuml_query_chunk=None) == 2**20
     assert pipeline._resolve_query_chunk("numpy") == 4096
     assert pipeline._resolve_query_chunk("sklearn") == 50_000
     assert pipeline._resolve_query_chunk("cuml", query_chunk=123) == 123
-    assert pipeline._resolve_query_chunk("numpy", query_chunk=123, cuml_query_chunk=800_000) == 123
+    assert pipeline._resolve_query_chunk("numpy", query_chunk=123, cuml_query_chunk=2**20) == 123
 
 
 def test_pipeline_runs_end_to_end_on_synthetic_signal(synthetic_bigwig_pair, tmp_path, dreg_model, rf_model):

@@ -54,7 +54,7 @@ def _score_positions(bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=F
     return scores
 
 
-def _resolve_query_chunk(scorer_backend, query_chunk=None, cuml_query_chunk=800_000):
+def _resolve_query_chunk(scorer_backend, query_chunk=None, cuml_query_chunk=2**20):
     if query_chunk is not None:
         return query_chunk
     if scorer_backend == "cuml" and cuml_query_chunk is not None:
@@ -71,7 +71,7 @@ def run(
     pv_adjust="fdr",
     pv_threshold=0.05,
     query_chunk=None,
-    cuml_query_chunk=800_000,
+    cuml_query_chunk=2**20,
     peak_calling_cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,

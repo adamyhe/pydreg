@@ -35,7 +35,7 @@ def main(argv=None):
         "-c",
         "--cuml-query-chunk",
         type=int,
-        default=2**24,
+        default=2**20,
         help="positions scored per batch for the cuml backend when --query-chunk "
         "is not set; ignored by CPU backends",
     )

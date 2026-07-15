@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import _qmvnt
 
 from pydreg import stats
 from pydreg.stats import (
@@ -127,31 +128,34 @@ def test_pmv_laplace_z_grid_matches_r_seq_exactly():
     np.testing.assert_allclose(z[-5:], [1e17, 1e18, 1e19, 1e20, 1e100])
 
 
-def test_permuted_cholesky_numba_matches_scipy_exactly():
+def _random_cormat(rng):
+    while True:
+        a = rng.uniform(0.2, 0.85)
+        rho = a ** np.arange(5)
+        rho = rho * (1 + rng.uniform(-0.05, 0.05, size=5))
+        rho[0] = 1.0
+        idx = np.arange(5)
+        lag = np.abs(idx[:, None] - idx[None, :])
+        sigma2 = rng.uniform(0.05, 0.5)
+        cormat = sigma2 * rho[lag]
+        if np.all(np.linalg.eigvalsh(cormat) > 1e-9):
+            return cormat
+
+
+def test_permuted_cholesky_numba_matches_scipy_exactly_for_typical_boxes():
     # _permuted_cholesky is a deterministic pivoted-Cholesky algorithm (no
-    # randomization), so the numba port must agree with SciPy's own
-    # pure-Python implementation to near machine precision on every case,
-    # not just "within QMC noise" like the kernel-adjacent tests above.
+    # randomization), so for a "typical" (non-saturated) box -- where each
+    # dimension's marginal probability range is meaningfully different from
+    # the others -- the greedy pivot-selection heuristic has a real signal
+    # to discriminate on, and the numba port agrees with SciPy's own
+    # pure-Python implementation to near machine precision.
     rng = np.random.default_rng(0)
-
-    def random_cormat():
-        while True:
-            a = rng.uniform(0.2, 0.85)
-            rho = a ** np.arange(5)
-            rho = rho * (1 + rng.uniform(-0.05, 0.05, size=5))
-            rho[0] = 1.0
-            idx = np.arange(5)
-            lag = np.abs(idx[:, None] - idx[None, :])
-            sigma2 = rng.uniform(0.05, 0.5)
-            cormat = sigma2 * rho[lag]
-            if np.all(np.linalg.eigvalsh(cormat) > 1e-9):
-                return cormat
-
     max_diff = 0.0
     for _ in range(100):
-        cor_mat = random_cormat()
+        cor_mat = _random_cormat(rng)
         abs_x = rng.uniform(0.01, 3.0, size=5)
-        z0 = 10 ** rng.uniform(-3, 3)
+        z0 = 10 ** rng.uniform(-1, 1)  # moderate range only -- see the
+        # saturated-box test below for why extreme z0 is excluded here.
         low = -abs_x / np.sqrt(z0)
         high = abs_x / np.sqrt(z0)
 
@@ -166,3 +170,82 @@ def test_permuted_cholesky_numba_matches_scipy_exactly():
         )
 
     assert max_diff < 1e-12
+
+
+def test_permuted_cholesky_numba_agrees_with_scipy_on_final_probability_at_saturated_boxes():
+    # At a near-saturated box (every dimension's marginal probability
+    # already ~1 -- exactly what pmv_laplace's z-grid produces at its
+    # small-z0 tail), the pivot-selection heuristic's "smallest remaining
+    # probability range" comparison is a near-tie in every dimension
+    # simultaneously, not just between two candidates. Found via a 200k-case
+    # random search (see docs/PERF_LOG.md) that this can flip which pivot
+    # order this numba port picks vs. SciPy's own implementation -- purely a
+    # floating-point summation-order difference (NumPy's `@`, used
+    # internally by SciPy's pure-Python original, vs. this port's explicit
+    # loop), reproducible even on a single machine, not a cross-platform
+    # BLAS artifact. Confirmed on the worst case found (~196 divergence in
+    # the raw cho/lo/hi arrays) that BOTH pivot choices are independently
+    # valid: feeding either decomposition into SciPy's own _qmvn_inner
+    # kernel (same lattice, same random shift, isolating the decomposition
+    # as the only variable) gives the same final probability, matching a
+    # high-precision scipy.stats.multivariate_normal.cdf reference to
+    # ~1e-13. So this test checks the invariant that actually matters for
+    # pmv_laplace's correctness -- the downstream probability -- not
+    # bit-identical intermediates, which even SciPy's own algorithm
+    # wouldn't guarantee across different BLAS backends at this kind of
+    # degenerate input.
+    rng = np.random.default_rng(0)
+    n_batches = 10
+    mi = 25000
+    q_lat, n_qmc = _qmvnt._cbc_lattice(4, mi // n_batches)
+
+    # An explicit, known-divergent case (found via a 200k-case random
+    # search, exact values captured directly -- not reconstructed from a
+    # rounded correlation vector, since this tie is sensitive enough that
+    # even tiny input changes can make it stop diverging) is included first
+    # so this test always exercises a real pivot-order divergence rather
+    # than relying on the random draws below to stumble onto one
+    # (empirically, they almost never do -- roughly 1-in-40000, per the
+    # search that found it).
+    _known_cor_mat = np.array([
+        [0.24994265385077855, 0.16564401749379096, 0.1267257337092855, 0.08624421809638201, 0.05817043133102397],
+        [0.16564401749379096, 0.24994265385077855, 0.16564401749379096, 0.1267257337092855, 0.08624421809638201],
+        [0.1267257337092855, 0.16564401749379096, 0.24994265385077855, 0.16564401749379096, 0.1267257337092855],
+        [0.08624421809638201, 0.1267257337092855, 0.16564401749379096, 0.24994265385077855, 0.16564401749379096],
+        [0.05817043133102397, 0.08624421809638201, 0.1267257337092855, 0.16564401749379096, 0.24994265385077855],
+    ])
+    _known_low = np.array([-77.560628426754, -24.30620393963036, -15.880500456361732,
+                            -4.136553148872132, -55.794487509459614])
+    _known_high = -_known_low
+
+    cho_s, lo_s, hi_s = stats._orig_permuted_cholesky(_known_cor_mat, _known_low, _known_high)
+    cho_n, lo_n, hi_n = stats._permuted_cholesky_numba(_known_cor_mat, _known_low, _known_high)
+    known_diff = max(np.max(np.abs(cho_s - cho_n)), np.max(np.abs(lo_s - lo_n)), np.max(np.abs(hi_s - hi_n)))
+    assert known_diff > 1e-6, "expected known case to diverge; if it no longer does, replace it"
+
+    rndm = np.random.default_rng(1).random(size=(n_batches, 5))
+    prob_s, _, _ = _qmvnt._qmvn_inner(q_lat, rndm, n_qmc, n_batches, cho_s, lo_s, hi_s)
+    prob_n, _, _ = _qmvnt._qmvn_inner(q_lat, rndm, n_qmc, n_batches, cho_n, lo_n, hi_n)
+    assert abs(prob_s - prob_n) < 1e-6, (
+        f"known-divergent case: probabilities disagree ({prob_s} vs {prob_n})"
+    )
+
+    for i in range(200):
+        cor_mat = _random_cormat(rng)
+        abs_x = rng.uniform(0.01, 3.0, size=5)
+        z0 = 10 ** rng.uniform(-3, 3)  # full range, including saturating tails
+        low = -abs_x / np.sqrt(z0)
+        high = abs_x / np.sqrt(z0)
+
+        cho_s, lo_s, hi_s = stats._orig_permuted_cholesky(cor_mat, low, high)
+        cho_n, lo_n, hi_n = stats._permuted_cholesky_numba(cor_mat, low, high)
+
+        rndm = np.random.default_rng(1000 + i).random(size=(n_batches, 5))
+        prob_s, _, _ = _qmvnt._qmvn_inner(q_lat, rndm, n_qmc, n_batches, cho_s, lo_s, hi_s)
+        prob_n, _, _ = _qmvnt._qmvn_inner(q_lat, rndm, n_qmc, n_batches, cho_n, lo_n, hi_n)
+
+        assert abs(prob_s - prob_n) < 1e-6, (
+            f"case {i}: cho/lo/hi diverged (different pivot order) AND the "
+            f"resulting probabilities disagree ({prob_s} vs {prob_n}) -- this "
+            "would be a real correctness bug, unlike a mere pivot-order difference"
+        )

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Default query-position chunk sizes per backend tier. Sized for the
 # pretrained SVR's shape (605,187 support vectors x 360 features); see
 # docs/PLANNING.md "Batching" for the memory-bound reasoning behind each.
-DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 800_000}
+DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 2**20}
 
 
 class BackendUnavailable(RuntimeError):
@@ -52,11 +52,17 @@ def detect_backend():
     backend actually usable right now.
 
     "sklearn" is CPU-only and is never auto-selected: benchmarked at ~15x
-    slower than the "numpy" tier (libsvm's predict loop is single-threaded C,
-    vs. DREGModel.predict's chunked matmul, which dispatches to a
-    multithreaded BLAS) despite computing the same math (agrees to ~1e-10).
-    It remains selectable via --backend sklearn, and to_sklearn_svr() is
-    still required as the input to cuml.svm.SVR.from_sklearn()."""
+    slower than the "numpy" tier despite computing the same math (agrees to
+    ~1e-10). Not a threading gap (forcing single-threaded BLAS via
+    VECLIB_MAXIMUM_THREADS=1 doesn't change DREGModel.predict's wall-clock
+    time at all) -- libsvm's predict path (svm.cpp's predict_values ->
+    k_function) mallocs a temp array and issues one tiny BLAS level-1 dot()
+    per query-SV pair (605,187 of them), while DREGModel.predict's chunked
+    `X_scaled @ sv_block.T` issues one BLAS level-3 GEMM call that computes
+    all of them at once -- a genuinely different computational shape, not a
+    parallelism difference (see docs/PERF_LOG.md's 2026-07-14 entry). It
+    remains selectable via --backend sklearn, and to_sklearn_svr() is still
+    required as the input to cuml.svm.SVR.from_sklearn()."""
     if not _cuml_installed():
         logger.info("cuml not installed -- install pydreg[gpu] for GPU scoring")
         return "numpy"
