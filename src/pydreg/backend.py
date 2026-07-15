@@ -4,11 +4,23 @@ branches on backend -- it only ever calls a Scorer's uniform .predict().
 
 Detection is lazy (never at import time -- importing cuml alone can take
 seconds and drags in cupy/numba-cuda/rmm, a bad tax on every invocation
-including --help) and cached once per process. The cuML tier is unvalidated
-on real GPU hardware (none was available where this was written) -- the
-default query-chunk size there especially should be re-checked on an actual
-CUDA box.
-"""
+including --help) and cached once per process.
+
+The cuML tier is now validated on real GPU hardware -- and that validation
+surfaced a real, confirmed finding: RAPIDS/cuML dropped support for Pascal
+GPUs (compute capability < 7.0) in the 24.02 release, and running a
+Pascal-era cuML build on such hardware doesn't error, it silently returns
+wrong predictions (RAPIDS's own deprecation notice: "use of a Pascal GPU
+will either fail or return invalid results"). Confirmed end-to-end on a
+real production run: cuml 26.06.00's SVR.from_sklearn()-built model
+diverged from the NumPy reference by ~0.05 on an NVIDIA TITAN X (Pascal,
+compute capability 6.1), while the *exact same bigWig inputs* on an A100
+(compute capability 8.0) ran clean (Jaccard > 0.999 vs. real dREG). See
+docs/OPTIMIZATION.md for the full investigation. This is exactly why
+_wrap_sklearn_like's first-batch smoke test exists -- and why
+detect_backend()/build_scorer() also check compute capability directly, so
+unsupported hardware is caught before or instead of a confusing
+mid-pipeline BackendUnavailable."""
 
 import functools
 import importlib.util
@@ -46,6 +58,25 @@ def _cuda_runtime_available():
         return False
 
 
+# RAPIDS/cuML's documented minimum since the 24.02 release -- see this
+# module's docstring for the real-hardware confirmation of what happens
+# below this (silently wrong results, not an error).
+MIN_CUDA_COMPUTE_CAPABILITY = 70
+
+
+def _cuda_compute_capability():
+    """Returns the current CUDA device's compute capability as an int
+    (e.g. 70 for 7.0, matching CuPy's own '70'-style string format), or
+    None if it can't be determined (no GPU, CuPy not installed, etc.)."""
+    try:
+        import cupy
+
+        return int(cupy.cuda.Device().compute_capability)
+    except Exception:
+        logger.debug("CuPy compute-capability probe failed", exc_info=True)
+        return None
+
+
 @functools.lru_cache(maxsize=1)
 def detect_backend():
     """Probes once per process and returns "cuml" or "numpy" -- the best
@@ -71,6 +102,17 @@ def detect_backend():
         logger.info("cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU")
         return "numpy"
 
+    cc = _cuda_compute_capability()
+    if cc is not None and cc < MIN_CUDA_COMPUTE_CAPABILITY:
+        logger.info(
+            "GPU compute capability %.1f is below RAPIDS/cuML's minimum of %.1f "
+            "(older GPUs aren't just unsupported, they can silently return wrong "
+            "predictions rather than erroring -- see pydreg.backend's module "
+            "docstring) -- falling back to CPU",
+            cc / 10, MIN_CUDA_COMPUTE_CAPABILITY / 10,
+        )
+        return "numpy"
+
     return "cuml"
 
 
@@ -84,6 +126,40 @@ class Scorer:
 
     def predict(self, X):
         return self._predict_fn(X)
+
+
+def _sklearn_cross_check_detail(dreg_model, sample, reference):
+    """On a non-sklearn backend's smoke-test failure, also runs the CPU
+    libsvm (scikit-learn) path on the same sample -- to_sklearn_svr()'s
+    conversion independently agrees with the NumPy reference to ~1e-9 (see
+    its docstring), so this pinpoints whether a divergence is specific to
+    the failing backend's own GPU/library conversion, or is instead shared
+    with any libsvm-style kernel evaluation (which would point at
+    DREGModel.predict's own expanded-form squared-distance formula being
+    the side that's actually wrong on this particular input, not the
+    backend being tested). Best-effort: swallows its own failures rather
+    than masking the original error with a second one."""
+    try:
+        sk_svr = to_sklearn_svr(dreg_model)
+        sample_scaled = (sample - dreg_model.x_center) / dreg_model.x_scale
+        sk_y = np.asarray(sk_svr.predict(sample_scaled)) * dreg_model.y_scale + dreg_model.y_center
+        sk_max_abs = float(np.max(np.abs(sk_y - reference)))
+    except Exception:
+        logger.debug("sklearn cross-check itself failed", exc_info=True)
+        return ""
+
+    if sk_max_abs > 1e-4:
+        return (
+            f"; sklearn (CPU libsvm) on the same sample also diverges from the "
+            f"NumPy reference (max_abs_diff={sk_max_abs:.6g}) -- this looks like a "
+            "NumPy-reference-side issue (e.g. DREGModel.predict's expanded-form "
+            "squared-distance formula losing precision on this input), not specific "
+            "to this backend"
+        )
+    return (
+        f"; sklearn (CPU libsvm) on the same sample agrees with the NumPy reference "
+        f"(max_abs_diff={sk_max_abs:.6g}) -- the divergence looks specific to this backend"
+    )
 
 
 def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
@@ -112,9 +188,12 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
                     if candidate.shape == reference.shape
                     else float("nan")
                 )
+                detail = ""
+                if backend_name != "sklearn" and candidate.shape == reference.shape:
+                    detail = _sklearn_cross_check_detail(dreg_model, sample, reference)
                 raise BackendUnavailable(
                     f"{backend_name} backend predictions do not match the NumPy reference "
-                    f"on a first-batch smoke test (max_abs_diff={max_abs:.6g}); "
+                    f"on a first-batch smoke test (max_abs_diff={max_abs:.6g}){detail}; "
                     "use --backend numpy until this backend conversion is fixed"
                 )
             validated = True
@@ -142,6 +221,15 @@ def build_scorer(dreg_model, backend=None):
             import cuml.svm
         except ModuleNotFoundError as e:
             raise BackendUnavailable("cuml is not installed (pip install 'pydreg[gpu]')") from e
+        cc = _cuda_compute_capability()
+        if cc is not None and cc < MIN_CUDA_COMPUTE_CAPABILITY:
+            raise BackendUnavailable(
+                f"GPU compute capability {cc / 10:.1f} is below RAPIDS/cuML's minimum "
+                f"of {MIN_CUDA_COMPUTE_CAPABILITY / 10:.1f} -- on unsupported hardware "
+                "(e.g. Pascal) cuML doesn't error, it silently returns wrong predictions "
+                "(confirmed on a real NVIDIA TITAN X, see pydreg.backend's module "
+                "docstring); use --backend numpy"
+            )
         try:
             gpu_model = cuml.svm.SVR.from_sklearn(to_sklearn_svr(dreg_model))
         except Exception as e:

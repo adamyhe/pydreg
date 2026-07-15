@@ -42,6 +42,34 @@ that it doesn't ship any macOS/ARM wheels at all and would need real
 engineering to even engage on a model that was never `.fit()` through it (see
 `docs/PERF_LOG.md` for the full investigation of both).
 
+## cuML's real hardware requirement: compute capability ≥7.0
+
+The cuML tier is now validated on real GPU hardware, and that validation
+caught a real, confirmed constraint: RAPIDS/cuML dropped support for Pascal
+GPUs (compute capability < 7.0) in its 24.02 release. Running a
+Pascal-incompatible cuML build on such a GPU doesn't raise an error — per
+RAPIDS's own deprecation notice, it "will either fail or return invalid
+results." Confirmed end-to-end on real production data: cuml 26.06.00's
+`SVR.from_sklearn()`-built model diverged from the NumPy reference by ~0.05
+on an NVIDIA TITAN X (Pascal, compute capability 6.1), while the *exact same
+bigWig inputs*, run on an A100 (compute capability 8.0), produced no
+divergence (Jaccard > 0.999 vs. real dREG). Also worth noting: `from_sklearn`
+itself only shipped in cuML 25.02, a full year after Pascal support was
+dropped in 24.02 — there is no cuML release that supports both, so pinning
+an older cuML isn't a workaround for Pascal-class hardware. Pascal's own
+crippled double-precision throughput (this SVR is inherently float64) makes
+GPU acceleration a poor fit there even setting compatibility aside.
+
+`pydreg.backend.detect_backend()` and `build_scorer()`'s explicit
+`--backend cuml` path both check the GPU's compute capability up front
+(`MIN_CUDA_COMPUTE_CAPABILITY = 70`) and refuse cuML below that threshold —
+auto mode silently falls back to NumPy, an explicit request raises
+`BackendUnavailable` with the specific reason, rather than surfacing as a
+confusing mid-pipeline smoke-test failure. That smoke test
+(`_wrap_sklearn_like`, comparing the first batch's predictions against the
+NumPy reference) remains in place regardless, as the last line of defense
+against *any* backend conversion issue, hardware-related or not.
+
 ## Batching
 
 Each backend gets its own default query-chunk size

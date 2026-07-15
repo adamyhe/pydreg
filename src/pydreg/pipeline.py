@@ -109,10 +109,10 @@ def run(
             progress=progress, desc="scoring informative positions",
         )
 
-    def score_fn(bed_df):
+    def score_fn(bed_df, desc="scoring"):
         return _score_positions(
             bw_plus, bw_minus, model, scorer, bed_df, chunk,
-            progress=progress, desc="scoring",
+            progress=progress, desc=desc,
         )
 
     logger.info("densifying and merging into broad peaks...")
