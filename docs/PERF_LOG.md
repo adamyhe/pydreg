@@ -1053,3 +1053,65 @@ draws essentially never reproduce a ~1-in-40000 divergence on their own).
 No production code changed -- `_permuted_cholesky_numba` itself is
 unmodified; this was purely a test-correctness fix. All 41 tests pass,
 stable across repeated runs.
+
+## 2026-07-15 — cuML backend validated on real GPU hardware: confirmed Pascal (compute capability < 7.0) silently returns wrong predictions
+
+First real-GPU run of the cuML tier (previously unvalidated per this
+module's own long-standing caveat) hit `_wrap_sklearn_like`'s first-batch
+smoke test: `cuml backend predictions do not match the NumPy reference ...
+(max_abs_diff=0.0498932)` on an NVIDIA TITAN X (Pascal).
+
+Investigation, in order:
+1. Read cuML's actual `SVMBase._attrs_from_cpu`/`_get_svm_model`/`predict`
+   source (`svm_base.pyx`, fetched directly from the `rapidsai/cuml`
+   GitHub repo at the installed 26.06.00 tag) looking for a dtype/attribute
+   conversion bug in `from_sklearn`. Ruled out: `from_sklearn` explicitly
+   forces `dtype=np.float64`; `n_support_`/`_gamma`/`intercept_`/
+   `dual_coef_` all copy through correctly; all of pydreg's own exported
+   model weights are float64 end-to-end (`scripts/pack_safetensors.py`
+   loads `<f8`), so this wasn't a float32-precision issue either.
+2. Enhanced `_wrap_sklearn_like`'s smoke-test failure to also run
+   scikit-learn's CPU libsvm path (`to_sklearn_svr(dreg_model)`, already
+   independently verified to agree with the NumPy reference to ~1e-9) on
+   the exact same failing sample, and report whether it agrees or also
+   diverges -- turning the smoke test into a triage tool rather than a bare
+   pass/fail (`_sklearn_cross_check_detail` in `backend.py`, tests added in
+   `tests/test_backend.py`). Result on the real failure: **sklearn agreed
+   with NumPy to 5.5e-11** -- pinpointing the divergence specifically to
+   cuML's own GPU path, not pydreg's conversion code or `DREGModel.predict`'s
+   own math (ruling out the initial hypothesis that the expanded-form
+   squared-distance formula was the culprit).
+3. User re-ran the identical bigWig inputs on an A100 (compute capability
+   8.0): no divergence, Jaccard > 0.999 vs. real dREG across multiple loci.
+   Same cuml version (26.06.00) both times -- pinned the variable to GPU
+   architecture, not data or software version.
+4. Fetched RAPIDS's actual install docs and support-notice pages: **Pascal
+   GPU support (compute capability 6.x) was removed in RAPIDS 24.02**, and
+   the deprecation notice states outright: "Effective this release, use of
+   a Pascal GPU will either fail or return invalid results." The TITAN X
+   is compute capability 6.1 -- below the 7.0 minimum every cuML release
+   since 24.02 requires. Also checked: `from_sklearn`/`as_sklearn` (PR
+   #6102) only shipped in cuML 25.02 -- a full year *after* Pascal support
+   was dropped, so no cuML version supports both; there's no older-cuML
+   workaround for Pascal-class hardware here. (Pascal's own crippled FP64
+   throughput would have made GPU accel a poor fit for this
+   inherently-float64 SVR regardless.)
+5. Confirmed directly: the user transferred the exact same bigWig files
+   that failed on the TITAN X over to the A100 machine, and the same job
+   ran with no deviation warning -- isolating the variable to the GPU
+   itself, not anything data-dependent about that particular run.
+
+**Fix**: `backend.py` now probes GPU compute capability directly
+(`_cuda_compute_capability()`, via `cupy.cuda.Device().compute_capability`)
+against a new `MIN_CUDA_COMPUTE_CAPABILITY = 70` constant. `detect_backend()`
+falls back to NumPy (with a log message) on unsupported hardware in auto
+mode; `build_scorer()`'s explicit `--backend cuml` path raises
+`BackendUnavailable` with the specific compute-capability reason instead of
+building a GPU model that would fail the smoke test downstream. The smoke
+test itself is unchanged and remains the last line of defense for any other
+backend-conversion issue. Documented in `docs/OPTIMIZATION.md`. Tests added
+in `tests/test_backend.py` (13 backend tests, 47 total, all passing).
+
+This is exactly the scenario `_wrap_sklearn_like`'s smoke test was built
+for -- it caught a real, silent-wrong-answers hardware incompatibility
+before it reached any output file.

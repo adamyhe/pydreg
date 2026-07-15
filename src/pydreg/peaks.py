@@ -2,10 +2,13 @@
 Depends only on pydreg.stats and pydreg.rfsplit -- never on pydreg.io/
 features/models/backend directly. The two steps that need to re-score newly
 generated candidate positions (get_dense_infp's gap-filling and
-densification) take a `score_fn(bed_df) -> np.ndarray` callback instead of
-importing a scoring backend themselves; pydreg.pipeline supplies the real
-one (wiring together bigwig readers, feature extraction, and the chosen
-DREGModel backend).
+densification) take a `score_fn(bed_df, desc="scoring") -> np.ndarray`
+callback instead of importing a scoring backend themselves; pydreg.pipeline
+supplies the real one (wiring together bigwig readers, feature extraction,
+and the chosen DREGModel backend). `desc` is only used to label that call's
+progress bar -- passed through per-callsite below so the gap-fill and
+10bp-redensification passes show up distinctly instead of both saying the
+generic "scoring".
 
 Several upstream R bugs are replicated faithfully here, not fixed -- the
 pretrained pipeline's expected behavior was produced by this exact code
@@ -187,9 +190,9 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
     resolution inside promising broad peaks and merges those in too.
 
     infp_bed: DataFrame with columns chrom, start, end, score (the
-    already-scored informative positions). score_fn(bed_df) -> np.ndarray:
-    scores a chrom/start/end DataFrame at its given positions (supplied by
-    pydreg.pipeline).
+    already-scored informative positions). score_fn(bed_df, desc="scoring")
+    -> np.ndarray: scores a chrom/start/end DataFrame at its given positions
+    (supplied by pydreg.pipeline); desc only labels that call's progress bar.
 
     Returns (dense_infp, peak_broad, min_score); dense_infp has an
     additional `infp` column (1 = original informative position, 0 =
@@ -226,7 +229,7 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
     if gap_bed is not None and len(gap_bed) > 0:
         gap_bed = gap_bed[["chrom", "start", "end"]]
         gap_bed.columns = [chrom_col, start_col, end_col]
-        gap_bed[score_col] = score_fn(gap_bed)
+        gap_bed[score_col] = score_fn(gap_bed, desc="scoring gap-filled positions")
         gap_bed["infp"] = 0
         infp_flagged = infp_bed.copy()
         infp_flagged["infp"] = 1
@@ -276,7 +279,7 @@ def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col
 
     r_dense = pd.concat(new_dense, ignore_index=True)
     r_dense[end_col] = r_dense[start_col] + 1
-    r_dense[score_col] = score_fn(r_dense)
+    r_dense[score_col] = score_fn(r_dense, desc="scoring 10bp-densified broad-peak positions")
     r_dense = r_dense[r_dense[score_col] > 0.05]
     if len(r_dense) == 0:
         return newinfp

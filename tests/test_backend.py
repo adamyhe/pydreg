@@ -33,8 +33,35 @@ def test_detect_backend_uses_cuml_when_cuda_runtime_available(monkeypatch):
     backend.detect_backend.cache_clear()
     monkeypatch.setattr(backend, "_cuml_installed", lambda: True)
     monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: True)
+    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 80)
 
     assert backend.detect_backend() == "cuml"
+
+
+def test_cuda_compute_capability_reads_cupy_device(monkeypatch):
+    class FakeDevice:
+        compute_capability = "61"
+
+    fake_cupy = types.SimpleNamespace(cuda=types.SimpleNamespace(Device=FakeDevice))
+    monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+
+    assert backend._cuda_compute_capability() == 61
+
+
+def test_detect_backend_falls_back_to_numpy_on_pascal_compute_capability(monkeypatch, caplog):
+    # Real hardware finding: RAPIDS/cuML dropped Pascal (compute capability
+    # 6.x) support in 24.02 -- confirmed on a real TITAN X that running
+    # cuml there doesn't error, it silently returns wrong predictions. This
+    # must be caught before build_scorer(), not left to the smoke test.
+    backend.detect_backend.cache_clear()
+    monkeypatch.setattr(backend, "_cuml_installed", lambda: True)
+    monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: True)
+    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 61)
+
+    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+        assert backend.detect_backend() == "numpy"
+
+    assert "compute capability 6.1 is below" in caplog.text
 
 
 def test_detect_backend_reports_no_cuda_without_probe_details(monkeypatch, caplog):
@@ -61,6 +88,7 @@ def test_explicit_cuml_build_scorer_raises_when_construction_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "cuml", fake_cuml)
     monkeypatch.setitem(sys.modules, "cuml.svm", fake_svm)
     monkeypatch.setattr(backend, "to_sklearn_svr", lambda dreg_model: object())
+    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 80)
 
     class FakeModel:
         _scorer_cache = {}
@@ -69,6 +97,26 @@ def test_explicit_cuml_build_scorer_raises_when_construction_fails(monkeypatch):
         backend.build_scorer(FakeModel(), "cuml")
     except backend.BackendUnavailable as e:
         assert "could not build a GPU model" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def test_explicit_cuml_build_scorer_raises_on_pascal_compute_capability(monkeypatch):
+    fake_cuml = types.ModuleType("cuml")
+    fake_svm = types.ModuleType("cuml.svm")
+    fake_cuml.svm = fake_svm
+    monkeypatch.setitem(sys.modules, "cuml", fake_cuml)
+    monkeypatch.setitem(sys.modules, "cuml.svm", fake_svm)
+    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 61)
+
+    class FakeModel:
+        _scorer_cache = {}
+
+    try:
+        backend.build_scorer(FakeModel(), "cuml")
+    except backend.BackendUnavailable as e:
+        assert "compute capability 6.1 is below" in str(e)
+        assert "silently returns wrong predictions" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
 
