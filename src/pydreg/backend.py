@@ -85,6 +85,18 @@ def _cuda_runtime_available():
 # below this (silently wrong results, not an error).
 MIN_CUDA_COMPUTE_CAPABILITY = 70
 
+# _wrap_sklearn_like's default smoke-test atol (1e-4) assumes
+# near-double-precision agreement; the "cupy" tier's GEMMs/kernel are
+# deliberately float32 (see _build_cupy_predict_fn), so it gets this looser
+# one instead. Confirmed on real hardware: a genuine max_abs_diff of
+# ~2.3e-4 against the float64 NumPy reference, with sklearn independently
+# agreeing with that same reference to ~5.5e-11 on the same sample --
+# pinning the divergence to cupy's own float32 arithmetic (specifically the
+# expanded-form squared-distance formula's cancellation sensitivity,
+# amplified by float32's much smaller precision budget), not a conversion
+# bug. See docs/PERF_LOG.md's 2026-07-15 entry.
+CUPY_SMOKE_TEST_ATOL = 5e-4
+
 
 def _cuda_compute_capability():
     """Returns the current CUDA device's compute capability as an int
@@ -190,10 +202,16 @@ def _sklearn_cross_check_detail(dreg_model, sample, reference):
     )
 
 
-def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
+def _wrap_sklearn_like(dreg_model, sk_predict, backend_name, rtol=1e-4, atol=1e-4):
     """Both the sklearn and cuml tiers predict in the SVR's internal scaled
     feature space and need the same x-scale / y-unscale wrapping DREGModel
-    itself does -- see pydreg.models.DREGModel.predict."""
+    itself does -- see pydreg.models.DREGModel.predict.
+
+    rtol/atol: smoke-test tolerance against the NumPy reference. The
+    default (1e-4/1e-4) assumes near-double-precision agreement, true for
+    sklearn/cuml (both genuinely float64). build_scorer() passes the
+    looser CUPY_SMOKE_TEST_ATOL for "cupy" specifically -- see that
+    constant's comment for why (deliberately float32, not a bug)."""
     validated = False
 
     def predict_fn(X):
@@ -209,7 +227,7 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
             if (
                 candidate.shape != reference.shape
                 or not np.all(np.isfinite(candidate))
-                or not np.allclose(candidate, reference, rtol=1e-4, atol=1e-4)
+                or not np.allclose(candidate, reference, rtol=rtol, atol=atol)
             ):
                 max_abs = (
                     float(np.max(np.abs(candidate - reference)))
@@ -401,7 +419,7 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None):
             raise BackendUnavailable(
                 f"cupy is installed but could not build a GPU predict function: {e}"
             ) from e
-        predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy")
+        predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy", atol=CUPY_SMOKE_TEST_ATOL)
 
     elif resolved == "sklearn":
         try:

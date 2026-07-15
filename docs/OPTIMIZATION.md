@@ -208,6 +208,28 @@ the actual historical CPU reference, for a speed motivation (crippled FP64
 throughput) that's GPU-specific and doesn't apply to CPUs at all — not
 recommended.
 
+**Confirmed on real hardware, and the smoke test's tolerance adjusted
+accordingly.** The float32 switch tripped `_wrap_sklearn_like`'s own
+smoke test: a real `max_abs_diff` of ~2.3e-4 against the float64 NumPy
+reference, with sklearn (CPU libsvm) independently agreeing with that same
+reference to ~5.5e-11 on the same sample — the same cross-check pattern
+from the original Pascal investigation, this time confirming the
+divergence is cupy's own (expected) float32 arithmetic, not a conversion
+bug. Root cause: the expanded-form squared-distance formula
+(`sq_x + sq_sv - 2*cross`) is a classic catastrophic-cancellation setup for
+nearby feature vectors, and while that's negligible in float64 (~15-16
+significant digits to lose a few of), it consumes a much larger fraction
+of float32's ~7 significant digits. The error is already baked into
+`cross`'s value by the time it comes back from the float32 GEMM — doing
+the subsequent subtract/exp step at higher precision doesn't recover it,
+so this isn't cheaply fixable without a fundamentally different
+mixed-precision GEMM technique. `_wrap_sklearn_like` now takes an
+`atol`/`rtol` override, and `build_scorer()` passes a `CUPY_SMOKE_TEST_ATOL
+= 5e-4` for the `cupy` tier specifically (`sklearn`/`cuml` keep the
+default `1e-4`, since both are genuinely float64) — loosened deliberately,
+with a real measured number plus margin behind it, not a blanket weakening
+of the safety net.
+
 **Deliberately not done for the `cuml` tier.** `cuml.svm.SVR.from_sklearn()`
 takes no dtype parameter (`cuml/internals/base.pyx`'s `from_sklearn(cls,
 model)` signature has none, and `SVMBase.__init__` doesn't expose `dtype`

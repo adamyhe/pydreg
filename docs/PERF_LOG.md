@@ -1338,3 +1338,53 @@ and the actual underlying array dtype out of sync wouldn't just lose
 precision, it would read the wrong bytes entirely -- a real risk with zero
 way to catch it without a GPU. Recommended `cupy` as the float32 GPU path
 instead, since it's the same math and already correct.
+
+## 2026-07-15 — float32 tripped the smoke test as expected; loosened its tolerance for cupy specifically, with a real number behind it
+
+The float32 downcast above hit `_wrap_sklearn_like`'s own smoke test on
+real hardware: `max_abs_diff=0.000227605` against the NumPy reference,
+with sklearn (CPU libsvm) on the same sample agreeing with that reference
+to ~5.5e-11 -- same triage pattern as the original Pascal investigation,
+this time confirming the divergence is cupy's own float32 arithmetic
+rather than a bug.
+
+Root-caused rather than just accepted: the expanded-form squared-distance
+formula (`sq_x + sq_sv - 2*cross`) is a textbook catastrophic-cancellation
+setup for nearby feature vectors -- two large, nearly-equal terms whose
+small difference is what actually matters. Negligible in float64 (~15-16
+significant digits, losing a few to cancellation still leaves plenty), but
+float32 only has ~7 to begin with, so the same absolute cancellation
+consumes a much larger fraction of the available precision. Checked
+whether upcasting the subtract/exp step to float64 would help (cheap,
+since that step is memory-bound not compute-bound, so it wouldn't cost the
+FP64 GEMM throughput penalty this whole tier exists to avoid) -- it
+wouldn't: `cross`'s own rounding error is already present the moment the
+float32 GEMM produces it, so promoting arithmetic *after* that point can't
+recover precision already lost. A real fix would need a fundamentally
+different mixed-precision GEMM technique (e.g. FP32 accumulation with an
+FP32 residual-correction pass); not attempted, no hardware to validate it
+against.
+
+Naive "float32 epsilon accumulated over 605,187 independent terms" napkin
+math lands around ~1e-4 -- the observed 2.28e-4 is consistent with that
+order of magnitude plus the cancellation amplification on top, not
+wildly larger in a way that would suggest a second, unrelated bug.
+
+**Fix**: `_wrap_sklearn_like` gained `rtol`/`atol` parameters (previously
+hardcoded to `1e-4`/`1e-4`). `build_scorer()` now passes a new
+`CUPY_SMOKE_TEST_ATOL = 5e-4` constant for the `cupy` tier specifically --
+`sklearn`/`cuml` keep the default `1e-4`, since both are genuinely
+float64 and nothing about their expected precision changed. The new
+constant's value comes directly from the real measured divergence plus
+margin, not a guess -- same principle as every other tolerance decision
+this project has made (e.g. the `_permuted_cholesky` pivot-order test
+fix): characterize the real mechanism first, confirm it's not masking an
+actual bug, then loosen deliberately with a documented number behind it.
+
+Tests: two new cases in `tests/test_backend.py` place a smoke-test
+divergence at a precise, known distance from the reference (via a
+`_build_cupy_predict_fn` wrapper that adds a fixed offset, since the
+NumPy-standin fake doesn't reproduce real float32 rounding) -- one in the
+1e-4..5e-4 band (must not raise, proving the looser tolerance actually
+applies to `cupy`), one past 5e-4 (must still raise, proving the looser
+tolerance doesn't disable the check entirely). 54 tests pass.

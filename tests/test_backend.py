@@ -228,6 +228,60 @@ def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
+def _cupy_build_with_offset(offset):
+    """Wraps the real _build_cupy_predict_fn so its predict_fn returns a
+    fixed y_scaled offset -- used to place a smoke-test divergence at a
+    precise, known distance from the reference, rather than relying on
+    real float32 rounding (which the NumPy-standin fake doesn't actually
+    reproduce)."""
+    real_build = backend._build_cupy_predict_fn
+
+    def build(dreg_model, **kwargs):
+        real_predict = real_build(dreg_model, **kwargs)
+
+        def offset_predict(X_scaled):
+            return real_predict(X_scaled) + offset
+
+        return offset_predict
+
+    return build
+
+
+def test_explicit_cupy_build_scorer_tolerates_a_divergence_between_the_two_tolerances(
+    monkeypatch,
+):
+    # cupy's GEMMs/kernel are deliberately float32 -- CUPY_SMOKE_TEST_ATOL
+    # (5e-4) exists specifically so a real divergence in this band (bigger
+    # than the default 1e-4, but expected for float32) doesn't raise.
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+    # y_scale=2.0 on this fixture, so a 1.5e-4 offset in y_scaled space is
+    # 3e-4 in the final (unscaled) space the smoke test actually compares.
+    monkeypatch.setattr(backend, "_build_cupy_predict_fn", _cupy_build_with_offset(1.5e-4))
+
+    scorer = backend.build_scorer(model, "cupy")
+    X_raw = np.random.default_rng(5).normal(size=(4, model.n_features))
+    scorer.predict(X_raw)  # should not raise
+
+
+def test_explicit_cupy_build_scorer_still_rejects_a_divergence_past_its_looser_tolerance(
+    monkeypatch,
+):
+    # Confirms CUPY_SMOKE_TEST_ATOL loosens the check, it doesn't disable it.
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+    monkeypatch.setattr(backend, "_build_cupy_predict_fn", _cupy_build_with_offset(1.0))
+
+    try:
+        backend.build_scorer(model, "cupy").predict(
+            np.random.default_rng(6).normal(size=(4, model.n_features))
+        )
+    except backend.BackendUnavailable as e:
+        assert "do not match the NumPy reference" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
 def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
     model = _tiny_svr_model()
