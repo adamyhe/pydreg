@@ -1388,3 +1388,55 @@ NumPy-standin fake doesn't reproduce real float32 rounding) -- one in the
 1e-4..5e-4 band (must not raise, proving the looser tolerance actually
 applies to `cupy`), one past 5e-4 (must still raise, proving the looser
 tolerance doesn't disable the check entirely). 54 tests pass.
+
+## 2026-07-15 — float32 exposed feature extraction as the new bottleneck; overlapped it with GPU scoring via a one-chunk prefetch
+
+Real-hardware confirmation of the float32 result above: TITAN X throughput
+went 794 -> 9732 pos/s (~12.3x). Checked the implied FLOPS both times as a
+sanity check -- 794 pos/s implies ~346 GFLOPS (matches the TITAN X's
+~343 GFLOPS FP64 ceiling almost exactly, the same number from the original
+Pascal investigation); 9732 pos/s implies ~4.2 TFLOPS, roughly 40-45% of
+the card's ~9.5-11 TFLOPS FP32 peak -- a reasonable real-world GEMM
+efficiency, well short of a naive 32x (FP64:FP32 ratio) because the
+elementwise/memory-bound portion of the kernel doesn't scale the same way,
+and because of the bottleneck found next.
+
+Per the earlier prediction (this was flagged as a real risk before there
+were numbers to confirm it, back when discussing whether a P100 would
+even be GPU-bound): `nvidia-smi` on this same TITAN X run now showed
+utilization cycling 0-90% between chunks, instead of staying maxed out.
+Classic Amdahl's-law consequence -- cutting the GPU-bound step's cost by
+~12x exposed the *other* per-chunk step, CPU-bound feature extraction
+(bigWig I/O + binning), as the new relatively-larger bottleneck. Same
+issue independently observed on an A100 running `cuml` (unrelated to the
+float32 work, confirming this is backend-agnostic, not cupy-specific) --
+`_score_positions`'s extract-then-predict loop was always strictly
+sequential, it just didn't matter while the GPU step was slow enough to
+dominate regardless.
+
+**Fix**: `pipeline._score_positions` now runs a one-chunk-ahead prefetch --
+a single background thread (`ThreadPoolExecutor(max_workers=1)`) extracts
+the *next* chunk's features while the main thread's `scorer.predict()`
+call blocks on the current chunk's GPU work. Relies on `scorer.predict()`
+releasing the GIL during that block (true of CuPy/cuML's device-sync
+calls) for the overlap to actually help; harmless either way on CPU
+backends. Safe specifically because only one thread ever touches the
+bigWig readers at a time -- the main thread never reads a bigWig while a
+background extraction is in flight, and `max_workers=1` guarantees at
+most one extraction is ever in progress. Pure scheduling change: same
+extraction/scoring calls, same inputs, same order, so no output change is
+expected. `_score_positions`'s per-chromosome nested loop was flattened
+into `_iter_score_chunks`, a flat generator across every chromosome
+group -- needed so the prefetch has one uniform "next chunk" boundary to
+reason about, including the last-chunk-of-one-chromosome ->
+first-chunk-of-the-next-one transition, not two different loop shapes to
+special-case.
+
+Tests: `tests/test_pipeline.py` gained three cases -- `_iter_score_chunks`
+flattening across chromosomes/chunk boundaries, `_score_positions`
+producing the exact expected result for a checkable (not just
+zeros-shaped) fake scorer across multiple chunks and chromosomes, and a
+deterministic overlap-guarantee test (using `threading.Event`s to prove
+the second chunk's extraction actually starts *while* the first chunk's
+predict() is still blocked, not just that the whole call eventually
+finishes correctly -- ran 5x locally with no flakiness). 57 tests pass.

@@ -268,6 +268,37 @@ Each backend gets its own default query-chunk size
   cuML's internal C++ tiling, which this tier doesn't have. Unvalidated on
   real GPU memory; likely worth tuning up once tested on real hardware.
 
+## Overlapping feature extraction with scoring
+
+`pipeline._score_positions` (used by every backend, not just GPU ones)
+alternates two very different kinds of work per chunk: CPU-bound feature
+extraction (bigWig I/O + multi-scale binning, see `pydreg.features`) and
+the backend's own `scorer.predict()` call. These used to run strictly
+sequentially — extract, then predict, then extract the next chunk, and so
+on — which is invisible when the GPU kernel itself is the bottleneck, but
+becomes a real cost once it isn't: real-hardware testing on a TITAN X
+showed GPU utilization cycling 0–90% between chunks once the `cupy` tier's
+float32 downcast (see below) cut its own compute time by an order of
+magnitude — the GPU sitting idle while the CPU extracts the next chunk's
+features, a cost that was always there but had been hidden behind a much
+slower GPU kernel until that point (the same effect showed up on an A100
+running `cuml`, independent of the float32 work — this bottleneck is
+backend-agnostic).
+
+`_score_positions` now runs a one-chunk-ahead prefetch: while the current
+chunk's `scorer.predict()` blocks on the GPU, a single background thread
+extracts the *next* chunk's features concurrently. This overlaps the two
+steps instead of eliminating either one — same calls, same inputs, same
+order, purely a scheduling change. It's safe specifically because exactly
+one thread ever touches the bigWig readers at a time: the main thread
+never reads a bigWig while a background extraction is in flight, and a
+`ThreadPoolExecutor(max_workers=1)` guarantees only one extraction call is
+ever in progress regardless of how far ahead a chunk gets submitted. The
+overlap itself depends on `scorer.predict()` releasing the GIL while
+blocked on the GPU (true of CuPy/cuML's device-sync calls) — on the
+NumPy/scikit-learn CPU backends this can't hurt correctness, it just may
+not overlap as usefully since there's no GPU wait to hide behind.
+
 ## Peak calling: parallelism and per-worker BLAS pinning
 
 The final peak-calling stage runs as one independent unit of work per broad

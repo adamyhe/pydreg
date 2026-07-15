@@ -538,7 +538,13 @@ def call_peaks(
             return
         last_profile_log = now
         find_rf_peaks_non_pmv, other_block = _profile_breakdown()
-        logger.info(
+        # DEBUG, not INFO: this rate-limited (every 60s) progress line is
+        # redundant with the "calling peaks" tqdm bar under normal -v/INFO
+        # logging -- the one-time summary at the end of call_peaks() (same
+        # fields) is what's actually useful at INFO level. Left as a
+        # DEBUG-level call rather than deleted so the profiling data is
+        # still available if ever needed.
+        logger.debug(
             "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
             "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv find_rf_peaks, "
             "%.2fs other block overhead",

@@ -7,6 +7,7 @@ supplies peaks.py's score_fn callback.
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import numpy as np
@@ -27,6 +28,20 @@ def _timed(name):
     logger.info("%s done in %.2fs", name, time.perf_counter() - t0)
 
 
+def _iter_score_chunks(bed_df, chrom_col, start_col, chunk):
+    """Yields (chrom, positions, centers) once per scoring chunk, flattened
+    across every chromosome group in bed_df -- a flat sequence is what
+    _score_positions's prefetch loop wants (one uniform "next chunk"
+    boundary, including the last-chunk-of-one-chromosome ->
+    first-chunk-of-the-next one), rather than a nested per-chromosome loop."""
+    for chrom, group in bed_df.groupby(chrom_col, sort=False):
+        positions = group.index.to_numpy()
+        centers = group[start_col].to_numpy()
+        for start in range(0, centers.shape[0], chunk):
+            sl = slice(start, start + chunk)
+            yield chrom, positions[sl], centers[sl]
+
+
 def _score_positions(
     bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=False, desc="scoring"
 ):
@@ -35,30 +50,52 @@ def _score_positions(
     (only peaks.py's gap-fill/densify steps can produce a multi-chromosome
     bed_df; the initial informative-position scan is already per-run).
 
+    Overlaps each chunk's CPU-bound feature extraction (bigWig I/O +
+    binning) with the *previous* chunk's scorer.predict() call, via a
+    single background thread one chunk ahead -- these two steps were
+    previously strictly sequential (extract, then predict, then extract
+    the next chunk, ...), which left the GPU backends idle during every
+    chunk's extraction. This is scheduling only, not a formula change: the
+    same feature-extraction/scoring calls run on the same inputs in the
+    same order, just overlapped. Safe with a single background thread
+    specifically because it's the *only* thread that ever touches
+    bw_plus/bw_minus -- the main thread never reads a bigWig while a
+    background extraction is in flight, and a ThreadPoolExecutor with
+    max_workers=1 guarantees at most one extraction ever runs at a time
+    regardless of how far ahead a chunk gets submitted. The overlap itself
+    relies on scorer.predict() releasing the GIL while it blocks on the GPU
+    (true for CuPy/cuML's device-sync calls) -- on the numpy/sklearn CPU
+    backends this prefetch still can't hurt correctness, just may not
+    overlap as usefully since there's no GPU wait to hide behind.
+
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal)."""
     bed_df = bed_df.reset_index(drop=True)
     chrom_col, start_col = bed_df.columns[0], bed_df.columns[1]
     scores = np.empty(len(bed_df))
 
+    def extract(item):
+        chrom, positions, centers = item
+        X = features.extract_features_batch(
+            bw_plus, bw_minus, chrom, centers, model.window_sizes, model.half_n_windows
+        )
+        return positions, X
+
     pbar = tqdm(
         total=len(bed_df), desc=desc, unit="pos", disable=None if progress else True
     )
-    for chrom, group in bed_df.groupby(chrom_col, sort=False):
-        positions = group.index.to_numpy()
-        centers = group[start_col].to_numpy()
-        for start in range(0, centers.shape[0], chunk):
-            sl = slice(start, start + chunk)
-            X = features.extract_features_batch(
-                bw_plus,
-                bw_minus,
-                chrom,
-                centers[sl],
-                model.window_sizes,
-                model.half_n_windows,
-            )
-            scores[positions[sl]] = scorer.predict(X)
-            pbar.update(len(centers[sl]))
+    chunks = _iter_score_chunks(bed_df, chrom_col, start_col, chunk)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        next_item = next(chunks, None)
+        future = pool.submit(extract, next_item) if next_item is not None else None
+        while future is not None:
+            positions, X = future.result()
+
+            next_item = next(chunks, None)
+            future = pool.submit(extract, next_item) if next_item is not None else None
+
+            scores[positions] = scorer.predict(X)
+            pbar.update(len(positions))
     pbar.close()
     return scores
 
