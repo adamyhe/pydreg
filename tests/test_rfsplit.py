@@ -26,3 +26,19 @@ def test_find_rf_peaks_returns_none_with_no_signal(rf_model):
     y = np.random.default_rng(0).normal(scale=0.01, size=len(x))
     result = rfsplit.find_rf_peaks(rf_model, x, y, amp_threshold=0.5, smoothwidth=4, cor_mat=np.eye(5))
     assert result is None
+
+
+def test_find_rf_peaks_uses_narrow_peak_sentinel(rf_model):
+    # Narrow enough that fewer than 5 index steps exceed amp_threshold --
+    # find_rf_peaks's actual narrow-region branch (peak_calling_rf.R:83) is
+    # `i.right - i.left < 5` (an index-count difference), not a genomic-
+    # position-distance threshold, so the fixture must be narrow in index
+    # terms, not just bp terms.
+    x = np.arange(0, 400, 10)
+    y = np.exp(-((x - 200) ** 2) / (2 * 6**2))
+
+    result = rfsplit.find_rf_peaks(rf_model, x, y, amp_threshold=0.2, smoothwidth=4, cor_mat=np.eye(5))
+
+    assert result is not None
+    assert len(result) == 1
+    assert result["prob"].iloc[0] == -1

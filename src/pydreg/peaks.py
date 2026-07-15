@@ -21,11 +21,21 @@ pretrained pipeline's expected behavior was produced by this exact code
   `_r_colon` below.
 """
 
+import logging
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import numpy as np
 import pandas as pd
+import threadpoolctl
 from tqdm.auto import tqdm
 
 from . import rfsplit, stats
+
+
+PEAK_CALLING_BLOCK_WIDTH = 500
+_WORKER_STATE = {}
+logger = logging.getLogger(__name__)
 
 
 def _r_colon(a, b):
@@ -191,6 +201,26 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
     noise = np.concatenate([negative, np.abs(negative), zeros])
     sigma = stats.get_laplace_sigma(noise)
     min_score = stats.get_laplace_quantile(sigma, 0.001)
+    score_values = infp_bed[score_col].to_numpy()
+    finite_scores = score_values[np.isfinite(score_values)]
+    if finite_scores.size:
+        logger.info(
+            "informative score distribution: min=%.4f q01=%.4f median=%.4f q99=%.4f max=%.4f; "
+            "negative=%d zero=%d noise=%d sigma=%s",
+            np.min(finite_scores), np.quantile(finite_scores, 0.01),
+            np.median(finite_scores), np.quantile(finite_scores, 0.99),
+            np.max(finite_scores), len(negative), len(zeros), len(noise),
+            f"{sigma:.6g}" if np.isfinite(sigma) else "nan",
+        )
+    else:
+        logger.warning("informative scores contain no finite values")
+
+    if not np.isfinite(min_score):
+        raise ValueError(
+            "could not estimate finite min_score from negative/zero score tail "
+            f"(negative={len(negative)}, zero={len(zeros)}); this usually means "
+            "the scoring backend or input/model convention is wrong"
+        )
 
     gap_bed = find_gap_infp(infp_bed[[chrom_col, start_col, end_col, score_col]], min_score)
     if gap_bed is not None and len(gap_bed) > 0:
@@ -256,17 +286,116 @@ def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col
     return newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(drop=True)
 
 
+def _init_peak_worker(
+    rf_model,
+    min_score,
+    smoothwidth,
+    cor_mat,
+    pmv_laplace_cdf_maxpts=25000,
+    pmv_laplace_cdf_eps=1e-3,
+):
+    # Each pmv_laplace call does a handful of tiny (order-5) Cholesky
+    # decompositions inside SciPy's Genz-Bretz CDF integration -- far too
+    # small to benefit from BLAS multithreading, but with peak_calling_cores
+    # worker processes each independently defaulting to a full-machine-sized
+    # BLAS thread pool, this oversubscribes real cores by a large factor
+    # (e.g. 16 workers x 48-thread default on a 48-core box) for zero
+    # benefit. Pin every worker (and the main process, for the
+    # peak_calling_cores<=1 serial fallback -- this is called there too) to
+    # a single BLAS thread; persists process-wide since this isn't used as a
+    # context manager (see threadpoolctl.threadpool_limits's own docs).
+    threadpoolctl.threadpool_limits(limits=1)
+    _WORKER_STATE["rf_model"] = rf_model
+    _WORKER_STATE["min_score"] = min_score
+    _WORKER_STATE["smoothwidth"] = smoothwidth
+    _WORKER_STATE["cor_mat"] = cor_mat
+    stats.set_pmv_laplace_cdf_options(pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps)
+
+
+def _call_peak_block(task):
+    chrom, peak_starts, peak_ends, infp_starts, infp_ends, infp_scores = task
+    rf_model = _WORKER_STATE["rf_model"]
+    min_score = _WORKER_STATE["min_score"]
+    smoothwidth = _WORKER_STATE["smoothwidth"]
+    cor_mat = _WORKER_STATE["cor_mat"]
+
+    t0 = time.perf_counter()
+    pmv_before = stats.get_pmv_laplace_profile()
+    find_rf_peaks_seconds = 0.0
+    raw_rows = []
+    for peak_start, peak_end in zip(peak_starts, peak_ends):
+        lo = np.searchsorted(infp_starts, peak_start, side="left")
+        hi = np.searchsorted(infp_ends, peak_end, side="right")
+        xp, yp = infp_starts[lo:hi], infp_scores[lo:hi]
+        if xp.shape[0] <= 3 or yp.max() <= min_score:
+            continue
+
+        t_find_rf_peaks = time.perf_counter()
+        result = rfsplit.find_rf_peaks(
+            rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
+        )
+        find_rf_peaks_seconds += time.perf_counter() - t_find_rf_peaks
+        if result is None:
+            continue
+        result = result.copy()
+        result.insert(0, "chr", chrom)
+        raw_rows.append(result)
+
+    pmv_after = stats.get_pmv_laplace_profile()
+    profile = {
+        "peaks": len(peak_starts),
+        "seconds": time.perf_counter() - t0,
+        "find_rf_peaks_seconds": find_rf_peaks_seconds,
+        "pmv_calls": pmv_after["calls"] - pmv_before["calls"],
+        "pmv_seconds": pmv_after["seconds"] - pmv_before["seconds"],
+        "pmv_cdf_evals": pmv_after["cdf_evals"] - pmv_before["cdf_evals"],
+    }
+    if not raw_rows:
+        return None, profile
+    return pd.concat(raw_rows, ignore_index=True), profile
+
+
+def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width):
+    for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
+        chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
+        infp_starts = chr_infp[start_col].to_numpy()
+        infp_ends = chr_infp[end_col].to_numpy()
+        infp_scores = chr_infp.iloc[:, 3].to_numpy()
+        peak_starts_all = chr_peaks["start"].to_numpy()
+        peak_ends_all = chr_peaks["end"].to_numpy()
+
+        for start in range(0, len(chr_peaks), block_width):
+            end = min(start + block_width, len(chr_peaks))
+            block_starts = peak_starts_all[start:end]
+            block_ends = peak_ends_all[start:end]
+
+            # Mirror legacy dREG's block split: each worker gets only the
+            # dense informative points spanning its 500 broad peaks.
+            lo = np.searchsorted(infp_starts, block_starts[0], side="left")
+            hi = np.searchsorted(infp_ends, block_ends[-1], side="right")
+            yield (
+                chrom,
+                block_starts,
+                block_ends,
+                infp_starts[lo:hi],
+                infp_ends[lo:hi],
+                infp_scores[lo:hi],
+            )
+
+
 def call_peaks(
     dense_infp, peak_broad, min_score, rf_model,
     smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
+    peak_calling_cores=1, peak_calling_block_width=100,
+    pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=1e-3,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
     rfsplit.find_rf_peaks() per broad peak whose max score clears
-    min_score. R's BLOCKWIDTH block-splitting + snowfall-cluster
-    parallelization is pure IPC infrastructure with no algorithmic content
-    -- this is a plain per-broad-peak loop (v1, single-process; see
-    docs/PLANNING.md).
+    min_score. When peak_calling_cores > 1, candidate broad peaks are split
+    into blocks and processed in worker processes, matching legacy dREG's
+    BLOCKWIDTH/snowfall execution model but allowing smaller blocks for
+    better load balancing.
 
     dense_infp: DataFrame with columns chrom, start, end, score (+ infp
     flag, unused here). peak_broad: DataFrame from get_broadpeak_summary
@@ -281,42 +410,137 @@ def call_peaks(
     significant peaks only (columns chrom, start, end, score, prob,
     center)."""
     chrom_col, start_col, end_col, score_col = dense_infp.columns[:4]
+    if not np.isfinite(min_score):
+        raise ValueError(f"min_score must be finite before peak calling, got {min_score}")
+
     cor_mat = stats.build_cormat(dense_infp[start_col].to_numpy(), dense_infp[score_col].to_numpy())
 
     if peak_broad is None or len(peak_broad) == 0:
         return None, None
     candidates = peak_broad[peak_broad["max"] >= min_score]
+    if len(candidates) == 0:
+        return None, None
 
     dense_sorted = dense_infp.sort_values([chrom_col, start_col], kind="stable")
+    block_width = max(1, int(peak_calling_block_width))
+    if pmv_laplace_cdf_maxpts is not None:
+        pmv_laplace_cdf_maxpts = int(pmv_laplace_cdf_maxpts)
+    pmv_laplace_cdf_eps = float(pmv_laplace_cdf_eps)
+    tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width))
+    logger.info(
+        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s) "
+        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g)",
+        len(candidates), len(tasks), block_width, peak_calling_cores,
+        pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps,
+    )
     raw_rows = []
+    completed_results = [None] * len(tasks)
+    profile_totals = {
+        "peaks": 0,
+        "seconds": 0.0,
+        "find_rf_peaks_seconds": 0.0,
+        "pmv_calls": 0,
+        "pmv_seconds": 0.0,
+        "pmv_cdf_evals": 0,
+    }
+    completed_blocks = 0
+    last_profile_log = time.perf_counter()
     pbar = tqdm(
         total=len(candidates), desc="calling peaks", unit="peak",
         disable=None if progress else True,
     )
-    for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
-        chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
-        infp_starts = chr_infp[start_col].to_numpy()
-        infp_ends = chr_infp[end_col].to_numpy()
-        infp_scores = chr_infp[score_col].to_numpy()
+    _init_peak_worker(
+        rf_model,
+        min_score,
+        smoothwidth,
+        cor_mat,
+        pmv_laplace_cdf_maxpts,
+        pmv_laplace_cdf_eps,
+    )
+    stats.reset_pmv_laplace_profile()
 
-        for _, peak in chr_peaks.iterrows():
-            lo = np.searchsorted(infp_starts, peak["start"], side="left")
-            hi = np.searchsorted(infp_ends, peak["end"], side="right")
-            xp, yp = infp_starts[lo:hi], infp_scores[lo:hi]
-            if xp.shape[0] <= 3 or yp.max() <= min_score:
-                pbar.update(1)
-                continue
+    def collect_profile(profile):
+        for key in profile_totals:
+            profile_totals[key] += profile[key]
 
-            result = rfsplit.find_rf_peaks(
-                rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
-            )
-            pbar.update(1)
-            if result is None:
-                continue
-            result = result.copy()
-            result.insert(0, chrom_col, chrom)
-            raw_rows.append(result)
+    def _profile_breakdown():
+        # 3-way split of block CPU time: pmv_laplace itself, the rest of
+        # find_rf_peaks (smoothing + RF-split merge/split logic + result
+        # building), and everything else in the per-block loop (searchsorted/
+        # slicing, the skip check, per-peak DataFrame assembly).
+        find_rf_peaks_non_pmv = max(
+            profile_totals["find_rf_peaks_seconds"] - profile_totals["pmv_seconds"], 0.0
+        )
+        other_block = max(profile_totals["seconds"] - profile_totals["find_rf_peaks_seconds"], 0.0)
+        return find_rf_peaks_non_pmv, other_block
+
+    def maybe_log_progress(force=False):
+        nonlocal last_profile_log
+        now = time.perf_counter()
+        if not force and now - last_profile_log < 60:
+            return
+        last_profile_log = now
+        find_rf_peaks_non_pmv, other_block = _profile_breakdown()
+        logger.info(
+            "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
+            "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv find_rf_peaks, "
+            "%.2fs other block overhead",
+            completed_blocks, len(tasks), profile_totals["peaks"], profile_totals["seconds"],
+            profile_totals["pmv_seconds"], profile_totals["pmv_calls"],
+            profile_totals["pmv_cdf_evals"], find_rf_peaks_non_pmv, other_block,
+        )
+
+    if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
+        try:
+            with ProcessPoolExecutor(
+                max_workers=peak_calling_cores,
+                initializer=_init_peak_worker,
+                initargs=(
+                    rf_model,
+                    min_score,
+                    smoothwidth,
+                    cor_mat,
+                    pmv_laplace_cdf_maxpts,
+                    pmv_laplace_cdf_eps,
+                ),
+            ) as pool:
+                futures = {pool.submit(_call_peak_block, task): idx for idx, task in enumerate(tasks)}
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    task = tasks[idx]
+                    result, profile = future.result()
+                    collect_profile(profile)
+                    completed_blocks += 1
+                    completed_results[idx] = result
+                    pbar.update(len(task[1]))
+                    maybe_log_progress()
+        except (OSError, NotImplementedError) as e:
+            logger.warning("parallel peak calling unavailable (%s); falling back to serial", e)
+            for idx, task in enumerate(tasks):
+                result, profile = _call_peak_block(task)
+                collect_profile(profile)
+                completed_blocks += 1
+                completed_results[idx] = result
+                pbar.update(len(task[1]))
+                maybe_log_progress()
+    else:
+        for idx, task in enumerate(tasks):
+            result, profile = _call_peak_block(task)
+            collect_profile(profile)
+            completed_blocks += 1
+            completed_results[idx] = result
+            pbar.update(len(task[1]))
+            maybe_log_progress()
     pbar.close()
+    raw_rows = [result for result in completed_results if result is not None]
+    find_rf_peaks_non_pmv, other_block = _profile_breakdown()
+    logger.info(
+        "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s) / "
+        "%d CDF eval(s), %.2fs non-pmv find_rf_peaks, %.2fs other block overhead",
+        profile_totals["seconds"], profile_totals["pmv_seconds"],
+        profile_totals["pmv_calls"], profile_totals["pmv_cdf_evals"],
+        find_rf_peaks_non_pmv, other_block,
+    )
 
     if not raw_rows:
         return None, None

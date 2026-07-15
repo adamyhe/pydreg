@@ -17,21 +17,64 @@ def main(argv=None):
         "--backend",
         choices=["auto", "cuml", "sklearn", "numpy"],
         default="auto",
-        help="scoring backend; 'auto' tries cuml, then sklearn, then numpy. An "
-        "explicit choice raises if that backend isn't usable, rather than "
-        "silently falling back.",
+        help="scoring backend; 'auto' uses cuml when CuPy sees a CUDA device, "
+        "otherwise numpy. An explicit choice raises if that backend isn't "
+        "usable, rather than silently falling back.",
     )
     parser.add_argument("--smoothwidth", type=int, default=4)
     parser.add_argument("--pv-adjust", default="fdr")
     parser.add_argument("--pv-threshold", type=float, default=0.05)
     parser.add_argument(
-        "--query-chunk", type=int, default=None,
+        "--query-chunk",
+        type=int,
+        default=None,
         help="positions scored per batch; defaults to a backend-specific size "
         "(see pydreg.backend.DEFAULT_QUERY_CHUNK)",
     )
+    parser.add_argument(
+        "-c",
+        "--cuml-query-chunk",
+        type=int,
+        default=2**20,
+        help="positions scored per batch for the cuml backend when --query-chunk "
+        "is not set; ignored by CPU backends",
+    )
+    parser.add_argument(
+        "--peak-calling-cores",
+        type=int,
+        default=1,
+        help="worker processes for the final CPU peak-calling stage; legacy "
+        "dREG parallelized this stage in 500-peak blocks",
+    )
+    parser.add_argument(
+        "--peak-calling-block-width",
+        type=int,
+        default=100,
+        help="candidate broad peaks per peak-calling worker task; smaller "
+        "blocks improve load balancing on uneven broad peaks",
+    )
+    parser.add_argument(
+        "--pmv-laplace-cdf-maxpts",
+        type=int,
+        default=25000,
+        help="maximum integration points for each SciPy multivariate-normal "
+        "CDF inside pmv_laplace; 25000 matches R's mvtnorm::pmvnorm()/"
+        "GenzBretz() default. Lower values trade fidelity for further speed; "
+        "higher values exceed what R's own reference implementation ever computed",
+    )
+    parser.add_argument(
+        "--pmv-laplace-cdf-eps",
+        type=float,
+        default=1e-3,
+        help="absolute/relative tolerance for each SciPy multivariate-normal "
+        "CDF inside pmv_laplace; 1e-3 matches R's mvtnorm::pmvnorm()/"
+        "GenzBretz() default. Lower values increase precision beyond R's own "
+        "reference implementation, at a large speed cost",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
-        "--no-progress", action="store_true",
+        "--no-progress",
+        action="store_true",
         help="disable tqdm progress bars (shown by default on a terminal; "
         "auto-hidden anyway when stdout is redirected, e.g. to a log file)",
     )
@@ -52,6 +95,11 @@ def main(argv=None):
         pv_adjust=args.pv_adjust,
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
+        cuml_query_chunk=args.cuml_query_chunk,
+        peak_calling_cores=args.peak_calling_cores,
+        peak_calling_block_width=args.peak_calling_block_width,
+        pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
+        pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
         progress=not args.no_progress,
     )
 

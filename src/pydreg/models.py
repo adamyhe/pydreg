@@ -2,11 +2,14 @@
 and the peak-shape random forest used only during peak calling to decide
 whether adjacent local maxima merge or split (DREGPeakSplitForest).
 
-Both load from a directory of raw .bin files + meta.json, a single
-.safetensors[.zst] file, or (via from_pretrained()) directly from the
-`adamyhe/dREG` Hugging Face repo. Ported from scripts/dreg_model.py and
-scripts/dreg_rf_model.py — see those files' original docstrings (preserved
-below) for the full validation history.
+Both load from a single .safetensors[.zst] file, or (via from_pretrained())
+directly from the `adamyhe/dREG` Hugging Face repo. Ported from
+scripts/dreg_model.py and scripts/dreg_rf_model.py — see those files'
+original docstrings (preserved below) for the full validation history and,
+if you're re-running the R export tooling, their own loose-.bin-directory
+loading support (kept there for one-time R-export sanity checks, not
+carried over here since nothing in the installed package ever produces or
+needs that intermediate format).
 
 DREGModel is an RBF epsilon-SVR dual sum:
     y_scaled = sum_i coefs[i] * exp(-gamma * ||x_scaled - SV[i]||^2) - rho
@@ -66,7 +69,6 @@ production.
 """
 
 import json
-import os
 
 import numba
 import numpy as np
@@ -105,35 +107,16 @@ def _forest_predict(nodestatus, bestvar, left_daughter, right_daughter, xbestspl
 
 class DREGModel:
     def __init__(self, model_path):
-        """model_path: either a directory of raw .bin files + meta.json (as
-        produced directly by scripts/export_dreg_model.R), or a single
-        .safetensors or .safetensors.zst file."""
-        if model_path.endswith(".safetensors") or model_path.endswith(
-            ".safetensors.zst"
-        ):
-            with open_safetensors(model_path) as f:
-                meta = {
-                    k: json.loads(v) if v[:1] in "[{" else v
-                    for k, v in f.metadata().items()
-                }
-                self.SV = f.get_tensor("support_vectors")
-                self.coefs = f.get_tensor("dual_coef")
-                self.x_center = f.get_tensor("x_center")
-                self.x_scale = f.get_tensor("x_scale")
-        else:
-            meta = json.load(open(os.path.join(model_path, "meta.json")))
-            self.SV = np.fromfile(
-                os.path.join(model_path, "sv_matrix_f64.bin"), dtype="<f8"
-            ).reshape(meta["n_sv"], meta["n_features"])
-            self.coefs = np.fromfile(
-                os.path.join(model_path, "coefs_f64.bin"), dtype="<f8"
-            )
-            self.x_center = np.fromfile(
-                os.path.join(model_path, "x_center_f64.bin"), dtype="<f8"
-            )
-            self.x_scale = np.fromfile(
-                os.path.join(model_path, "x_scale_f64.bin"), dtype="<f8"
-            )
+        """model_path: a single .safetensors or .safetensors.zst file."""
+        with open_safetensors(model_path) as f:
+            meta = {
+                k: json.loads(v) if v[:1] in "[{" else v
+                for k, v in f.metadata().items()
+            }
+            self.SV = f.get_tensor("support_vectors")
+            self.coefs = f.get_tensor("dual_coef")
+            self.x_center = f.get_tensor("x_center")
+            self.x_scale = f.get_tensor("x_scale")
 
         self.n_sv = int(meta["n_sv"])
         self.n_features = int(meta["n_features"])
@@ -205,38 +188,18 @@ def to_sklearn_svr(model):
 
 class DREGPeakSplitForest:
     def __init__(self, model_path):
-        """model_path: either a directory of raw .bin files + meta.json (as
-        produced directly by scripts/export_dreg_rf_model.R), or a single
-        .safetensors or .safetensors.zst file."""
-        if model_path.endswith(".safetensors") or model_path.endswith(
-            ".safetensors.zst"
-        ):
-            with open_safetensors(model_path) as f:
-                meta = {
-                    k: json.loads(v) if v[:1] in "[{" else v
-                    for k, v in f.metadata().items()
-                }
-                self.nodestatus = f.get_tensor("nodestatus")
-                self.bestvar = f.get_tensor("bestvar")
-                self.left_daughter = f.get_tensor("left_daughter")
-                self.right_daughter = f.get_tensor("right_daughter")
-                self.xbestsplit = f.get_tensor("xbestsplit")
-                self.nodepred = f.get_tensor("nodepred")
-        else:
-            meta = json.load(open(os.path.join(model_path, "meta.json")))
-            shape = (meta["n_trees"], meta["n_nodes"])
-
-            def load(name, dtype):
-                return np.fromfile(os.path.join(model_path, name), dtype=dtype).reshape(
-                    shape
-                )
-
-            self.nodestatus = load("nodestatus_i32.bin", "<i4")
-            self.bestvar = load("bestvar_i32.bin", "<i4")
-            self.left_daughter = load("left_daughter_i32.bin", "<i4")
-            self.right_daughter = load("right_daughter_i32.bin", "<i4")
-            self.xbestsplit = load("xbestsplit_f64.bin", "<f8")
-            self.nodepred = load("nodepred_f64.bin", "<f8")
+        """model_path: a single .safetensors or .safetensors.zst file."""
+        with open_safetensors(model_path) as f:
+            meta = {
+                k: json.loads(v) if v[:1] in "[{" else v
+                for k, v in f.metadata().items()
+            }
+            self.nodestatus = f.get_tensor("nodestatus")
+            self.bestvar = f.get_tensor("bestvar")
+            self.left_daughter = f.get_tensor("left_daughter")
+            self.right_daughter = f.get_tensor("right_daughter")
+            self.xbestsplit = f.get_tensor("xbestsplit")
+            self.nodepred = f.get_tensor("nodepred")
 
         self.n_trees = int(meta["n_trees"])
         self.n_nodes = int(meta["n_nodes"])

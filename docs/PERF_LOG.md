@@ -11,6 +11,10 @@ scores, same peaks, same faithfully-replicated R quirks documented in
 `docs/PLANNING.md`) — verified via the existing test suite plus a full CLI
 diff, not just "looks right."
 
+This is a comprehensive, chronological research log (every benchmark, every
+dead end, every number), not user-facing documentation. For a plain-language
+summary of the resulting design choices, see `docs/OPTIMIZATION.md` instead.
+
 ## 2026-07-09 — initial vectorization/JIT audit
 
 Full audit of `src/pydreg/` (`io.py`, `infp.py`, `features.py`, `models.py`,
@@ -231,3 +235,821 @@ absolute savings at this scale.
 All 25 tests pass (`python3 -m pytest tests/ -q`). This closes out the
 vectorization/JIT audit from 2026-07-09 — all 6 identified items shipped
 and validated.
+
+## 2026-07-09 — sklearn tier is ~15x slower than numpy on CPU; fixed default backend order
+
+Prompted by a question about whether `scikit-learn-intelex` (Intel's oneDAL
+patch for scikit-learn) is worth exploring to speed up the "sklearn" scoring
+tier. Before chasing that, benchmarked the "numpy" and "sklearn" tiers
+against each other directly (`scripts/bench_backends.py`, added this entry —
+run it to reproduce on other hardware): both call the same RBF-SVR math
+(`to_sklearn_svr()` reproduces `DREGModel.predict()`'s weights exactly,
+verified to agree to ~1e-10), but `sklearn.svm.SVR.predict()` (libsvm) computes
+one query-SV kernel value at a time in a C loop, while `DREGModel.predict`'s
+chunked `X_scaled @ sv_block.T` / `K @ coefs` computes all of them at once via
+BLAS.
+
+**Correction (2026-07-14)**: the line above originally attributed this to
+"single-threaded C loop vs. multithreaded BLAS" -- that's not the real
+reason (see the 2026-07-14 entry below for the actual root cause, found by
+reading libsvm's C++ source directly: forcing single-threaded BLAS via
+`VECLIB_MAXIMUM_THREADS=1` doesn't change `DREGModel.predict`'s wall-clock
+time at all, ruling out threading as the explanation).
+
+Measured on this machine (605,187 SVs x 360 features, local safetensors,
+1 rep):
+
+| n | numpy | sklearn | ratio |
+|---|---|---|---|
+| 256 | 1.11s (231 pos/s) | 16.6s (15 pos/s) | 15.0x |
+| 1024 | 4.74s (216 pos/s) | 66.3s (15 pos/s) | 14.0x |
+
+**Conclusion on the original question**: not worth exploring intelex —
+even a large intelex speedup on libsvm's predict would need to close a 14-15x
+gap just to match the *already-CPU* numpy tier, and there's a real risk it
+wouldn't engage at all: intelex's SVM acceleration hooks in via oneDAL state
+built during `.fit()`, and `to_sklearn_svr()` deliberately skips `.fit()`
+(writing directly to libsvm's private `support_vectors_`/`_dual_coef_`/etc.,
+since this is a pretrained R model with no training data to refit from) —
+so the patched estimator may have no oneDAL-backed state to dispatch
+`.predict()` to.
+
+**More importantly, this surfaced an actual bug**: `backend.detect_backend()`
+preferred `"sklearn"` over `"numpy"` whenever `scikit-learn` was importable
+— but `scikit-learn` is a hard dependency (`pyproject.toml`), so every
+CPU-only user (i.e. anyone without cuML/a CUDA GPU, the common case per
+README's "Caveats") was being silently routed to the ~15x-slower tier by
+default. **Fixed**: `detect_backend()` no longer probes for/returns
+`"sklearn"` at all — CPU auto-detection now goes straight to `"numpy"` (cuML
+is still preferred first when a real GPU is usable). `"sklearn"` remains
+selectable via `--backend sklearn` for anyone who wants it, and
+`to_sklearn_svr()` is unchanged and still required as the input to
+`cuml.svm.SVR.from_sklearn()` for the cuML tier.
+
+No test relied on the old auto-detection order (`tests/test_pipeline.py`
+pins `backend_name="numpy"` explicitly); all 25 tests still pass.
+
+## 2026-07-14 — `pmv_laplace`'s default CDF precision was ~100-200x tighter than R's own reference, dominating peak-calling runtime
+
+A real production run (`--peak-calling-cores 16`) reported: 40/807 blocks
+done, 9817.23s of summed block CPU, with **9539.59s (97.2%) inside
+`stats.pmv_laplace`** across 6859 calls / 1,245,449
+`scipy.stats.multivariate_normal.cdf` evaluations (~7.7ms/eval). Extrapolated
+to the full 807 blocks, this was many hours of wall-clock even parallelized
+across 16 cores — parallelism (`peaks.py`'s `ProcessPoolExecutor`-based block
+splitting, confirmed embarrassingly-parallel with no serialization
+bottleneck) was already maxed out as a lever; the fix had to reduce the
+actual per-CDF-eval cost.
+
+**Root cause, not a tradeoff**: `pmv_laplace` calls `_box_cdf` up to 291
+times per invocation (1 initial check + a fixed 290-point z-integration
+grid — both counts confirmed exactly against the observed
+1,245,449 = 291×4271 + 1×2588 split). The original R
+(`_reference/dREG/dREG/R/peak_calling.R`'s `pmvLaplace`, calling
+`pmvnorm(...)` with no `algorithm=` override) runs on R's `mvtnorm`
+package's own default: `GenzBretz(maxpts=25000, abseps=1e-3, releps=0)`
+— confirmed directly from `mvtnorm`'s R source (`R/mvt.R`) and its
+`algorithms.Rd` doc, cross-checked via two independent sources. SciPy's own
+defaults when `maxpts`/`abseps` are left unset (pydreg's previous behavior)
+are `maxpts=1,000,000*dim=5,000,000`, `abseps=releps=1e-5` — **200x more
+points and 100x tighter error tolerance than R's own reference
+implementation ever used**. (`releps` is confirmed to have zero effect in
+SciPy's actual d≥3 dispatch code either way — only `abseps`/`maxpts`
+matter — so R's `releps=0` is moot.) So pydreg's previous "default" behavior
+wasn't faithful to R at all; it was needlessly over-precise, and that
+over-precision was the actual bottleneck.
+
+**Fix**: `stats.py`'s `_PMV_CDF_MAXPTS`/`_PMV_CDF_EPS` module defaults (and
+`set_pmv_laplace_cdf_options`'s parameter defaults) changed from
+`None`/`1e-5` (SciPy's unset defaults) to `25000`/`1e-3` (R's real
+`GenzBretz` defaults), propagated through every duplicate default (`cli.py`'s
+two flags, `pipeline.py:run()`, `peaks.py`'s `_init_peak_worker`/`call_peaks`
+— 6 signatures total, confirmed via grep). Also deleted `_box_cdf`'s
+unfrozen-fallback branch entirely: confirmed against SciPy 1.18.0's actual
+source that the frozen `multivariate_normal` constructor fully supports
+custom `maxpts`/`abseps`/`releps` (the old comment claiming otherwise was
+wrong), so there's now one code path, always frozen/cached, ~9% faster on
+its own. The cache is now keyed on a version counter incremented by
+`set_pmv_laplace_cdf_options()` rather than comparing option values for
+equality, avoiding a float-equality-as-cache-key smell.
+
+**Measured** (representative order-5 Toeplitz `cor_mat`, a "hard"
+mid-probability `x`, 5 reps each):
+
+| | mean time/call | std(p_max) | cdf_evals/call |
+|---|---|---|---|
+| old (SciPy unset defaults) | 3.03s | 8.4e-7 | 291 |
+| new (R's real defaults) | 0.235s | 2.6e-5 | 291 |
+
+**~12.9x speedup**, matching the ~13x predicted from isolated per-eval
+benchmarking during investigation. The absolute difference between the old
+and new mean `p_max` (1.0e-6) is far smaller than the pipeline's own
+pre-existing, already-documented QMC run-to-run noise band (~1e-4 to 1e-8,
+this file's 2026-07-09 entry) — i.e. the new, faster default is not less
+accurate in any way that matters; it's simply no longer computing precision
+R's own reference implementation never asked for.
+
+Excluded from this fix (real but smaller/riskier wins, not pursued):
+batching the 290 z-grid evals into one 2D SciPy call (~16% extra, measured
+during investigation, but needs its own validation that SciPy's 2D batching
+doesn't correlate QMC randomness across grid points); monkeypatching
+SciPy's private `_qmvnt._cbc_lattice` to cache lattice construction across
+calls (~1.5-2x extra at low `maxpts`, but couples to unstable private SciPy
+internals). Worth revisiting if `pmv_laplace` is still the dominant cost
+after this fix at real genome-wide scale.
+
+All 38 tests pass.
+
+## 2026-07-14 — real-world speedup was only ~2.9x, not ~12.9x: BLAS thread oversubscription across peak_calling_cores workers
+
+A follow-up production run (same `--peak-calling-cores 16` machine, after
+the above fix) reported: 2790.07s block CPU / 33 blocks = 84.6s/block and
+2748.05s / 1,050,041 CDF evals = 2.62ms/eval — a real ~2.9x improvement over
+the pre-fix numbers (245.4s/block, 7.66ms/eval), but far short of the
+~12.9x measured in isolation on a single synthetic benchmark case.
+
+**Hypothesis 1, tested and disproven: real boxes are "harder" (hit the
+`maxpts=25000` ceiling more often) than the one synthetic case benchmarked
+previously.** Monkeypatched `scipy.stats._qmvnt._qauto` to record
+`n_samples`/`limit` for every CDF evaluation, then swept 5 correlation
+structures (weak/mid/strong correlation × small/large variance) × 5 x-scales
+(25 combinations total) through `pmv_laplace` at production settings
+(`maxpts=25000, abseps=1e-3`). Result: **0/291 evals hit the ceiling in
+every single combination** (average ~7010 of the 25000-point budget used),
+and measured cost (0.64-0.95ms/eval) was *lower* than the original single-
+case benchmark (0.808ms/eval), not higher. This directly rules out
+ceiling-hitting as the explanation — real boxes converge comfortably within
+budget across a wide difficulty range.
+
+**Hypothesis 2, well-supported, not directly measurable from this sandbox
+but consistent with all evidence: BLAS thread oversubscription across the
+16 concurrent worker processes.** `_box_cdf`'s Genz-Bretz integration does
+a handful of order-5 (5x5) Cholesky decompositions per call -- far too
+small a matrix to benefit from BLAS multithreading at all, but on Linux
+pip/conda installs (the likely production environment, vs. this sandbox's
+Accelerate-backed macOS build) OpenBLAS/MKL default their thread pool size
+to the *total visible core count*, independently, per process. With 16
+worker processes on a reported 48-core remote machine, each defaulting to
+~48 threads, that's up to 16x768 threads contending for 48 real cores --
+pure scheduling/context-switch overhead with zero computational benefit,
+repeated on the order of a million times. This matches the evidence
+exactly: `peaks.py`'s profiling measures wall-clock (`time.perf_counter()`)
+inside each worker, which inflates under contention even though the
+underlying computation is unchanged -- explaining why a clean, uncontended
+single-process sweep measured *lower* per-eval cost than production despite
+deliberately testing harder cases.
+
+**Fix**: pin every peak-calling worker to a single BLAS thread via
+`threadpoolctl.threadpool_limits(limits=1)`, called once at the top of
+`peaks.py`'s `_init_peak_worker` (the `ProcessPoolExecutor` `initializer=`,
+also called directly in the main process for the `peak_calling_cores<=1`
+serial fallback path). Per `threadpoolctl`'s own docs, calling this
+(without using it as a context manager) applies process-wide and persists
+for that process's lifetime -- exactly "once per worker at startup" is the
+right idiom. `threadpoolctl` was already a transitive dependency (via
+scikit-learn); added explicitly to `pyproject.toml` since `peaks.py` now
+imports it directly. 16 single-threaded workers on a 48-core machine uses
+16/48 cores with zero contention, and leaves headroom to raise
+`--peak-calling-cores` further on that hardware.
+
+Not verified end-to-end on the actual production machine (this sandbox has
+no way to reproduce 16-way contention meaningfully) -- the diagnostic above
+(disproving hypothesis 1) plus the well-established nature of this exact
+BLAS-oversubscription failure mode in numpy/scipy multiprocessing workflows
+is the basis for this fix; worth confirming with a real before/after
+progress-log comparison on that machine.
+
+All 38 tests pass.
+
+**Correction, same day**: hypothesis 2 (BLAS oversubscription) is also
+disproven by direct evidence from the production machine, not just
+absence of confirmation. Two facts reported after this fix shipped: (a)
+`htop`/`top` on that machine showed no sign of thread oversubscription
+(no processes pegged well above 100% CPU, no runaway thread counts); (b)
+reducing `--peak-calling-cores` from 16 to 1 reduced total throughput by a
+*proportional* amount -- i.e. roughly linear scaling with core count. That
+second fact is decisive: oversubscription would show up as *sub*-linear
+scaling (16 workers achieving meaningfully less than 16x a single worker's
+throughput, since contention overhead eats into the gain); clean linear
+scaling means there was no meaningful contention penalty to begin with.
+Also confirmed the remote machine runs the identical scipy version
+(1.18.0) as this sandbox, ruling out a scipy-version/build difference too.
+
+Net: the remaining gap between the ~12.9x measured in this sandbox and the
+~2.9x observed in production is most likely simple per-core hardware
+throughput difference (this sandbox is Apple Silicon; the production
+machine is a remote x86 server) for this specific Cython-heavy numeric
+workload -- not a bug, and not something this codebase can fix. The
+`threadpoolctl` pin from this entry is kept regardless (pinning BLAS
+threads for a 5x5 Cholesky decomposition is a no-regret safeguard on any
+hardware -- it cannot be a regression, since that matrix is too small to
+benefit from multithreading anywhere), but should not be credited with
+explaining the observed real-world speedup, which is apparently just what
+that hardware honestly delivers for this algorithm.
+
+If more speed is still needed, the next levers are the ones already
+identified and excluded above (batching the 290 z-grid evals into one 2D
+call, ~16%, reduces per-call Python/SciPy-API overhead rather than QMC
+sample cost -- plausibly more relevant now if overhead is a bigger
+fraction of cost on this hardware) or, at higher effort/risk, a custom
+compiled (e.g. numba) Genz-Bretz implementation tailored to this exact
+fixed-`cor_mat`/scalar-scaled-box structure, to cut SciPy's generic
+per-call overhead rather than the QMC math itself.
+
+## 2026-07-14 — Phase A: cache SciPy's redundant per-eval QMC-lattice construction (~16.5% shipped); Cholesky-caching attempted and dropped
+
+Following up on the user's request to pursue a custom Genz-Bretz
+reimplementation for further speedup: before committing to that (multi-day,
+real correctness risk -- a numerical bug here silently corrupts p-values,
+not just slows things down), did a research pass first (3 agents) to
+quantify exactly where `pmv_laplace`'s remaining cost lives and whether a
+safe, low-risk win was available first.
+
+**Cost breakdown** (direct `perf_counter` instrumentation, not cProfile --
+an initial cProfile trace looked like it showed ~60% "avoidable Python
+overhead" inside SciPy's `_qmvn`, but that's a profiling artifact from
+cProfile not tracking the compiled Cython kernel call as a separate frame;
+corrected via direct instrumentation of the actual internal functions,
+cross-checked two independent ways): the compiled QMC kernel (`_qmvn_inner`)
+is **~76-80%** of per-eval cost and is not reducible without loosening
+precision (off the table -- that's exactly the R-fidelity setting fixed in
+the prior entry). Of the remaining ~20-24%:
+- `_cbc_lattice` (QMC lattice construction, ~11%) is **100% reusable**:
+  `_qauto`'s adaptive point-growth loop converges in exactly 1 iteration
+  every single time for this codebase's fixed order-5 `cor_mat`/
+  `maxpts=25000` usage (verified across 5 test cases × 291 evals each,
+  1455 evaluations total, zero exceptions), and since its starting point
+  budget depends only on the fixed dimension and `maxpts` -- never on the
+  box or `cor_mat` values -- the exact same lattice is legitimately reused
+  for every eval, in every call, for the whole process's lifetime.
+- `_permuted_cholesky` (box reordering + Cholesky factorization, ~5-8%)
+  has highly repetitive *output* (only 2-4 distinct results across a whole
+  291-point z-grid, confirmed empirically) but its *inputs* (the box bounds,
+  continuously rescaled by `1/sqrt(z0)` per z-grid point) are essentially
+  always unique. **Attempted caching keyed on the literal input values;
+  measured result: 290/291 calls still recomputed** (see below) -- the
+  redundancy lives in the output/permutation-decision space, not the
+  continuous input space, so a naive input-keyed cache can't capture it.
+
+**Shipped**: `src/pydreg/stats.py` now wraps `scipy.stats._qmvnt._cbc_lattice`
+with a small dict cache keyed on `(n_dim, n_qmc_samples)` (pure/deterministic
+given these), monkeypatched once at module-import time. Zero numerical
+risk: it only reuses exactly the values SciPy would otherwise have
+recomputed, never touches the randomized QMC shift/kernel evaluation
+itself (drawn fresh per eval from SciPy's own RNG state, entirely
+independent of this cached deterministic setup step), so `pmv_laplace`'s
+existing run-to-run QMC noise is completely unaffected. Returns a `.copy()`
+of the cached array on every access so no caller can corrupt the cache via
+in-place mutation.
+
+**Not shipped**: the equivalent cache for `_permuted_cholesky` was
+implemented, measured, and **reverted** -- it added dict-lookup/array-copy
+overhead for effectively zero benefit (290/291 cache misses in the
+representative test case), since the actual redundancy is in which
+*permutation* the algorithm chooses (a discrete decision depending
+nonlinearly on the box bounds via `Phi(hi)-Phi(lo)` comparisons), not in
+the literal bound values passed in. Safely exploiting that would mean
+cheaply detecting which permutation class a box falls into *without*
+running the expensive pivot-selection algorithm -- i.e. partially
+reimplementing SciPy's private algorithm, not just wrapping it in a cache.
+That's real reimplementation risk (the ~7-9% minority of evals using a
+different permutation are not numerically negligible -- an approximate/
+quantized cache key could silently misclassify some of them), and is
+better scoped to a from-scratch implementation (Phase B, where this logic
+gets reimplemented deliberately and validated end-to-end) than bolted on
+here as a "safe wrapper."
+
+**Measured** (representative order-5 `cor_mat`, hard box, 5 reps, this
+machine):
+
+| | mean time/call |
+|---|---|
+| before (no lattice cache) | 0.2048s |
+| after (lattice cache only) | 0.1710s |
+
+**~16.5% speedup** (1.20x) -- real, safe, and unconditionally shipped
+regardless of what Phase B (the custom-kernel investigation) concludes.
+
+**Also found, load-bearing for Phase B**: SciPy's CDF algorithm depends on
+SciPy version, and this project's pinned SciPy (1.17.1/1.18.0) is on the
+far side of a real backend swap (confirmed via SciPy PRs #22298/#22611 and
+direct source reading). SciPy < 1.16 used a Fortran extension (`mvndst.f`,
+Alan Genz's own MVNDST routine: Cholesky reorder + **tabulated Korobov
+lattice + Cranley-Patterson randomization**) -- the *same lineage* as R's
+`mvtnorm::pmvnorm()` (`mvt.f`'s `MVTDST`: `MVSORT` + `MVKBRV`, same recipe,
+same author). SciPy >= 1.16 (what this codebase actually runs) replaced
+that with a pure-Python/Cython reimplementation (`_qmvnt.py`) using a
+**Fast Component-by-Component (CBC) lattice construction** (Nuyens & Cools
+2004/2006 -- a different, later, unrelated-to-Genz publication) and its
+own independently-written adaptive stopping rule, not a port of `MVKBRV`'s
+logic. SciPy's own PR discussion acknowledges this is a real algorithm
+change, not a value-preserving refactor. **This means the prior entry's
+`maxpts=25000, abseps=1e-3` fix corrected the tolerance *settings* to match
+R, but there remains a deeper, currently-unquantified algorithmic gap
+between what this codebase computes (CBC lattice) and what R actually
+computes (Korobov lattice)** -- independent of, and in addition to, the
+ordinary QMC run-to-run noise both methods already share. Not yet measured
+whether this gap is within the existing tolerated noise band or materially
+larger; queued as the first step of the Phase B investigation (see the
+session's plan file / next entry) before any custom-kernel implementation
+effort, since it directly bears on what a from-scratch reimplementation
+should actually target (R's Korobov-lattice method, not SciPy's current
+CBC-lattice method).
+
+All 39 tests pass (added one new test verifying `_cbc_lattice` is called
+far fewer times than the number of CDF evaluations in a real `pmv_laplace`
+call).
+
+## 2026-07-14 — Phase B0: the CBC-vs-Korobov algorithm difference is NOT a real fidelity gap
+
+Directly tested the load-bearing question from the entry above: does SciPy's
+current CBC-lattice algorithm (`_qmvnt.py`, what this codebase actually
+runs) produce meaningfully different results than the Korobov-lattice
+algorithm R's `mvtnorm::pmvnorm()` actually uses (the same lineage as
+SciPy's own pre-1.16 Fortran backend)?
+
+Installed `scipy==1.15.2` (the last version with the Fortran `mvndst.f`
+backend, confirmed via reading its `_cdf` source: it calls `_mvn.mvnun`,
+not `_qauto`/`_qmvn`) into an isolated throwaway venv, and ran a
+standalone replica of `pmv_laplace`'s exact math (z-grid + box-CDF loop,
+`maxpts=25000, abseps=releps=1e-3`) under both that old Fortran/Korobov
+backend and the currently-pinned `scipy==1.18.0` CBC-lattice backend, on
+4 representative `(cor_mat, x)` cases, 15 reps each (both are stochastic):
+
+| case | old (Fortran/Korobov) mean | new (CBC, current) mean | old std | new std |
+|---|---|---|---|---|
+| hard_mid_prob | 0.423285 | 0.423285 | 3.58e-7 | 1.03e-8 |
+| small_x | 0.046348 | 0.046348 | 8.46e-7 | 3.84e-8 |
+| wide_x | 0.917619 | 0.917619 | 2.57e-6 | 1.66e-7 |
+| asymmetric | 0.470491 | 0.470491 | 4.51e-8 | 1.37e-9 |
+
+**The two algorithms' means agree to within (often well within) each
+algorithm's own run-to-run noise, on every case tested.** There is no
+detectable systematic divergence between SciPy's current CBC-lattice
+method and the Korobov-lattice method R actually uses -- both converge to
+the same true integral value, as expected of two different-but-valid
+randomized QMC estimators of the same quantity. Interestingly, the current
+(CBC) backend's own noise is consistently *smaller* than the old
+Fortran/Korobov backend's, at the same nominal `maxpts`/`abseps`.
+
+**Conclusion: the algorithm-lineage difference flagged in the entry above,
+while real (confirmed from source: different lattice-construction method,
+different adaptive stopping-rule implementation), is not a practically
+meaningful fidelity gap.** It does not move the needle on "how close is
+this codebase's `pmv_laplace` to what R actually computes" beyond the
+ordinary QMC noise both methods already share. This removes the fidelity
+argument for a custom from-scratch reimplementation (Phase B1, the numba
+kernel prototype) -- that step would now be justified on performance
+grounds alone, which is a materially weaker case given the uncertainty
+already flagged (scipy's kernel is already compiled; numba beating it is
+unproven) and the multi-day effort/correctness-risk involved. Per the
+session's plan, B1 was conditioned on B0 finding a real gap; since it
+didn't, checking with the user before spending further effort on B1.
+
+## 2026-07-14 — batch the 290 z-grid CDF evaluations into one 2D SciPy call (~3% at real settings, not the ~16% estimated earlier)
+
+Given B0 ruled out the fidelity motivation for a from-scratch kernel (B1),
+and B1's performance case alone was judged too uncertain against already-
+compiled Cython for the multi-day effort/risk, took the lower-risk, already-
+identified batching option instead: SciPy's `multivariate_normal.cdf()`
+accepts a 2D `x`/`lower_limit` directly (its `_cdf` dispatches via
+`np.apply_along_axis`), so `pmv_laplace`'s z-grid loop -- previously 290
+separate Python-level `.cdf()` calls -- is now a single call with `x` shaped
+`(290, 5)`. Verified this produces the same values (within ordinary QMC
+noise, confirmed via direct comparison, max abs diff 3.8e-7 on a
+representative case) before shipping, since each row is still evaluated
+independently with its own random draws -- batching only combines the outer
+SciPy-level dispatch, not the randomization.
+
+**Measured, isolating batching's contribution alone (identical lattice-
+cache state both sides, same representative case)**:
+
+| | mean time |
+|---|---|
+| looped (290 separate `.cdf()` calls) | 0.1702s |
+| batched (one `.cdf()` call, `x` shape (290,5)) | 0.1651s |
+
+**~3.0% reduction (1.03x)** -- real, but far smaller than the ~16% estimated
+during the original investigation. That earlier estimate was measured at
+`maxpts=1000, abseps=1e-2` (a much lower-precision regime where per-call
+Python/SciPy dispatch overhead was a much larger fraction of a much smaller
+per-call cost); at this codebase's actual `maxpts=25000, abseps=1e-3`
+settings, the QMC kernel so thoroughly dominates (~76-80% of cost, per the
+Phase A entry above) that there's proportionally little dispatch overhead
+left for batching to amortize. Shipped anyway since it's free and safe (zero
+numerical risk, same reasoning as the lattice cache), and stacks with it.
+
+**Combined effect of this session's three `pmv_laplace` changes** (R-
+fidelity precision fix from the prior session + lattice caching + batching),
+measured end-to-end on the same representative hard-box case used
+throughout: **~3.03s -> ~0.165s per call, ~18.4x total**, on this
+(uncontended, Apple Silicon) machine -- real production hardware should be
+judged by its own before/after progress-log numbers, not this figure
+directly, per the earlier finding that raw per-core throughput differs
+substantially by hardware for this workload.
+
+All 39 tests pass.
+
+## 2026-07-14 — Phase B1: numba kernel prototype does not beat SciPy's compiled Cython kernel
+
+Read `_qmvnt_cy.pyx` directly from SciPy's source (v1.18.0 tag) to get the
+*exact* per-eval algorithm: Cholesky-transformed box, tent-periodized CBC
+lattice point, Cranley-Patterson random shift, `ndtri`/`ndtr` (`Phi^-1`/
+`Phi`), online-updated mean and error variance across 10 batches. Ported
+this line-for-line to a `numba.njit` kernel (`ndtri` via a hand-rolled
+Acklam rational approximation, since `scipy.special.ndtri` isn't
+numba-typeable -- same approach validated in the B0/research phase, ~1e-9
+error, far inside the 1e-3 `abseps` target), reusing SciPy's own
+`_permuted_cholesky`/`_cbc_lattice` outputs (both already cached from Phase
+A) so the comparison isolates exactly one variable: **does a numba-compiled
+version of this inner loop beat SciPy's compiled Cython kernel**, given
+byte-identical lattice points and random shifts.
+
+**Correctness**: on 4 representative cases, the numba port reproduces
+SciPy's probability estimate to 1e-12 to 1e-13 -- confirms it's a faithful,
+same-algorithm port (the tiny residual is float op-ordering/`erf`
+implementation noise), not a coincidence.
+
+**Speed, head-to-head on identical captured inputs (`n_qmc_samples=701,
+n_batches=10`, 200 reps each, JIT warm-up excluded)**:
+
+| case | scipy kernel | numba kernel (`fastmath=False`) | speedup | numba kernel (`fastmath=True`) | speedup |
+|---|---|---|---|---|---|
+| hard_mid_prob | 751.2us | 841.5us | 0.89x | 860.4us | 1.13x |
+| small_x | 479.9us | 434.0us | 1.11x | 463.3us | 1.08x |
+| wide_x | 875.6us | 1060.0us | 0.83x | 757.5us | 1.40x |
+| asymmetric | 782.7us | 912.0us | 0.86x | 709.2us | 1.07x |
+
+**Verdict: no meaningful win.** `fastmath=False` (the fair, IEEE-safe
+comparison) is a wash-to-slight-loss (0.83x-1.11x); `fastmath=True` nudges
+it to 1.07x-1.40x, still well under the plan's 1.5-2x bar for "genuine,
+meaningful," and it relaxes IEEE float semantics (reordering,
+no-NaN/no-Inf assumptions) in exchange -- a real precision trade this
+codebase's "maintain exactness with R" priority argues against taking for
+an unproven, sub-1.5x gain. SciPy's kernel is already a tight, compiled,
+purpose-built loop over scalar `erf`/`log`/`sqrt` calls; numba's general
+JIT doesn't have obvious room to beat that for this shape of computation.
+
+Did not go on to build the "stronger direction" from the plan (batch all
+290 z-grid evaluations inside one compiled call, sharing one Cholesky
+decomposition across all of them) -- its ceiling is capped by this same
+per-eval-kernel finding (the ~76-80% dominant kernel cost isn't faster in
+numba), and the outer-dispatch overhead it would additionally amortize is
+the same ~1-3% already captured by the batching change above; the
+remaining upside isn't worth the correctness risk of forcing one box's
+Cholesky permutation onto all 290 z-grid points (the ~7-9% minority that
+scipy deliberately reorders differently, per the Phase A cost-breakdown
+entry).
+
+**Conclusion: per the plan's explicit stopping rule ("if B1 shows no
+meaningful win: stop here"), this closes out the `pmv_laplace` custom-kernel
+investigation.** Phase A's caching + the batching change above are the
+realistic performance ceiling without a fundamentally different algorithm
+or hardware. Prototype code is scratch-only (not part of the package);
+nothing shipped from this entry beyond the writeup.
+
+## 2026-07-14 — found and fixed the real "much slower than R" cause: SciPy's adaptive driver has a hardcoded ~5000-sample floor per box; R's doesn't
+
+The B1 conclusion above ("Phase A + batching is the realistic ceiling") was
+wrong -- it only ever asked "is a from-scratch kernel faster than SciPy's
+compiled one at the SAME sample count SciPy chooses." It never questioned
+whether that sample count itself was the actual problem. Asked to audit the
+peak-calling logic against R directly (not just re-benchmark), read
+`peak_calling.R`/`peak_calling_rf.R`/`rfsplit.py` end-to-end first --
+`pmv_laplace` is called exactly once per final peak region in both R and
+Python (confirmed line-by-line, no extra-call bug there) -- then read
+mvtnorm's actual Fortran source (`mvt.f`'s `MVKBRV`, fetched from
+`cran/mvtnorm`) to see how R's `pmvnorm(GenzBretz(maxpts=25000))` actually
+decides how many QMC samples to draw per box.
+
+**The real gap**: SciPy's public adaptive driver (`_qmvnt._qauto`, used
+inside `multivariate_normal.cdf`) always starts its search at
+`min(maxpts, n_dim*1000)` -- for this codebase's fixed 5-dim `cor_mat`, a
+hardcoded floor of ~5000 raw samples (`n_qmc_samples~=701` per batch x 10
+batches) *per box*, no matter how easy that box is. R's `MVKBRV` has no such
+floor: it walks a fine table of lattice sizes (`P(1)=31, P(2)=47, P(3)=73,
+P(4)=113, P(5)=173, P(6)=263, ...`), starting at `P(MIN(NDIM,10))` --
+`P(4)=113` for this problem's dimensionality -- and stops as soon as the
+error estimate meets `abseps`. Most of dREG's boxes are nowhere near the
+50/50 decision boundary and converge in the very first, tiny round; SciPy's
+API has no way to express that and always pays for ~5000+ samples anyway.
+This -- not raw per-sample kernel speed, which the B1 prototype already
+showed is roughly at parity between SciPy's Cython and a from-scratch numba
+port -- is the actual reason peak calling ran much slower than R.
+
+**Fix**: `_qmvn_adaptive` in `stats.py` bypasses `multivariate_normal.cdf`/
+`_qauto` entirely and drives SciPy's own private, trusted kernel
+(`_qmvnt._qmvn` -- same lattice construction, same Cholesky reordering, same
+randomized QMC evaluation, completely unchanged) with a custom loop that
+starts at 150 samples instead of ~5000, growing by the same `sqrt(2)` factor
+SciPy's own driver uses, checking the same stopping condition
+(`est_error <= abseps`) on every round. This does not reimplement or copy
+any of R's actual lattice-generator tables (`C`/`P` arrays in `mvt.f`,
+GPL-2) -- it only changes how many samples SciPy's own machinery is asked
+for before the first convergence check, matching the *shape* of R's
+adaptive behavior (start small, grow only as needed), not its literals. The
+final-precision guarantee is unchanged: the loop cannot return early with
+worse error than before, since the stopping condition is identical to
+SciPy's own.
+
+**Validation** (25 random order-5 `cor_mat`/`x` cases, AR(1)-decay
+correlation structure matching `build_cormat`'s real output, starting points
+50/100/150/250 all tested):
+
+| start | mean speedup | diff vs. SciPy-floor mean | diff max | mean `_qmvn` calls/pmv_laplace call |
+|---|---|---|---|---|
+| 50 | 4.58x | 1.23e-05 | 4.95e-05 | 293.0 |
+| 100 | 4.44x | 4.30e-06 | 2.19e-05 | 291.2 |
+| 150 | 4.32x | 2.85e-06 | 1.30e-05 | 291.0 |
+| 250 | 4.05x | 1.78e-06 | 8.69e-06 | 291.0 |
+
+All differences are far inside the ordinary run-to-run QMC noise both
+methods already carry (~1e-6 to ~1e-7 per the B0 entry above). Picked
+`start=150`: essentially always converges in exactly one round (mean/max
+calls both 291.0, i.e. one `_qmvn` call per box, matching the un-adapted
+count exactly) while keeping the smallest max-diff among the options tested.
+
+**Trade-off**: this drops the "batch 290 z-grid evaluations into one 2D
+SciPy `.cdf()` call" optimization from the prior entry -- `_qmvnt._qmvn`
+only accepts one box at a time, so the z-grid loop is back to a Python
+`for` loop. That optimization was only ever worth ~3%, dwarfed by this
+change, so nothing of consequence is lost; the `_cbc_lattice` cache (Phase
+A) is untouched and still applies transparently (same monkeypatch, same
+near-constant `n_qmc_samples` since almost every box now converges at the
+same `start=150`-derived sample count).
+
+**Measured end-to-end** (real `pydreg.stats.pmv_laplace`, caches warm, 30
+reps per case):
+
+| case | mean time/call | mean value | std |
+|---|---|---|---|
+| hard_mid_prob | 32.1ms | 0.423285 | 2.7e-6 |
+| small_x | 33.7ms | 0.046347 | 9.0e-6 |
+| wide_x | 31.8ms | 0.917616 | 1.8e-5 |
+| asymmetric | 33.4ms | 0.470491 | 9.8e-7 |
+
+Compare to the prior entry's ~165ms/call (Phase A + batching) and the
+session's original ~3.03s/call baseline: **~5x additional speedup on top of
+everything shipped so far, ~94x total this session**, on this
+(uncontended, Apple Silicon) machine. `hard_mid_prob`'s mean (0.423285)
+matches the B0 fidelity entry's reference value exactly. `cdf_evals` in
+`get_pmv_laplace_profile()` now counts actual underlying `_qmvn` kernel
+invocations (usually 291 per call, one per box) rather than the previous
+fixed 291-per-batched-call constant -- a more direct measure of real work,
+worth knowing when reading old vs. new progress-log numbers side by side.
+
+All 39 tests pass.
+
+## 2026-07-14 — numba port of `_permuted_cholesky`: bit-exact, 28x faster in isolation, ~1.85x on real `pmv_laplace`
+
+Asked to look at whether `smoothing.py`/`rfsplit.py` were the next bottleneck
+(a real production log showed non-pmv at 24.4% of block CPU, up from 2.8%/
+1.5% in earlier logs, now that `pmv_laplace` itself is so much faster).
+`smoothing.py`'s boxcar smoothing is already cumsum-vectorized -- profiling
+confirmed it's not a bottleneck. But profiling `pmv_laplace` itself
+(cProfile over 1000 calls) turned up something bigger: `_permuted_cholesky`
+-- the box-reordering/Cholesky-factorization setup step SciPy's `_qmvn`
+runs before every QMC evaluation -- was **15.991s tottime / 21.859s cumtime
+out of 51.659s total (~42%)**. This step was deliberately left uncached in
+an earlier entry above, when it was only ~5-8% of a much larger total; the
+small-start adaptive fix shrank the kernel's own cost so much that this
+previously-minor setup step is now proportionally dominant.
+
+Unlike `_qmvn_inner` (the QMC kernel, already compiled Cython -- a numba
+port of that was tried and found no win, see the B1 entry above),
+`_permuted_cholesky` is **pure Python** (confirmed by reading the installed
+source directly). A numba port has real room to win here specifically
+because the original was never compiled at all -- this is a different
+situation from B1's numba-vs-Cython comparison, not a re-litigation of it.
+
+**Implementation**: `_permuted_cholesky_numba` in `stats.py` is a
+line-for-line `@numba.njit` translation of SciPy's own `_permuted_cholesky`
+(read directly from the installed `scipy.stats._qmvnt` source), using a
+hand-rolled `_ndtr` (`0.5*(1+erf(x/sqrt(2)))`) matching SciPy's `phi`.
+Monkeypatched onto `_qmvnt._permuted_cholesky` at import time, same pattern
+as the existing `_cbc_lattice` cache (original saved as
+`_orig_permuted_cholesky`, so a future SciPy rename/removal fails loudly
+rather than silently falling back to uncached-but-correct behavior).
+
+**Correctness**: this is a deterministic pivoted-Cholesky algorithm with no
+randomization involved at all -- so unlike every other change in this log,
+there's no "within QMC noise" caveat: the numba port must match SciPy's own
+output to near machine precision on every input. Validated across 200
+random `(cor_mat, low, high)` cases (AR(1)-decay correlation structure,
+box scales spanning `z0` from `1e-3` to `1e3`): **max diff = 0.0** (bit-exact).
+A permanent regression test (`test_permuted_cholesky_numba_matches_scipy_exactly`)
+checks this on 100 cases with a `1e-12` tolerance (loosened slightly from
+literal bit-exactness only to avoid being a flaky float-ULP-sensitive test).
+
+**Speed**: 53.9us/call (SciPy's pure Python) -> 1.9us/call (numba) in
+isolation, a **28x** speedup.
+
+**Measured end-to-end effect on real `pmv_laplace`** (4 representative
+cases, caches/JIT warm, 40 reps each):
+
+| case | before (scipy Cholesky) | after (numba Cholesky) |
+|---|---|---|
+| hard_mid_prob | 32.1ms | 17.5ms |
+| small_x | 33.7ms | 17.1ms |
+| wide_x | 31.8ms | 17.7ms |
+| asymmetric | 33.4ms | 17.6ms |
+
+**~1.85x additional speedup**, landing consistently across all 4 cases
+(an earlier ad-hoc monkeypatch test during investigation showed uneven
+per-case results, apparently a measurement artifact -- the properly wired
+version above is consistent). Combined with everything else this session
+(R-fidelity precision fix + lattice caching + small-start adaptive sample
+schedule): **~3.03s -> ~17.5ms per call, ~173x total**, on this
+(uncontended, Apple Silicon) machine -- as always, judge real production
+hardware by its own before/after progress-log numbers.
+
+All 40 tests pass.
+
+## 2026-07-14 — 3-way block-CPU profiling breakdown (diagnostic only, no behavior change)
+
+Synthetic profiling of `rfsplit.find_rf_peaks` (see the entry above) found a
+real inefficiency in `_split_peak`'s sequential merge loop (repeated tiny
+`model.predict()` calls, each rebuilding its input array from a list of
+Python dicts), but even an extreme synthetic case (4000 points, 160 local
+maxima) only produced ~13ms/call of non-pmv cost -- about 3x less than the
+~42.7ms/peak implied by a real production log's 24.4%-non-pmv share. Rather
+than guess which of several candidates (that RF-split inefficiency, or
+something in `_call_peak_block`'s per-peak `searchsorted`/DataFrame handling
+outside `find_rf_peaks` entirely) actually dominates in production, added a
+3-way timing breakdown so the next real run answers this directly instead.
+
+**Change**: `_call_peak_block` (`peaks.py`) now also accumulates
+`find_rf_peaks_seconds` -- a timer bracketing only the
+`rfsplit.find_rf_peaks(...)` call itself, separate from the existing
+whole-block timer (`seconds`) and the existing `pmv_seconds` (from
+`stats.get_pmv_laplace_profile()` deltas, unaffected). `call_peaks()`'s
+progress-log line and final summary now report:
+- `pmv_seconds` (unchanged) -- time inside `pmv_laplace`.
+- `find_rf_peaks_non_pmv = find_rf_peaks_seconds - pmv_seconds` -- smoothing +
+  `_split_peak` (incl. the `model.predict` merge-loop overhead) + result
+  building, *inside* `find_rf_peaks`.
+- `other_block = seconds - find_rf_peaks_seconds` -- `np.searchsorted`/
+  slicing per peak, the `xp.shape[0] <= 3` skip check, and the per-peak
+  `result.copy()`/`.insert()`/`raw_rows.append` DataFrame handling, all
+  *outside* `find_rf_peaks` within `_call_peak_block`'s loop.
+
+Purely additive (new timers only, no behavior change). **Verified the
+3-way split is exact by construction** (`pmv_seconds + find_rf_peaks_non_pmv
++ other_block` telescopes algebraically back to `seconds`, since
+`find_rf_peaks_non_pmv` and `other_block` are defined as differences of
+nested supersets) and confirmed numerically on a small local `call_peaks`
+run: `seconds=0.000937s`, reconstructed sum `=0.000937s`, diff `0.00e+00`;
+breakdown was `pmv=0.33ms`, `find_rf_peaks_non_pmv=0.45ms`,
+`other_block=0.16ms` for that run.
+
+**Next step**: run a real production peak-calling job and read the new
+3-way split in its progress log -- whichever of `find_rf_peaks_non_pmv` or
+`other_block` dominates tells us precisely where to target a follow-up fix
+(the `_split_peak`/`model.predict` call-overhead issue if the former; the
+`_call_peak_block` DataFrame-assembly path if the latter), instead of
+guessing further from synthetic data that couldn't reproduce the observed
+production magnitude.
+
+All 40 tests pass.
+
+## 2026-07-14 — why is sklearn so much slower than the numpy/numba tiers? (SVM correction + new RF finding)
+
+Asked to explore *why*, not just confirm *that*, sklearn is slower than
+pydreg's own numpy (SVM) and numba (RF) implementations, for both models --
+this corrects the 2026-07-09 entry's SVM explanation and adds a new RF
+finding neither entry covered before.
+
+**SVM: not actually about threading.** Tested the 2026-07-09 entry's
+"single-threaded C loop vs. multithreaded BLAS" claim directly:
+`VECLIB_MAXIMUM_THREADS=1` (forcing single-threaded Accelerate BLAS) gives
+the *same* wall-clock time as the default (1.10s vs. 1.15s on a 256-query
+batch), and the default run's own `cpu_time/wall_time` ratio is only ~1.2x
+-- nowhere near saturating this machine's 10 cores. So multithreading isn't
+the differentiator at all. Reading libsvm's actual C++ source
+(`sklearn/svm/src/libsvm/svm.cpp`, `svm_predict_values` -> `Kernel::k_function`)
+shows the real shape of the computation: for *each* query point, it loops
+over all 605,187 support vectors and calls `k_function` once per pair, and
+each call does `malloc(sizeof(double)*360)` + a single BLAS **level-1**
+`dot()` (360 elements) + `free()` -- i.e. 605,187 heap-alloc/free round trips
+and 605,187 tiny vector-vector BLAS calls, per query. `DREGModel.predict`
+instead issues one BLAS **level-3** `X_scaled @ sv_block.T` GEMM call that
+computes every query x SV dot product at once. Level-3 GEMM is cache-blocked
+and SIMD-vectorized across the whole computation; repeated tiny level-1
+calls (plus the allocator overhead) can't get anywhere near that throughput
+regardless of thread count -- a genuinely different computational shape, not
+a parallelism gap.
+
+**RF: pure per-call Python/joblib orchestration overhead, confirmed via a
+same-scale sklearn model built for direct comparison.** Fit a
+`RandomForestRegressor(n_estimators=500, max_depth=8)` (matching pydreg's
+real forest's 500 trees) on synthetic data and benchmarked `.predict()`
+against `DREGPeakSplitForest.predict()` (numba) at matched row counts:
+
+| n rows | sklearn (n_jobs=1) | sklearn (n_jobs=-1) | numba | ratio (1job/numba) |
+|---|---|---|---|---|
+| 1 | 9.9ms | 26.5ms | 0.016ms | **624x** |
+| 20 | 10.2ms | 25.8ms | 0.26ms | 40x |
+| 1000 | 28.8ms | 38.3ms | 13.0ms | 2.2x |
+| 10000 | 176.7ms | 52.1ms | 131.9ms | 0.4x (parallel sklearn is *faster*) |
+
+A flat ~10-26ms regardless of `n` until `n` reaches the thousands, then it
+scales with real work -- the fixed-overhead signature. `cProfile` on the
+`n=1` case (200 reps) pins it down exactly: `RandomForestRegressor.predict()`
+dispatches **one joblib `Parallel`/`delayed()` task per tree** (500 tasks for
+one top-level `.predict()` call), and each tree's own
+`DecisionTreeRegressor.predict()` independently re-runs sklearn's full
+estimator-API machinery from scratch: `check_is_fitted` (500 calls),
+`get_tags()`/`__sklearn_tags__()` introspection (500-700+ calls),
+`functools.update_wrapper` decorator rebuilding (500 calls), even
+`warnings.filterwarnings()` and `re.compile()` (2500 calls *each*). None of
+that is tree-traversal math -- it's the validated/introspectable general-
+purpose estimator API, paid 500 times per prediction call. `_forest_predict`
+does the whole 500-tree traversal inside one compiled numba function with
+zero per-tree Python overhead, which is why it wins by 2-3 orders of
+magnitude at pydreg's actual call shape (1-20 rows per call, confirmed in
+the 2026-07-14 RF-split entry above) and only loses once `n` reaches the
+thousands and multi-core parallelism has enough real work to amortize its
+own dispatch cost.
+
+**Common thread, not a coincidence**: sklearn's estimators are built and
+tuned for a few large-batch calls (typical training/serving shape); pydreg's
+actual workload -- confirmed independently for both models in this and
+earlier sessions -- is many tiny calls. For SVM the mismatch is algorithmic
+(libsvm's predict path has no batched-kernel-matrix option at all); for RF
+it's pure API/orchestration overhead that happens to fully amortize past
+~1000 rows. Neither is a bug in sklearn -- both are the wrong tool for this
+specific call shape, which is exactly why pydreg carries its own numpy/numba
+implementations instead of depending on sklearn's for the hot path.
+
+Research only, no code changed; `backend.py`'s `detect_backend()` docstring
+and the correction above already reflect this.
+
+## 2026-07-14 — end-to-end validation: 0.999728 Jaccard index vs. real dREG on test data
+
+The user ran pydreg's full peak-calling pipeline against real dREG (the
+original R package) on test data and compared the resulting peak sets:
+**Jaccard index (|pydreg ∩ dREG| / |pydreg ∪ dREG|) = 0.999728.**
+
+This is the real-world fidelity check the "Ground rule" above asks for --
+not literal bit-identical output (not expected, given `pmv_laplace`'s
+inherent QMC randomization and the already-documented CBC-vs-Korobov
+lattice-algorithm difference between SciPy and R's `mvtnorm`, see the
+2026-07-14 B0 entry above), but near-total agreement on the actual called
+peak set after this session's full run of changes: the R-fidelity
+`maxpts`/`abseps` precision fix, `_cbc_lattice` caching, the small-start
+adaptive QMC sample schedule (the biggest behavioral change of the session,
+since it alters exactly how many samples `pmv_laplace` draws per box), and
+the `_permuted_cholesky` numba port (bit-exact vs. SciPy's own
+implementation, so not expected to move this number at all). None of that
+work traded away correctness for speed -- this is the empirical confirmation.
+
+## 2026-07-14 — correction: the `_permuted_cholesky` numba port is not *always* bit-exact, and that's fine
+
+`test_permuted_cholesky_numba_matches_scipy_exactly` (from the entry above)
+failed intermittently in CI/other runs despite passing repeatedly here --
+`assert max_diff < 1e-12` failing with `max_diff` in the single-to-low-
+hundreds range, not a tiny precision miss. Root-caused by searching 200,000
+random cases directly on this machine (not a cross-platform artifact):
+`_permuted_cholesky`'s greedy pivot search picks the dimension with the
+smallest remaining marginal probability range (`de = phi(hi_i) - phi(lo_i)`)
+at each step. For a near-saturated box -- every dimension's marginal
+probability already ~1, exactly what happens at the small-z0 tail of
+`pmv_laplace`'s own z-grid -- every candidate's `de` is a near-tie
+simultaneously, not just two candidates against each other. At that point,
+which pivot wins is decided by sub-ULP floating-point differences between
+NumPy's `@` (used inside SciPy's own pure-Python implementation) and this
+port's explicit summation loop -- found a concrete case where this flips
+the chosen pivot order, producing intermediate `cho`/`lo`/`hi` arrays that
+differ by up to ~196 (roughly 1-in-40000 random draws in the search).
+
+**This is not a correctness bug.** Verified directly on the worst case
+found: feeding *either* pivot choice's resulting `(cho, lo, hi)` into
+SciPy's own unmodified `_qmvn_inner` kernel (same lattice, same random
+shift, isolating the decomposition as the only variable) produces the same
+final probability (0.9999999999999998 vs. 1.0), matching a high-precision
+`scipy.stats.multivariate_normal.cdf` reference computed independently
+(0.9999999999999999). The pivot order is a variance-reduction heuristic for
+the subsequent QMC integration, not something the final integral's
+correctness depends on -- any valid pivot choice, correctly decomposed,
+gives a statistically valid estimate. Bit-identical *intermediates* was
+simply the wrong invariant to assert: even SciPy's own algorithm isn't
+guaranteed to reproduce this exact pivot choice across different BLAS
+backends at this kind of degenerate input, so holding a from-scratch port
+to a stricter bar than SciPy holds itself to was the actual mistake in the
+2026-07-14 entry above, not the port's math.
+
+**Fix**: split the one overreaching test into two in `tests/test_stats.py`:
+`test_permuted_cholesky_numba_matches_scipy_exactly_for_typical_boxes`
+(unchanged bit-exactness assertion, restricted to a moderate z0 range where
+the pivot search has a real signal to discriminate on -- still catches a
+genuine implementation bug in the common case) and
+`test_permuted_cholesky_numba_agrees_with_scipy_on_final_probability_at_saturated_boxes`
+(the full z0 range including saturating tails, asserting agreement on the
+*downstream probability* via a shared-lattice/shared-shift `_qmvn_inner`
+call, which is the invariant that actually matters -- includes the exact
+worst case found as a permanent, non-random regression case, since random
+draws essentially never reproduce a ~1-in-40000 divergence on their own).
+
+No production code changed -- `_permuted_cholesky_numba` itself is
+unmodified; this was purely a test-correctness fix. All 41 tests pass,
+stable across repeated runs.

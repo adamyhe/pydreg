@@ -1,48 +1,61 @@
 # pydreg
 
+[![PyPI](https://img.shields.io/pypi/v/pydreg)](https://pypi.org/project/pydreg/)
+[![Tests](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml)
+[![Weights](https://img.shields.io/badge/%F0%9F%A4%97-Weights-yellow)](https://huggingface.co/adamyhe/pydreg)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pydreg?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pydreg)
+
 An inference-only Python port of [dREG](https://github.com/Danko-Lab/dREG) (Danko Lab) — detects active transcriptional regulatory elements (promoters and enhancers) from PRO-seq/GRO-seq nascent-transcription data.
 
-Given a pair of strand-specific bigWig files, `pydreg` scores every informative genomic position with a pretrained SVR model, then calls significant peaks with FDR control, mirroring the original R package's recommended `run_dREG.R` pipeline end to end. Training is out of scope — this project only ports inference.
+Given a pair of strand-specific bigWig files, `pydreg` scores every informative genomic position with a pretrained SVR model, then calls significant peaks with FDR control, mirroring the original R package's recommended `run_dREG.R` pipeline end to end.
 
 ## Installation
 
-Requires Python ≥3.11. Dependency management is via [uv](https://docs.astral.sh/uv/):
-
 ```bash
-uv sync
+pip install pydreg[gpu]
+pydreg --help
 ```
 
-For GPU-accelerated scoring on Linux with an NVIDIA GPU (via [cuML](https://docs.rapids.ai/api/cuml/stable/)):
+Or with [uv](https://docs.astral.sh/uv/) — `uv tool install` if you only need the `pydreg` CLI (isolated environment, nothing else to manage):
 
 ```bash
-uv sync --extra gpu
+uv tool install pydreg[gpu]
+pydreg --help
 ```
 
-This is a no-op (not an error) on macOS/Windows or GPU-less machines — the `gpu` extra is a platform-restricted marker, not a hard requirement.
+If you want the Python API (`from pydreg import pipeline`, see below) available in your own project instead, use `uv add pydreg[gpu]` there, or `uv pip install pydreg[gpu]` into an already-active environment.
 
-Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/dREG`](https://huggingface.co/adamyhe/dREG) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub` — no manual download step.
+`[gpu]` installs [cuML](https://docs.rapids.ai/api/cuml/stable/) and enables GPU-accelerated scoring on Linux with an NVIDIA GPU. It is not required, but CPU-only scoring is **much** slower and so is not generally recommended.
+
+Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/dREG`](https://huggingface.co/adamyhe/dREG) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub`.
 
 ## Usage
 
 ### CLI
 
 ```bash
-uv run pydreg plus.bw minus.bw out_prefix --verbose
+pydreg plus.bw minus.bw out_prefix --verbose
 ```
 
-- `plus.bw`/`minus.bw`: strand-specific bigWig files (5′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects).
+- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. `minus.bw` may be positive- or negative-signed — `pydreg` takes the absolute value of both strands during feature extraction (matching the original C implementation), so sign convention doesn't affect scoring.
 - `out_prefix`: prefix for all output files (see below).
 
 Options:
 
-| flag | default | meaning |
-|---|---|---|
-| `--backend {auto,cuml,sklearn,numpy}` | `auto` | Scoring backend. `auto` tries cuML, then scikit-learn, then pure NumPy. An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
-| `--smoothwidth N` | `4` | Smoothing window used during peak-splitting. |
-| `--pv-adjust METHOD` | `fdr` | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name). |
-| `--pv-threshold P` | `0.05` | Significance threshold applied after correction. |
-| `--query-chunk N` | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`). |
-| `-v`, `--verbose` | off | Log progress at INFO level. |
+| flag                                  | default          | meaning                                                                                                                                                                                                                                                                                        |
+| ------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--backend {auto,cuml,sklearn,numpy}` | `auto`           | Scoring backend. `auto` uses cuML when CuPy sees a CUDA device, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected (see `docs/OPTIMIZATION.md` for why). An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
+| `--smoothwidth N`                     | `4`              | Smoothing window used during peak-splitting.                                                                                                                                                                                                                                                   |
+| `--pv-adjust METHOD`                  | `fdr`            | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name).                                                                                                                                                                                              |
+| `--pv-threshold P`                    | `0.05`           | Significance threshold applied after correction.                                                                                                                                                                                                                                               |
+| `--query-chunk N`                     | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`).                                                                                                                                                                                       |
+| `-c`, `--cuml-query-chunk N`          | `1048576`        | Positions scored per batch for cuML when `--query-chunk` is not set; ignored by CPU backends.                                                                                                                                                                                                  |
+| `--peak-calling-cores N`              | `1`              | Worker processes for the final peak-calling stage (embarrassingly parallel across broad candidate peaks).                                                                                                                                                                                      |
+| `--peak-calling-block-width N`        | `100`            | Candidate broad peaks handed to each peak-calling worker per task; smaller blocks improve load balancing on uneven peak sizes.                                                                                                                                                                 |
+| `--pmv-laplace-cdf-maxpts N`          | `25000`          | Max integration points for the per-summit p-value's quasi-Monte-Carlo integral; matches R's `mvtnorm::pmvnorm()`/`GenzBretz()` default. Only lower this if you want to trade fidelity with R for further speed.                                                                                |
+| `--pmv-laplace-cdf-eps EPS`           | `0.001`          | Absolute/relative tolerance for the same integral; also matches R's default. Only lower this (i.e. tighten precision) if you specifically want to exceed R's own reference precision, at real speed cost.                                                                                      |
+| `--no-progress`                       | off              | Disable tqdm progress bars (auto-hidden anyway when stdout isn't a terminal).                                                                                                                                                                                                                  |
+| `-v`, `--verbose`                     | off              | Log progress at INFO level.                                                                                                                                                                                                                                                                    |
 
 ### Python API
 
@@ -59,13 +72,13 @@ Pass `write_outputs=False` to get the result dict back without writing files, if
 
 Given `out_prefix`, pydreg writes:
 
-| file | contents |
-|---|---|
-| `{prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw` | Every informative position and its raw dREG score. |
-| `{prefix}.dREG.raw.peak.bed.gz` (+`.tbi`) | All candidate peaks before FDR filtering. |
-| `{prefix}.dREG.peak.full.bed.gz` (+`.tbi`) | Significant peaks: chrom, start, end, score, p-value, center. |
-| `{prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only. |
-| `{prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' `1 - p-value`. |
+| file                                                  | contents                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------- |
+| `{out_prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw`      | Every informative position and its raw dREG score.            |
+| `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`)         | All candidate peaks before FDR filtering.                     |
+| `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`)        | Significant peaks: chrom, start, end, score, p-value, center. |
+| `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only.                               |
+| `{out_prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`)  | Significant peaks' `1 - p-value`.                             |
 
 `.bed.gz` files are bgzipped and tabix-indexed; `.bw` files are standard bigWig tracks.
 
@@ -76,22 +89,20 @@ Given `out_prefix`, pydreg writes:
 3. **Scoring** — an RBF-kernel SVR (605,187 support vectors, trained on the original dREG data) maps each feature vector to a dREG score in ~[0, 1].
 4. **Peak calling** — merges scored positions into broad candidate regions, refines local maxima with a small random-forest model to decide where to split adjacent peaks, computes a per-peak p-value, and applies FDR control to select significant peaks.
 
-See `docs/PLANNING.md` for the full algorithmic detail (this is a faithful port, including several upstream R quirks reproduced deliberately since the pretrained model's expected behavior depends on them) and `docs/PERF_LOG.md` for the performance-optimization history.
+See `docs/METHODS.md` for a plain-language walkthrough of each stage, and `docs/OPTIMIZATION.md` for the performance design choices layered on top without changing any of the above. `docs/PLANNING.md`/`docs/PERF_LOG.md` are the underlying comprehensive design/research records (full algorithmic spec, every upstream R quirk and why it's kept, every benchmark) for anyone going deeper.
 
-## Development
-
-```bash
-uv sync
-uv run pytest tests/ -q
-```
-
-The test suite (25 tests) covers each module in isolation plus a full synthetic end-to-end pipeline run; model-dependent tests are skipped (not failed) if the Hugging Face repo is unreachable.
+This is validated directly against the original: on real test data, pydreg's called peaks agree with real dREG's at a **0.999728 Jaccard index**.
 
 ## Caveats
 
+- `minus.bw`'s sign doesn't matter: both informative-position detection and feature extraction take the absolute value of the minus-strand signal (the latter matching the original C's `bigwig_readi(..., abs=1, ...)` read call, which strips sign from both strands before any binning) — see `docs/PLANNING.md` for the sourced trace.
 - The cuML GPU backend is implemented against cuML's documented `SVR.from_sklearn()` API but has not been exercised on real GPU hardware (none was available during development) — do a real smoke test on CUDA hardware before relying on it in production.
 - A handful of upstream R bugs/quirks are faithfully replicated rather than fixed, because the pretrained model's expected behavior was produced by that exact code (e.g. a `mean()`-argument-binding bug in the p-value calculation, an off-by-one in broad-peak merging that drops the last group per chromosome, and others) — see `docs/PLANNING.md` for the full list and reasoning.
-- Peak-calling p-values have small inherent run-to-run noise (`scipy.stats.multivariate_normal.cdf`'s underlying quasi-Monte-Carlo algorithm is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice.
+- Peak-calling p-values have small inherent run-to-run noise (the per-summit p-value's underlying quasi-Monte-Carlo integral is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice, and is reflected in the 0.999728 (not exactly 1.0) Jaccard index above.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, running tests, and what to read before making algorithmic or performance changes.
 
 ## License
 

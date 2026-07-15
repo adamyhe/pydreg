@@ -9,6 +9,11 @@
 > implementation and is *not* reflected in the algorithm descriptions below,
 > since they were performance-only changes with no behavioral difference —
 > see `docs/PERF_LOG.md` for that history instead.
+>
+> This document (and `docs/PERF_LOG.md`) is a comprehensive, chronological
+> design/research record, not user-facing documentation. For a plain-language
+> overview of the algorithm and the performance work, see `docs/METHODS.md`
+> and `docs/OPTIMIZATION.md` instead.
 
 ## Context
 
@@ -98,17 +103,38 @@ Stage A, precisely:
   - Left flank bin `j∈[0,H-1]`: covers `[C-W*H+j*W, C-W*H+(j+1)*W-1]` (bin 0 farthest, bin H-1 adjacent-left).
   - Right flank bin `j∈[H,2H-1]`: covers `[C+(j-H)*W+1, C+(j-H+1)*W]` (bin H adjacent-right, bin 2H-1 farthest).
   - Vectorizes as: reshape the fetched left/right-of-center arrays into `(H, W)` blocks per zoom, `.sum(axis=1)` — smaller zooms simply use the innermost slice of the full `max_dist`-wide fetch.
-- **Edge handling**: any bp `<0` or beyond available chromosome data contributes 0 (bins zero-initialized; skip, never NA/error). **No sign flip on reverse strand** — raw bigWig values accumulate as-is.
+- **Edge handling**: any bp `<0` or beyond available chromosome data contributes 0 (bins zero-initialized; skip, never NA/error).
+- **Sign handling**: both strands' raw per-bp signal is `abs()`'d immediately at fetch time, before any binning — see the sourced note below. Bin sums are therefore always non-negative.
 - **Layout — NOT interleaved per zoom**: `[FWD block: zoom0(2H0) | zoom1(2H1) | ...] || [REV block: zoom0(2H0) | zoom1(2H1) | ...]` — all-forward-then-all-reverse, zooms in `window_sizes` order. For the pretrained model: 180 fwd + 180 rev = 360 total. This exact order must match the pretrained weight vector bit-for-bit.
 - **Logistic scaling**, independently per zoom AND per strand (10 independent computations for the pretrained model's 5 zooms × 2 strands):
   ```
-  true_max = max(raw bin values in this zoom/strand's 2H bins)   # plain max, NO abs()
+  true_max = max(raw bin values in this zoom/strand's 2H bins)   # bins are already non-negative (see above)
   MAX = 1 if true_max == 0 else 0.05 * true_max
   alpha = ln(99) / MAX
   scaled_j = 1 / (1 + exp(-alpha * (raw_j - MAX)))                for each of the 2H bins
   ```
-  **Must replicate the no-`abs()` gotcha exactly** — reverse-strand raw values are typically negative, so `true_max` there is often small/negative; this is what the pretrained weights expect, not a bug to fix. All-zero windows scale to the floor value `0.01`, not `0` (via the `true_max==0 → MAX=1` fallback).
+  Both strands behave identically and symmetrically (smooth, magnitude-preserving: one bin at the max always ≈1, others at the floor `0.01`) — there is no reverse-strand-specific discontinuity, because `get_max_d1`'s own "WARNING: Use ONLY for positive integers 0..+Inf" comment is a true invariant given the upstream `abs()`, not a hazard warning about misuse. All-zero windows scale to the floor value `0.01`, not `0` (via the `true_max==0 → MAX=1` fallback).
 - Linear-scaling mode exists in R but is **not used by the pretrained model** (confirmed via `asvm$scaled` being all-`TRUE`) — support logistic only.
+
+**Sourced note — `minus.bw`'s sign does not affect feature-extraction correctness (corrected; superseded an earlier, wrong version of this note):**
+
+An earlier version of this note concluded the opposite — that `minus.bw` must be negative-signed, because `read_genomic_data.c`'s scaling functions (`get_max_d1`/`scale_genomic_data_strand_sep`) never call `fabs()`. That was wrong: it examined the scaling functions and `get_informative_positions.R` without checking the actual raw bigWig *read* call, which turns out to apply `abs()` upstream of both. Full corrected trace, verified end-to-end (R entry point through to the R-bound output, no contradictions found):
+
+- `read_genomic_data.R:63` — `read_genomic_data()`'s `.Call("get_genomic_data_R", ..., scale_r, ...)`, with `scale_r = as.logical(scale.method=="logistic")` (R:69) → `TRUE` under the default `scale.method="logistic"`.
+- `read_genomic_data.c:490` — `get_genomic_data_R` receives this as `bool bscale` (C:491), opens both bigWigs (C:505-506), and for each (possibly-merged) group of centers:
+  - `merge_adjacent_range` (C:442-481, called C:540) — purely an I/O batching optimization (groups nearby centers into one shared bigWig-read window); never touches signal values, and per-center bin offsets (`get_pre_bin`, defined in this same file at C:190-205) are recomputed relative to each center regardless of merging, so this has zero effect on final feature values.
+  - `read_from_bigWig_r` (C:401-419, called C:552) — **this is the actual raw-read call**:
+    ```c
+    rd.forward = bigwig_readi(bw_fwd, chrom, start, end, 1, 1, &out_length, &out_is_blank);  // C:414
+    rd.reverse = bigwig_readi(bw_rev, chrom, start, end, 1, 1, &out_length, &out_is_blank);  // C:415
+    ```
+    `bigwig_readi`'s signature (from the `bigWig` package, [andrelmartins/bigWig](https://github.com/andrelmartins/bigWig)) is `(bw, chrom, start, end, step, abs, out_length, out_is_blank)` — **both forward and reverse strand reads pass `abs=1`**, applying `fabs()` per base pair at read time, before anything else happens to the data. (Corroborated at the library level: `bw_query.c`'s per-interval op helpers gate on `if (data->do_abs) ivalue = fabs(ivalue);`.)
+  - `get_genomic_data_fast` (C:211-235, called C:563) — the only live windowing function (the alternatives, `get_genomic_data_2015`/`get_genomic_data_gpulike`, are commented-out dead code at C:561-562). It zero-inits every bin per center via `init_genomic_data_point` (C:213; `dp` itself is allocated once at C:514 and reused across all centers, so this per-call reset is what prevents cross-center leakage) and accumulates the already-non-negative `chrom_counts.forward`/`.reverse` values into bins — nothing here re-signs anything.
+  - `scale_genomic_data_strand_sep` (C:261-276, called C:565, guarded by `if(bscale)`) — the **only** scaling function ever reached from `get_genomic_data_R`; `get_max`/`scale_genomic_data_opt`/`scale_genomic_data_simple_max` are entirely unreachable dead code (no call sites anywhere in the file), not merely "non-default."
+  - Final output is written **directly inline** into the R-bound matrix at C:571-577 — `data_point_to_r_vect`/`data_point_to_r_list` (C:348-396) are defined but never called (dead code); their call site is commented out at C:568-570.
+  - No re-negation of any kind occurs anywhere after the `abs=1` read: the only other `-1*`/`fabs` occurrences in the file are inside dead code (`get_genomic_data_gpulike`), inside the logistic-sigmoid formula's `exp(-alpha*(x-beta))` term (doesn't affect sign of the underlying count), or unrelated offset bookkeeping.
+- Training uses the identical code path: `train_svm.R`/`dREG_paper_analyses/train_svm/train_svm.R` calls `read_genomic_data()` directly, same as scoring — so this `abs=1` behavior applies equally to how the pretrained model was trained and how it's scored.
+- **Conclusion**: `minus.bw`'s sign genuinely does not affect feature-extraction correctness — both strands are stripped of sign at the read call, before any binning or scaling. (Informative-position detection is a separate code path, `get_informative_positions.R`, which applies `abs()` only to the minus strand — matches `pydreg/infp.py` exactly, verified line-for-line, no changes needed there.) `pydreg.features` previously lacked this `abs()` (a real bug, not a faithfully-replicated quirk) — fixed by wrapping each strand's raw fetched buffer in `np.abs()` immediately after `io.fetch_raw`, before any summing/cumsum (`extract_features`/`_extract_features_cluster` in `features.py`).
 
 ### Peak-calling orchestration (`peaks.py`/`rfsplit.py`/`stats.py`) — from `peak_calling.R` + `peak_calling_rf.R`
 
@@ -132,9 +158,9 @@ Full output set: `infp.bed.gz` (chr,start,end,score,infp-flag), `peak.full.bed.g
 ## Backend dispatch (`backend.py`)
 
 - `detect_backend()`, `@functools.lru_cache(maxsize=1)` — probes once per process, lazily (never at module import time — importing `cuml` alone can take seconds and drags in cupy/numba-cuda/rmm, a bad tax on every invocation including `--help`).
-  - `try: import cuml.svm` → `ModuleNotFoundError` means not installed → tier 2. If the import *succeeds*, that only proves the library is present, not that a GPU is visible — RAPIDS wheels install fine on a GPU-less box. Confirm real GPU usability with a cheap real op (construct a tiny `cuml.svm.SVR()`, `.predict()` a 1-row dummy array) wrapped in a broad `except Exception` (CUDA init failures aren't one clean exception type).
+  - `importlib.util.find_spec("cuml") is None` means cuML is not installed. If cuML is installed, confirm CUDA visibility via CuPy (`cupy.cuda.runtime.getDeviceCount() > 0`), since CuPy is a cuML dependency and this avoids a brittle toy cuML fit/predict probe.
   - Log **different** messages for "cuml not installed" vs "cuml installed but no GPU detected" even though both fall through to the same next tier.
-  - Then `try: import sklearn.svm` → tier 2, else tier 3 (NumPy, always available, zero extra deps).
+  - scikit-learn is CPU-only and not auto-selected; NumPy is the CPU auto fallback.
 - `build_scorer(dreg_model, backend=None)` constructs the tier's model object exactly once per model instance and **caches it on the `DREGModel` instance itself** (e.g. `dreg_model._scorer_cache`) — both `to_sklearn_svr()`'s dummy-fit-then-overwrite and `cuml...from_sklearn()`'s ~1.7GB host→device copy are expensive enough to matter.
 - `Scorer` is a uniform `.predict(X_chunk) -> np.ndarray` wrapper — `pipeline.py` never branches on backend, only calls `scorer.predict(batch)`.
 - CLI flag `--backend {auto,cuml,sklearn,numpy}`, default `auto`. Explicit `--backend cuml` **raises** (doesn't silently fall back) if cuML isn't usable — a user who asked for GPU wants a loud failure, not a silent 50x slowdown on a job sized for GPU throughput.
@@ -145,7 +171,7 @@ Chunking responsibility lives in **`pipeline.py`**, not inside `DREGModel.predic
 
 - **NumPy CPU tier**: existing SV-chunking (`chunk=20_000`) stays as-is; bound the *outer* query-chunk so the three same-shaped `(query_chunk, sv_chunk)` float64 temporaries (`cross`, `sqdist`, `K`) stay ≤~2GB transient: `query_chunk ≈ 4096`.
 - **sklearn CPU tier**: libsvm's C predict loop evaluates row-by-row internally (not memory-bound the way the NumPy tier is) — chunk mainly for streaming/checkpointing consistency: `query_chunk ≈ 50,000`.
-- **cuML GPU tier** (real CUDA hardware only — cannot be tested on this dev machine): pass the full 605,187×360 SV matrix to `from_sklearn()` once, don't re-chunk over SVs; chunk only over queries to bound host→device transfer size: `query_chunk ≈ 200,000` (~576MB per transfer). **Flag explicitly in code/docs as unvalidated on real hardware** — first thing to re-tune once run on an actual GPU.
+- **cuML GPU tier**: pass the full 605,187×360 SV matrix to `from_sklearn()` once, don't re-chunk over SVs; chunk only over queries to bound host→device transfer size. The query-chunk-sized feature matrix is built as a plain NumPy array on the host first (`pipeline.py`'s `_score_positions`, before any GPU involvement), then handed to cuML's `.predict()`, which has to transfer that same-sized array to the device — so this bounds host RAM as much as VRAM, sequentially. The CLI exposes a cuML-only `--cuml-query-chunk` defaulting to `2**20` (~1.05M, ~3GB of host RAM at 360 float64 features/query); `--query-chunk` still overrides all backends when set. This default (like the cuML tier as a whole) has never been tuned/validated on real GPU hardware — watch VRAM and throughput and adjust if needed.
 
 This also sets up future multiprocessing cleanly (each worker owns one query batch) without touching `DREGModel` or `backend.py`.
 

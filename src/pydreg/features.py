@@ -33,10 +33,11 @@ def max_dist_from_center(window_sizes, half_n_windows):
 
 def _logistic_scale(bins):
     """Per-zoom, per-strand logistic scaling (scale_genomic_data_strand_sep
-    in the C source). NOT using abs() for true_max is deliberate -- see
-    docs/PLANNING.md: reverse-strand raw values are typically negative, so
-    true_max there is often small/negative, which is what the pretrained
-    model's weights expect, not a bug to fix."""
+    in the C source). Operates on already-non-negative bin sums -- both
+    strands' raw signal is abs()'d at fetch time (see extract_features/
+    _extract_features_cluster), matching the C reference's
+    `bigwig_readi(..., abs=1, ...)` read call. See docs/PLANNING.md for the
+    full sourced trace."""
     true_max = np.max(bins)
     scale_max = 1.0 if true_max == 0 else 0.05 * true_max
     alpha = _ALPHA_LN99 / scale_max
@@ -71,8 +72,12 @@ def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_wind
             blocks.append(_logistic_scale(zoom_bins))
         return np.concatenate(blocks)
 
-    raw_fwd = io.fetch_raw(bw_plus, chrom, center - max_dist, center + max_dist + 1)
-    raw_rev = io.fetch_raw(bw_minus, chrom, center - max_dist, center + max_dist + 1)
+    # abs() matches the C reference's bigwig_readi(..., abs=1, ...) read call
+    # (read_genomic_data.c:414-415) -- both strands are absolute-valued per
+    # base pair at read time, before any binning. Must be applied here, to
+    # the raw per-bp buffer, not to the summed bins: sum(abs(x)) != abs(sum(x)).
+    raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, center - max_dist, center + max_dist + 1))
+    raw_rev = np.abs(io.fetch_raw(bw_minus, chrom, center - max_dist, center + max_dist + 1))
     return np.concatenate([strand_vector(raw_fwd), strand_vector(raw_rev)])
 
 
@@ -137,8 +142,10 @@ def _extract_features_cluster(bw_plus, bw_minus, chrom, cluster_centers, max_dis
     hi = int(cluster_centers[-1]) + max_dist + 1
     offsets = (cluster_centers - lo).astype(np.int64)
 
-    raw_fwd = io.fetch_raw(bw_plus, chrom, lo, hi)
-    raw_rev = io.fetch_raw(bw_minus, chrom, lo, hi)
+    # abs() before cumsum, matching the C reference's bigwig_readi(...,
+    # abs=1, ...) read call -- see extract_features's comment above.
+    raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
+    raw_rev = np.abs(io.fetch_raw(bw_minus, chrom, lo, hi))
     csum_fwd = np.concatenate([[0.0], np.cumsum(raw_fwd)])
     csum_rev = np.concatenate([[0.0], np.cumsum(raw_rev)])
 
