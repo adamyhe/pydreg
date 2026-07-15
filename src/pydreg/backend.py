@@ -224,7 +224,7 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
     return predict_fn
 
 
-def _build_cupy_predict_fn(dreg_model, sv_chunk=20_000):
+def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
     """Returns predict_fn(X_scaled) -> y_scaled (both host NumPy arrays --
     matching _wrap_sklearn_like's expected interface, so it composes with
     the same scaling/unscaling wrapper and smoke test as the sklearn/cuml
@@ -235,7 +235,26 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=20_000):
     the cuml tier) there is no cuml.svm/libsvm conversion step that could
     diverge -- and CuPy's own array ops support compute capability >=3.0,
     below the >=7.0 floor cuml.svm silently gets wrong (see this module's
-    docstring)."""
+    docstring).
+
+    The two matmuls (X @ SV.T and K @ coefs) are already cuBLAS GEMM calls
+    -- about as fast as this gets without touching precision. The glue
+    between them (sq_x + sq_sv - 2*cross, then exp(-gamma*...)) was
+    originally ~5 separate elementwise kernel launches each reading/writing
+    a full (query_chunk, sv_chunk) array to GPU global memory -- pure
+    memory-bandwidth overhead on what's fundamentally a memory-bound step
+    (same reason the NumPy tier is memory-bandwidth-, not compute-, bound;
+    see docs/OPTIMIZATION.md "Batching"). cupy.fuse() JIT-compiles that
+    whole chain into a single kernel that reads cross/sq_x/sq_sv once and
+    writes K once, cutting that memory traffic roughly 5x with no formula
+    or precision change. It also drops one (query_chunk, sv_chunk)-shaped
+    device buffer entirely (the old separate `sqdist` intermediate no
+    longer exists) -- two live buffers of that shape per iteration (`cross`,
+    `K`) instead of three, which is why sv_chunk's default could grow here
+    without exceeding the original tier's peak memory footprint. Still a
+    conservative starting point (unvalidated on real GPU memory beyond
+    "didn't OOM") -- tune via build_scorer's cupy_sv_chunk / --cupy-sv-chunk
+    once you have real headroom numbers for your GPU."""
     import cupy as cp
 
     SV = cp.asarray(dreg_model.SV)
@@ -245,15 +264,18 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=20_000):
     rho = dreg_model.rho
     n_sv = dreg_model.n_sv
 
+    @cp.fuse()
+    def _rbf_from_cross(cross, sq_x, sq_sv_block, gamma):
+        return cp.exp(-gamma * (sq_x + sq_sv_block - 2 * cross))
+
     def predict(X_scaled):
         X = cp.asarray(X_scaled)
-        sq_x = cp.sum(X**2, axis=1)
+        sq_x = cp.sum(X**2, axis=1)[:, None]
         y_scaled = cp.zeros(X.shape[0])
         for start in range(0, n_sv, sv_chunk):
             end = min(start + sv_chunk, n_sv)
             cross = X @ SV[start:end].T
-            sqdist = sq_x[:, None] + sq_sv[None, start:end] - 2 * cross
-            K = cp.exp(-gamma * sqdist)
+            K = _rbf_from_cross(cross, sq_x, sq_sv[None, start:end], gamma)
             y_scaled += K @ coefs[start:end]
         y_scaled -= rho
         return cp.asnumpy(y_scaled)
@@ -261,13 +283,20 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=20_000):
     return predict
 
 
-def build_scorer(dreg_model, backend=None):
+def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None):
     """Builds (and caches, on `dreg_model._scorer_cache`) a Scorer for the
     requested backend. backend=None ("auto") picks the best available tier
     via detect_backend(). An explicit backend name that isn't usable raises
     BackendUnavailable rather than silently falling back -- a caller who
     asked for a specific backend wants a loud failure, not a silent
-    slowdown on a job sized for that backend's throughput."""
+    slowdown on a job sized for that backend's throughput.
+
+    cupy_sv_chunk: only used by the "cupy" tier -- how many support vectors
+    (of 605,187) to evaluate per GPU kernel/GEMM call; None uses
+    _build_cupy_predict_fn's own default. This is the main lever for
+    trading GPU memory for fewer, larger (better-amortized) kernel launches
+    -- see that function's docstring. Real GPU memory headroom varies by
+    card, so this is deliberately left tunable rather than hardcoded."""
     resolved = backend or detect_backend()
     if resolved not in DEFAULT_QUERY_CHUNK:
         raise ValueError(f"unknown backend {resolved!r}, expected one of {sorted(DEFAULT_QUERY_CHUNK)}")
@@ -301,7 +330,8 @@ def build_scorer(dreg_model, backend=None):
         except ModuleNotFoundError as e:
             raise BackendUnavailable("cupy is not installed (pip install 'pydreg[gpu]')") from e
         try:
-            cupy_predict = _build_cupy_predict_fn(dreg_model)
+            cupy_kwargs = {} if cupy_sv_chunk is None else {"sv_chunk": cupy_sv_chunk}
+            cupy_predict = _build_cupy_predict_fn(dreg_model, **cupy_kwargs)
         except Exception as e:
             raise BackendUnavailable(f"cupy is installed but could not build a GPU predict function: {e}") from e
         predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy")

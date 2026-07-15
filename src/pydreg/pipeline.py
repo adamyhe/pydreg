@@ -72,6 +72,7 @@ def run(
     pv_threshold=0.05,
     query_chunk=None,
     cuml_query_chunk=2**20,
+    cupy_sv_chunk=None,
     peak_calling_cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
@@ -81,8 +82,8 @@ def run(
 ):
     """Runs the full dREG peak-calling pipeline on a pair of bigWig files
     and (by default) writes the standard output set alongside `out_prefix`.
-    backend_name: None ("auto") or one of "cuml"/"sklearn"/"numpy" -- see
-    pydreg.backend. progress: show tqdm progress bars for the
+    backend_name: None ("auto") or one of "cuml"/"cupy"/"sklearn"/"numpy" --
+    see pydreg.backend. progress: show tqdm progress bars for the
     informative-position scan, position scoring, and peak calling (off by
     default for library use; pydreg.cli enables it; auto-hidden if stdout
     isn't a terminal regardless). Returns a dict with
@@ -93,7 +94,7 @@ def run(
 
     model = DREGModel.from_pretrained()
     rf_model = DREGPeakSplitForest.from_pretrained()
-    scorer = backend.build_scorer(model, backend_name)
+    scorer = backend.build_scorer(model, backend_name, cupy_sv_chunk=cupy_sv_chunk)
     chunk = _resolve_query_chunk(scorer.backend, query_chunk, cuml_query_chunk)
     logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)
 

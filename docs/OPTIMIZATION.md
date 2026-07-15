@@ -99,20 +99,60 @@ separate implementation:
   its own compiled kernels, not a CUDA-wide one. This tier should work on
   the exact TITAN X that broke the cuml tier.
 
-**Caveats, stated plainly:** this was written and tested on a machine with
-no GPU at all (validated only against NumPy arrays standing in for CuPy
-ones in `tests/test_backend.py` — same chunking/formula logic, zero
-evidence about real GPU throughput or memory behavior). It lives on its own
-branch for exactly that reason: real-hardware validation may show it's
-slower than `cuml` (naive full-matrix chunking vs. cuML's internal C++
-tiling+caching), or hit a CuPy/driver quirk of its own, in which case the
-right call is to drop it, not force it in. It is **not** auto-selected by
-`detect_backend()` — only reachable via an explicit `--backend cupy` — and
-its `DEFAULT_QUERY_CHUNK` entry conservatively reuses the NumPy tier's
-memory-bound sizing rather than cuML's `2**20` (see "Batching" below for
-why that distinction matters here specifically). It also still runs through
-the same `_wrap_sklearn_like` first-batch smoke test as the other non-NumPy
-tiers, as a safety net.
+**Status:** initially written and tested on a machine with no GPU at all
+(validated only against NumPy arrays standing in for CuPy ones in
+`tests/test_backend.py`). Since confirmed correct on real hardware — no
+smoke-test divergence — but slower than desired, which is exactly the
+"drop it if it doesn't pan out" scenario this lives on its own branch for.
+It is **not** auto-selected by `detect_backend()` — only reachable via an
+explicit `--backend cupy` — and it still runs through the same
+`_wrap_sklearn_like` first-batch smoke test as the other non-NumPy tiers,
+as a safety net.
+
+### Speeding it up: kernel fusion, then batch size
+
+Two independent levers, in the order they're worth pulling:
+
+1. **Fuse the elementwise glue between the two GEMMs.** The two matmuls
+   (`X @ SV.T` and `K @ coefs`) are already cuBLAS calls — near-optimal
+   without touching precision. The formula between them
+   (`exp(-gamma * (sq_x + sq_sv - 2*cross))`) was originally ~5 separate
+   elementwise kernel launches, each reading/writing a full
+   `(query_chunk, sv_chunk)` array to GPU global memory — pure
+   memory-bandwidth overhead on what's fundamentally a memory-bound step
+   (same reason the NumPy tier itself is memory-bandwidth-bound, not
+   compute-bound). `cupy.fuse()` JIT-compiles that whole chain into one
+   kernel that reads its inputs once and writes `K` once, cutting that
+   traffic roughly 5x — same formula, same precision, just far less memory
+   round-tripping. It also drops one live `(query_chunk, sv_chunk)`-shaped
+   buffer entirely (the old separate `sqdist` intermediate no longer
+   exists), which is why `sv_chunk`'s default could grow without exceeding
+   the pre-fusion tier's peak memory.
+2. **Grow the batch size** (`--query-chunk` for the outer per-call size,
+   `--cupy-sv-chunk`/`build_scorer`'s `cupy_sv_chunk` for the inner
+   per-support-vector-chunk size inside `_build_cupy_predict_fn`). Unlike
+   `cuml.svm` (which tiles the kernel matrix internally in C++ without ever
+   materializing the whole thing), this tier's own Python code materializes
+   the `(query_chunk, sv_chunk)` intermediate directly — so for a *fixed*
+   GPU memory budget `B`, the total number of kernel-launch iterations is
+   `total_queries * n_sv * 8 bytes / B`, independent of how `B` is split
+   between the two chunk sizes. Growing `B` (either knob) is what reduces
+   iteration count and better amortizes per-launch overhead; rebalancing
+   the same `B` between the two dimensions doesn't. Real per-GPU memory
+   headroom wasn't known while writing this, which is why both are exposed
+   as tunables rather than hardcoded — worth sweeping a few `--cupy-sv-chunk`
+   values on the actual target GPU and picking the fastest that doesn't OOM.
+
+A further-out, riskier lever not implemented here: **float32 instead of
+float64**. This SVR is inherently float64 (exported that way from R), and
+`_wrap_sklearn_like`'s smoke test tolerance (`rtol=atol=1e-4`) would likely
+still pass at float32 precision, but this hasn't been tried — it would need
+its own explicit validation pass before trusting it, since it changes the
+actual arithmetic precision rather than just its scheduling. It would matter
+most on exactly the hardware that motivated this whole tier: consumer Pascal
+GPUs (e.g. the TITAN X) have crippled float64 throughput (~1:32 vs float32),
+so this could be a large win there specifically, separate from and additive
+to the fusion/batching levers above.
 
 ## Batching
 

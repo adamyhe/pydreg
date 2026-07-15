@@ -1173,3 +1173,59 @@ user's request, this work lives on its own branch (`cupy-svr-backend`, off
 testing shows it's slower than `cuml` or doesn't work at all -- not merged
 into `detect_backend()`'s auto-selection, only reachable via an explicit
 `--backend cupy`. 51 tests pass (17 in `test_backend.py`).
+
+## 2026-07-15 — cupy tier: correct on real hardware, but slow -- fused the elementwise glue, made batch size tunable
+
+First real-GPU report on the cupy tier from the 2026-07-15 entry above:
+no smoke-test divergence (formula/wiring confirmed correct), but slower
+than wanted. Two independent levers identified and implemented, in the
+order they matter:
+
+1. **Kernel fusion.** The two matmuls (`X @ SV.T`, `K @ coefs`) are already
+   cuBLAS GEMM calls -- near-optimal already. The elementwise formula
+   between them (`exp(-gamma * (sq_x + sq_sv - 2*cross))`) was ~5 separate
+   elementwise kernel launches, each round-tripping a full
+   `(query_chunk, sv_chunk)` array through GPU global memory -- pure
+   memory-bandwidth overhead on what's fundamentally a memory-bound step
+   (same underlying reason the NumPy tier itself is memory-bandwidth-bound;
+   see the "Batching" section of `docs/OPTIMIZATION.md`). Wrapped it in
+   `cupy.fuse()`, which JIT-compiles the whole chain into a single kernel
+   reading its inputs once and writing `K` once -- same formula, no
+   precision change, ~5x less memory traffic for that step. Bonus: it also
+   eliminates one live `(query_chunk, sv_chunk)`-shaped buffer (the old
+   separate `sqdist` intermediate no longer exists as its own array), which
+   freed up enough headroom to raise `_build_cupy_predict_fn`'s default
+   `sv_chunk` from `20_000` to `32_768` without exceeding the pre-fusion
+   tier's peak memory footprint.
+2. **Made batch size tunable rather than guessing at a fixed value.**
+   Unlike `cuml.svm` (tiles the kernel matrix internally in C++, never
+   materializing the whole thing), this tier's own Python code
+   materializes the `(query_chunk, sv_chunk)` intermediate directly -- so
+   for a fixed GPU memory budget, total kernel-launch iterations scale as
+   `total_queries * n_sv * 8 bytes / budget`, independent of how the budget
+   is split between the two chunk dimensions. Growing the budget (either
+   knob) is what reduces iteration count; rebalancing an unchanged budget
+   between the two dimensions does nothing. Added `cupy_sv_chunk` to
+   `backend.build_scorer()`/`pipeline.run()` and `--cupy-sv-chunk` to the
+   CLI (mirroring `--cuml-query-chunk`'s existing pattern) so the actual
+   ceiling can be found empirically per-GPU rather than guessed at from a
+   machine with no GPU at all.
+
+Also researched and explicitly deferred a third, bigger lever: **float32
+instead of float64**. This SVR is inherently float64 (exported that way
+from R); the smoke test's `rtol=atol=1e-4` tolerance would likely still
+pass at float32, but arithmetic-precision changes need their own explicit
+validation pass, unlike scheduling/fusion changes which are provably
+equivalent. Flagged as particularly relevant here since consumer Pascal
+GPUs (the exact hardware this tier exists for) have ~1:32 float64:float32
+throughput -- likely the single largest lever available, but not attempted
+without a way to validate it.
+
+Tests: `tests/test_backend.py`'s fake cupy module gained a `fuse` stand-in
+(calls the decorated function directly -- these tests exercise
+`_build_cupy_predict_fn`'s formula/chunking logic on NumPy, not cupy's own
+JIT, which needs a real GPU to mean anything) and a new test confirming
+`cupy_sv_chunk` threads from `build_scorer()` through to
+`_build_cupy_predict_fn`. 52 tests pass (18 in `test_backend.py`). No
+production math changed -- both levers are scheduling/batching changes
+only, verified against the same NumPy reference as before.

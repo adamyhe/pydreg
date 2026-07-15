@@ -146,6 +146,17 @@ def _tiny_svr_model():
     return model
 
 
+def _fake_fuse(*fuse_args, **fuse_kwargs):
+    # Real cupy.fuse() JIT-compiles the decorated function into one kernel;
+    # this stand-in just calls it directly -- these tests are exercising
+    # _build_cupy_predict_fn's formula/wiring on NumPy, not cupy's own
+    # fusion machinery (which needs a real GPU to mean anything).
+    def decorator(fn):
+        return fn
+
+    return decorator
+
+
 def _fake_cupy_module():
     # A real GPU isn't available here -- this exercises
     # _build_cupy_predict_fn's own wiring/formula (chunking, kernel math)
@@ -157,6 +168,7 @@ def _fake_cupy_module():
         sum=np.sum,
         exp=np.exp,
         asnumpy=np.asarray,
+        fuse=_fake_fuse,
     )
 
 
@@ -196,6 +208,25 @@ def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
     X_raw = np.random.default_rng(3).normal(size=(4, model.n_features))
 
     assert scorer.backend == "cupy"
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-8)
+
+
+def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+    seen_kwargs = {}
+    real_build = backend._build_cupy_predict_fn
+
+    def spying_build(dreg_model, **kwargs):
+        seen_kwargs.update(kwargs)
+        return real_build(dreg_model, **kwargs)
+
+    monkeypatch.setattr(backend, "_build_cupy_predict_fn", spying_build)
+
+    scorer = backend.build_scorer(model, "cupy", cupy_sv_chunk=2)
+    X_raw = np.random.default_rng(4).normal(size=(3, model.n_features))
+
+    assert seen_kwargs == {"sv_chunk": 2}
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-8)
 
 

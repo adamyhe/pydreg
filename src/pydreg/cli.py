@@ -44,6 +44,16 @@ def main(argv=None):
         "cupy, which uses its own DEFAULT_QUERY_CHUNK entry)",
     )
     parser.add_argument(
+        "--cupy-sv-chunk",
+        type=int,
+        default=None,
+        help="support vectors (of 605,187) evaluated per GPU kernel/GEMM call "
+        "for the cupy backend specifically; defaults to "
+        "_build_cupy_predict_fn's own default. The main lever for trading GPU "
+        "memory for fewer, larger (better-amortized) kernel launches -- real "
+        "headroom varies by card, so this is left tunable rather than hardcoded",
+    )
+    parser.add_argument(
         "--peak-calling-cores",
         type=int,
         default=1,
@@ -100,6 +110,7 @@ def main(argv=None):
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
         cuml_query_chunk=args.cuml_query_chunk,
+        cupy_sv_chunk=args.cupy_sv_chunk,
         peak_calling_cores=args.peak_calling_cores,
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
