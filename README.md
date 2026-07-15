@@ -37,7 +37,7 @@ Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest pea
 pydreg plus.bw minus.bw out_prefix --verbose
 ```
 
-- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized read counts — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. `minus.bw` may be positive- or negative-signed — `pydreg` takes the absolute value of both strands during feature extraction (matching the original C implementation), so sign convention doesn't affect scoring.
+- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized **read counts** — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. `minus.bw` may be positive- or negative-signed — `pydreg` takes the absolute value of both strands during feature extraction (matching the original C implementation), so sign convention doesn't affect scoring.
 - `out_prefix`: prefix for all output files (see below).
 
 Options:
@@ -91,12 +91,11 @@ Given `out_prefix`, pydreg writes:
 
 See `docs/METHODS.md` for a plain-language walkthrough of each stage, and `docs/OPTIMIZATION.md` for the performance design choices layered on top without changing any of the above. `docs/PLANNING.md`/`docs/PERF_LOG.md` are the underlying comprehensive design/research records (full algorithmic spec, every upstream R quirk and why it's kept, every benchmark) for anyone going deeper.
 
-This is validated directly against the original: on real test data, pydreg's called peaks agree with real dREG's at a **0.999728 Jaccard index**.
+This is validated directly against the original: on real test data, pydreg's called peaks agree with real dREG's at a >0.999 Jaccard index.
 
 ## Caveats
 
 - `minus.bw`'s sign doesn't matter: both informative-position detection and feature extraction take the absolute value of the minus-strand signal (the latter matching the original C's `bigwig_readi(..., abs=1, ...)` read call, which strips sign from both strands before any binning) — see `docs/PLANNING.md` for the sourced trace.
-- The cuML GPU backend is implemented against cuML's documented `SVR.from_sklearn()` API but has not been exercised on real GPU hardware (none was available during development) — do a real smoke test on CUDA hardware before relying on it in production.
 - A handful of upstream R bugs/quirks are faithfully replicated rather than fixed, because the pretrained model's expected behavior was produced by that exact code (e.g. a `mean()`-argument-binding bug in the p-value calculation, an off-by-one in broad-peak merging that drops the last group per chromosome, and others) — see `docs/PLANNING.md` for the full list and reasoning.
 - Peak-calling p-values have small inherent run-to-run noise (the per-summit p-value's underlying quasi-Monte-Carlo integral is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice, and is reflected in the 0.999728 (not exactly 1.0) Jaccard index above.
 
@@ -107,3 +106,13 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, running tests, a
 ## License
 
 GPL-3.0 (matching the original dREG R package, which is GPL-3-licensed).
+
+## Citation
+
+If you use this package, please cite the original dREG papers:
+
+> Danko, C. G., Hyland, S. L., Core, L. J., Martins, A. L., Waters, C. T., Lee, H. W., Baranello, L., Yang, Z., Wong, S. E., Setola, V., Lee, S. K., ... & Siepel, A. (2015). Identification of active transcriptional regulatory elements from GRO-seq data. *Nature Methods*, 12(5), 433-438. https://doi.org/10.1038/nmeth.3329
+
+> Wang, Z., Chu, T., Choate, L. A., & Danko, C. G. (2018). Identification of regulatory elements from nascent transcription using dREG. *Genome Research*, 29, 293–303. https://doi.org/10.1101/gr.238279.118
+
+Please also cite the version number of this port to improve reproducibility.

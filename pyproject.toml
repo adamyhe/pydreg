@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.1.0"
+version = "0.1.1"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -80,6 +80,7 @@ exclude = [
   "/AGENTS.md",
   "/src/**/*.egg-info",
   "/src/**/__pycache__",
+  "/scripts",
 ]
 
 [tool.hatch.build.targets.wheel]
