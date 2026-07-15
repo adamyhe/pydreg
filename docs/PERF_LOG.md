@@ -1229,3 +1229,53 @@ JIT, which needs a real GPU to mean anything) and a new test confirming
 `_build_cupy_predict_fn`. 52 tests pass (18 in `test_backend.py`). No
 production math changed -- both levers are scheduling/batching changes
 only, verified against the same NumPy reference as before.
+
+## 2026-07-15 — cp.fuse() introduced a real ~3.5e-4 divergence on real GPU hardware; switched to cupy.ElementwiseKernel
+
+The fusion change above (`cp.fuse()`) tripped `_wrap_sklearn_like`'s own
+smoke test on real hardware: `max_abs_diff=0.000353735` against the NumPy
+reference, with sklearn (CPU libsvm, on the same sample) agreeing with
+NumPy to ~5.5e-11 -- pinning the divergence specifically to the fused cupy
+path, the same triage pattern the smoke-test cross-check was built for back
+in the original Pascal investigation, now paying off a second time on a
+bug of pydreg's own making rather than cuML's.
+
+`cp.fuse()` was the only change between the last known-good state and this
+one, so it's the confirmed cause -- but *why* couldn't be pinned down
+without GPU access to test either hypothesis directly. Two suspects:
+
+1. `gamma` was passed as a runtime Python-float **argument** into the
+   fused function. `cp.fuse()`'s JIT tracer infers argument types at
+   first call and compiles a fixed kernel from that -- it may not apply
+   the same dtype-promotion guarantees eager CuPy array ops do for a bare
+   Python scalar mixed with float64 arrays.
+2. `n_sv = 605,187` isn't divisible by `sv_chunk = 32,768`: the last of 19
+   chunks per predict() call has a different (smaller, 15,363-wide) shape
+   than the other 18. If `cp.fuse()`'s kernel cache keys loosely on shape
+   across repeated calls within the same chunking loop, a stale cached
+   kernel could plausibly mishandle the differently-shaped last chunk.
+
+Rather than debug fuse's internals blind, switched to
+`cupy.ElementwiseKernel` -- CuPy's older, far more battle-tested mechanism
+for exactly this "broadcast several arrays into one elementwise formula"
+pattern (used throughout cupy's own internals). It sidesteps both suspects
+at once: every argument's dtype is declared explicitly in the kernel
+signature (`"float64 cross, float64 sq_x, float64 sq_sv"` -- no promotion
+ambiguity possible), and `gamma` is baked directly into the kernel source
+as a literal (`f"out = exp(-{gamma!r} * ...)"`) rather than passed through
+at all, removing it as a per-call argument entirely. `ElementwiseKernel`
+also has no shape-based tracing/caching the way `fuse` does -- it's one
+compiled kernel, invoked generically for any broadcastable shape, so
+suspect 2 can't apply either.
+
+Same formula, same fusion benefit (one kernel launch, one read of each
+input, one write of `K`) -- just via a different, more explicit mechanism.
+`tests/test_backend.py`'s fake cupy module swapped its `fuse` stand-in for
+a `_FakeElementwiseKernel` that `eval()`s the kernel's operation string
+directly (valid since the CUDA C expression here happens to be
+syntactically identical Python) against NumPy arrays -- still can't catch
+this specific class of bug (it lives entirely in cupy's own kernel
+compilation, not in pydreg's formula/wiring), which is exactly why real
+end-to-end hardware validation caught it and the NumPy-standin unit tests
+didn't, and why this kind of change needs that real validation loop before
+being trusted. 52 tests pass.

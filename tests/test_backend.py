@@ -146,15 +146,22 @@ def _tiny_svr_model():
     return model
 
 
-def _fake_fuse(*fuse_args, **fuse_kwargs):
-    # Real cupy.fuse() JIT-compiles the decorated function into one kernel;
-    # this stand-in just calls it directly -- these tests are exercising
-    # _build_cupy_predict_fn's formula/wiring on NumPy, not cupy's own
-    # fusion machinery (which needs a real GPU to mean anything).
-    def decorator(fn):
-        return fn
+class _FakeElementwiseKernel:
+    # Real cupy.ElementwiseKernel compiles `operation` (CUDA C) into a
+    # single broadcasting kernel; this stand-in instead `eval`s it as a
+    # Python expression against NumPy arrays standing in for CuPy ones --
+    # valid because _build_cupy_predict_fn's kernel body ("exp(-<gamma> *
+    # (sq_x + sq_sv - 2 * cross))") happens to be syntactically identical
+    # Python. This exercises the actual formula/broadcasting these tests
+    # care about, not cupy's own kernel compilation (which needs a real GPU
+    # to mean anything).
+    def __init__(self, in_params, out_params, operation, name):
+        self._in_names = [p.strip().split()[-1] for p in in_params.split(",")]
+        self._rhs = operation.split("=", 1)[1].strip()
 
-    return decorator
+    def __call__(self, *args):
+        ns = {"exp": np.exp, **dict(zip(self._in_names, args))}
+        return eval(self._rhs, ns)  # noqa: S307 -- fixed test-only expression
 
 
 def _fake_cupy_module():
@@ -168,7 +175,7 @@ def _fake_cupy_module():
         sum=np.sum,
         exp=np.exp,
         asnumpy=np.asarray,
-        fuse=_fake_fuse,
+        ElementwiseKernel=_FakeElementwiseKernel,
     )
 
 

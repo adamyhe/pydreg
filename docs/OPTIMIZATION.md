@@ -121,13 +121,20 @@ Two independent levers, in the order they're worth pulling:
    `(query_chunk, sv_chunk)` array to GPU global memory — pure
    memory-bandwidth overhead on what's fundamentally a memory-bound step
    (same reason the NumPy tier itself is memory-bandwidth-bound, not
-   compute-bound). `cupy.fuse()` JIT-compiles that whole chain into one
-   kernel that reads its inputs once and writes `K` once, cutting that
-   traffic roughly 5x — same formula, same precision, just far less memory
-   round-tripping. It also drops one live `(query_chunk, sv_chunk)`-shaped
-   buffer entirely (the old separate `sqdist` intermediate no longer
-   exists), which is why `sv_chunk`'s default could grow without exceeding
-   the pre-fusion tier's peak memory.
+   compute-bound). Fusing that whole chain into one kernel that reads its
+   inputs once and writes `K` once cuts that traffic roughly 5x — same
+   formula, same precision, just far less memory round-tripping.
+   `cupy.fuse()` was tried first and produced a real, confirmed ~3.5e-4
+   divergence on actual GPU hardware (caught by `_wrap_sklearn_like`'s own
+   smoke test — a bug of this tier's own making, not cuML's, but caught by
+   the exact same mechanism). Switched to `cupy.ElementwiseKernel` instead
+   — CuPy's older, more battle-tested mechanism for this pattern, with
+   every argument's dtype declared explicitly and no shape-based
+   tracing/caching to get wrong; see `docs/PERF_LOG.md`'s 2026-07-15 entry
+   for the full root-cause investigation. It also drops one live
+   `(query_chunk, sv_chunk)`-shaped buffer entirely (the old separate
+   `sqdist` intermediate no longer exists), which is why `sv_chunk`'s
+   default could grow without exceeding the pre-fusion tier's peak memory.
 2. **Grow the batch size** (`--query-chunk` for the outer per-call size,
    `--cupy-sv-chunk`/`build_scorer`'s `cupy_sv_chunk` for the inner
    per-support-vector-chunk size inside `_build_cupy_predict_fn`). Unlike

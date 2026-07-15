@@ -244,14 +244,32 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
     a full (query_chunk, sv_chunk) array to GPU global memory -- pure
     memory-bandwidth overhead on what's fundamentally a memory-bound step
     (same reason the NumPy tier is memory-bandwidth-, not compute-, bound;
-    see docs/OPTIMIZATION.md "Batching"). cupy.fuse() JIT-compiles that
-    whole chain into a single kernel that reads cross/sq_x/sq_sv once and
-    writes K once, cutting that memory traffic roughly 5x with no formula
-    or precision change. It also drops one (query_chunk, sv_chunk)-shaped
-    device buffer entirely (the old separate `sqdist` intermediate no
-    longer exists) -- two live buffers of that shape per iteration (`cross`,
-    `K`) instead of three, which is why sv_chunk's default could grow here
-    without exceeding the original tier's peak memory footprint. Still a
+    see docs/OPTIMIZATION.md "Batching"). This is fused into a single kernel
+    that reads cross/sq_x/sq_sv once and writes K once, cutting that memory
+    traffic roughly 5x with no formula or precision change.
+
+    Fusion was first tried via @cp.fuse(), which produced a confirmed real
+    divergence on actual GPU hardware (~3.5e-4, tripping
+    _wrap_sklearn_like's smoke test -- sklearn agreed with the NumPy
+    reference to ~5.5e-11 on the same sample, pinning the bug specifically
+    to the fused cupy path). Two suspects, either of which fuse's JIT
+    tracer could plausibly get wrong and neither confirmable without GPU
+    access: gamma was passed as a runtime Python-float *argument* (fuse's
+    tracer may not apply the same dtype-promotion guarantees eager CuPy
+    ops do), and n_sv=605,187 isn't divisible by sv_chunk (the last chunk
+    is a different, smaller shape than the rest -- a case fuse's
+    shape-based kernel caching could mishandle). cupy.ElementwiseKernel
+    below sidesteps both at once: every argument's dtype is declared
+    explicitly (no promotion ambiguity), gamma is baked in as a literal
+    rather than passed at all, and it has no shape-based tracing/caching --
+    one compiled kernel, invoked generically for any broadcastable shape,
+    the same mature mechanism CuPy's own internals use for this pattern.
+
+    It also drops one (query_chunk, sv_chunk)-shaped device buffer
+    entirely (the old separate `sqdist` intermediate no longer exists) --
+    two live buffers of that shape per iteration (`cross`, `K`) instead of
+    three, which is why sv_chunk's default could grow here without
+    exceeding the original tier's peak memory footprint. Still a
     conservative starting point (unvalidated on real GPU memory beyond
     "didn't OOM") -- tune via build_scorer's cupy_sv_chunk / --cupy-sv-chunk
     once you have real headroom numbers for your GPU."""
@@ -264,9 +282,12 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
     rho = dreg_model.rho
     n_sv = dreg_model.n_sv
 
-    @cp.fuse()
-    def _rbf_from_cross(cross, sq_x, sq_sv_block, gamma):
-        return cp.exp(-gamma * (sq_x + sq_sv_block - 2 * cross))
+    _rbf_from_cross = cp.ElementwiseKernel(
+        "float64 cross, float64 sq_x, float64 sq_sv",
+        "float64 out",
+        f"out = exp(-{gamma!r} * (sq_x + sq_sv - 2 * cross))",
+        "pydreg_rbf_from_cross",
+    )
 
     def predict(X_scaled):
         X = cp.asarray(X_scaled)
@@ -275,7 +296,7 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
         for start in range(0, n_sv, sv_chunk):
             end = min(start + sv_chunk, n_sv)
             cross = X @ SV[start:end].T
-            K = _rbf_from_cross(cross, sq_x, sq_sv[None, start:end], gamma)
+            K = _rbf_from_cross(cross, sq_x, sq_sv[None, start:end])
             y_scaled += K @ coefs[start:end]
         y_scaled -= rho
         return cp.asnumpy(y_scaled)
