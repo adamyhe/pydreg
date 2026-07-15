@@ -11,12 +11,12 @@ made them. The full chronological research log — every benchmark, every
 dead end, every number — lives in `docs/PERF_LOG.md`; this document is the
 distilled "why it's built this way" version.
 
-## Scoring: four backends, and why NumPy (not scikit-learn) is the CPU default
+## Scoring: three backends, why NumPy (not scikit-learn) is the CPU default, and why the GPU tier is `cupy` (not `cuML`)
 
 Evaluating the pretrained SVR (605,187 support vectors) against every
 informative position is dominated by one computation: an RBF kernel matrix
-between the query positions and every support vector. `pydreg` offers four
-backends for this (`--backend {auto,cuml,cupy,sklearn,numpy}`):
+between the query positions and every support vector. `pydreg` offers three
+backends for this (`--backend {auto,cupy,sklearn,numpy}`):
 
 - **NumPy** (default on any machine without a usable GPU): computes the
   kernel matrix as one chunked matrix multiplication
@@ -24,11 +24,9 @@ backends for this (`--backend {auto,cuml,cupy,sklearn,numpy}`):
   linked against.
 - **scikit-learn**: wraps the same pretrained weights into an
   `sklearn.svm.SVR` (via `to_sklearn_svr()`) and predicts through libsvm.
-- **cuML** (`pydreg[gpu]`, Linux + NVIDIA only): the same weights loaded
-  into `cuml.svm.SVR.from_sklearn()`, running the kernel matrix on GPU.
-- **cupy** (`pydreg[gpu]`, experimental — see below): the exact same
-  chunked-matmul formula as the NumPy tier, run directly on a CuPy device
-  array instead of going through cuML's SVM machinery at all.
+- **cupy** (`pydreg[gpu]`, Linux + NVIDIA only, auto-selected whenever a
+  usable CUDA device is present): the exact same chunked-matmul formula as
+  the NumPy tier, run directly on a CuPy device array.
 
 scikit-learn is available (`--backend sklearn`) but is **never
 auto-selected on CPU** — it's measured at ~14-15x slower than the NumPy tier
@@ -45,69 +43,64 @@ that it doesn't ship any macOS/ARM wheels at all and would need real
 engineering to even engage on a model that was never `.fit()` through it (see
 `docs/PERF_LOG.md` for the full investigation of both).
 
-## cuML's real hardware requirement: compute capability ≥7.0
+### Why `cupy`, not `cuML`
 
-The cuML tier is now validated on real GPU hardware, and that validation
-caught a real, confirmed constraint: RAPIDS/cuML dropped support for Pascal
-GPUs (compute capability < 7.0) in its 24.02 release. Running a
-Pascal-incompatible cuML build on such a GPU doesn't raise an error — per
-RAPIDS's own deprecation notice, it "will either fail or return invalid
-results." Confirmed end-to-end on real production data: cuml 26.06.00's
-`SVR.from_sklearn()`-built model diverged from the NumPy reference by ~0.05
-on an NVIDIA TITAN X (Pascal, compute capability 6.1), while the *exact same
-bigWig inputs*, run on an A100 (compute capability 8.0), produced no
-divergence (Jaccard > 0.999 vs. real dREG). Also worth noting: `from_sklearn`
-itself only shipped in cuML 25.02, a full year after Pascal support was
-dropped in 24.02 — there is no cuML release that supports both, so pinning
-an older cuML isn't a workaround for Pascal-class hardware. Pascal's own
-crippled double-precision throughput (this SVR is inherently float64) makes
-GPU acceleration a poor fit there even setting compatibility aside.
+The GPU tier used to be `cuml.svm.SVR` (built via `from_sklearn()`), not
+`cupy`. It was dropped after real-hardware testing found a serious, confirmed
+problem: RAPIDS/cuML dropped support for Pascal GPUs (compute capability
+< 7.0) in its 24.02 release, and running a Pascal-incompatible cuML build on
+such a GPU doesn't raise an error — per RAPIDS's own deprecation notice, it
+"will either fail or return invalid results." Confirmed end-to-end on real
+production data: cuml 26.06.00's `SVR.from_sklearn()`-built model diverged
+from the NumPy reference by ~0.05 on an NVIDIA TITAN X (Pascal, compute
+capability 6.1), while the *exact same bigWig inputs*, run on an A100
+(compute capability 8.0), produced no divergence (Jaccard > 0.999 vs. real
+dREG). `from_sklearn` itself only shipped in cuML 25.02, a full year after
+Pascal support was dropped in 24.02 — there was no cuML release that
+supported both, so pinning an older cuML was never a workaround. Pascal's
+own crippled double-precision throughput (this SVR is inherently float64,
+and cuML offered no float32 override — see below) made GPU acceleration a
+poor fit there even setting compatibility aside.
 
-`pydreg.backend.detect_backend()` and `build_scorer()`'s explicit
-`--backend cuml` path both check the GPU's compute capability up front
-(`MIN_CUDA_COMPUTE_CAPABILITY = 70`) and refuse cuML below that threshold —
-auto mode silently falls back to NumPy, an explicit request raises
-`BackendUnavailable` with the specific reason, rather than surfacing as a
-confusing mid-pipeline smoke-test failure. That smoke test
-(`_wrap_sklearn_like`, comparing the first batch's predictions against the
-NumPy reference) remains in place regardless, as the last line of defense
-against *any* backend conversion issue, hardware-related or not.
-
-## The experimental `cupy` tier: same formula, no cuML, and it works on hardware cuML doesn't
-
-The Pascal finding above raises an obvious question: since cuML's own
-compiled SVM kernel is what's incompatible with older GPUs (not CUDA or
-GPU compute in general), could scoring be done on GPU *without* going
-through `cuml.svm` at all? `pydreg.backend._build_cupy_predict_fn` does
-exactly that — it's a near-verbatim port of `DREGModel.predict`'s chunked
-RBF dual-sum formula (same expanded squared-distance trick, same chunking
-over support vectors), just evaluated on a CuPy device array instead of a
-NumPy host array. Selectable via `--backend cupy`.
-
-Two things follow directly from that being *the same formula* rather than a
+`pydreg.backend._build_cupy_predict_fn` sidesteps all of this by not routing
+through `cuml.svm` (or any third-party SVM library) at all — it's a
+near-verbatim port of `DREGModel.predict`'s chunked RBF dual-sum formula
+(same expanded squared-distance trick, same chunking over support vectors),
+just evaluated on a CuPy device array instead of a NumPy host array. Two
+things follow directly from that being *the same formula* rather than a
 separate implementation:
 
-- **No cross-library conversion risk.** The cuml/sklearn tiers depend on
-  `to_sklearn_svr()`'s private-attribute round trip and then on cuML's own
-  (or libsvm's own) independent kernel-evaluation code agreeing with
-  `DREGModel.predict` — which is exactly the class of bug the Pascal
-  investigation chased down. The cupy tier has nothing to independently
-  agree with; it *is* the reference formula, just relocated to the GPU.
+- **No cross-library conversion risk.** The old cuml tier (and the
+  still-present sklearn tier) depend on `to_sklearn_svr()`'s
+  private-attribute round trip and then on an independent kernel-evaluation
+  codebase (cuML's or libsvm's own C++) agreeing with `DREGModel.predict` —
+  exactly the class of bug the Pascal investigation chased down. The cupy
+  tier has nothing to independently agree with; it *is* the reference
+  formula, just relocated to the GPU.
 - **It isn't limited to compute capability ≥7.0.** CuPy's own array
   primitives (elementwise ops, matmul via cuBLAS) support compute
   capability ≥3.0 — RAPIDS/cuML's Pascal drop was a policy decision about
-  its own compiled kernels, not a CUDA-wide one. This tier should work on
-  the exact TITAN X that broke the cuml tier.
+  its own compiled kernels, not a CUDA-wide one. Confirmed correct on the
+  exact TITAN X that broke the cuml tier, and now faster than cuml ever was
+  there (and on an A100) after this session's fusion/batching/float32 work
+  (see below).
 
-**Status:** initially written and tested on a machine with no GPU at all
-(validated only against NumPy arrays standing in for CuPy ones in
-`tests/test_backend.py`). Since confirmed correct on real hardware — no
-smoke-test divergence — but slower than desired, which is exactly the
-"drop it if it doesn't pan out" scenario this lives on its own branch for.
-It is **not** auto-selected by `detect_backend()` — only reachable via an
-explicit `--backend cupy` — and it still runs through the same
-`_wrap_sklearn_like` first-batch smoke test as the other non-NumPy tiers,
-as a safety net.
+Getting the old cuml tier to float32 (to close the speed gap a different
+way) was investigated and found infeasible to do safely: `cuml.svm.SVR.
+from_sklearn()` hardcoded `dtype=float64` with no override, and a
+workaround would have meant bypassing it to manually replicate its private
+attribute-setting logic — risky, version-fragile, and unverifiable without
+real GPU hardware. `cupy` doesn't have this problem since it's pydreg's own
+code with full control over every array's dtype.
+
+`pydreg.backend.detect_backend()` now picks `cupy` whenever `_cuda_runtime_
+available()` finds a usable CUDA device — no compute-capability gate is
+needed, since `cupy` has no floor to speak of. `_wrap_sklearn_like`'s
+first-batch smoke test (comparing the first batch's predictions against the
+NumPy reference) remains in place regardless, as the last line of defense
+against *any* backend conversion issue, hardware-related or not — it's what
+caught the real cuml divergence above, and a real bug in `cupy`'s own
+fusion code during this tier's development (see below).
 
 ### Speeding it up: kernel fusion, then batch size
 
@@ -138,8 +131,9 @@ Two independent levers, in the order they're worth pulling:
 2. **Grow the batch size** (`--query-chunk` for the outer per-call size,
    `--cupy-sv-chunk`/`build_scorer`'s `cupy_sv_chunk` for the inner
    per-support-vector-chunk size inside `_build_cupy_predict_fn`). Unlike
-   `cuml.svm` (which tiles the kernel matrix internally in C++ without ever
-   materializing the whole thing), this tier's own Python code materializes
+   the old cuml tier (which tiled the kernel matrix internally in C++
+   without ever materializing the whole thing), this tier's own Python
+   code materializes
    the `(query_chunk, sv_chunk)` intermediate directly — so for a *fixed*
    GPU memory budget `B`, the total number of kernel-launch iterations is
    `total_queries * n_sv * 8 bytes / B`, independent of how `B` is split
@@ -225,47 +219,45 @@ the subsequent subtract/exp step at higher precision doesn't recover it,
 so this isn't cheaply fixable without a fundamentally different
 mixed-precision GEMM technique. `_wrap_sklearn_like` now takes an
 `atol`/`rtol` override, and `build_scorer()` passes a `CUPY_SMOKE_TEST_ATOL
-= 5e-4` for the `cupy` tier specifically (`sklearn`/`cuml` keep the
-default `1e-4`, since both are genuinely float64) — loosened deliberately,
-with a real measured number plus margin behind it, not a blanket weakening
-of the safety net.
+= 5e-4` for the `cupy` tier specifically (`sklearn` keeps the default
+`1e-4`, since it's genuinely float64) — loosened deliberately, with a real
+measured number plus margin behind it, not a blanket weakening of the
+safety net.
 
-**Deliberately not done for the `cuml` tier.** `cuml.svm.SVR.from_sklearn()`
-takes no dtype parameter (`cuml/internals/base.pyx`'s `from_sklearn(cls,
-model)` signature has none, and `SVMBase.__init__` doesn't expose `dtype`
-as a constructor option either — it's only ever set internally during
+**Why this wasn't done for the old cuml tier.** `cuml.svm.SVR.from_sklearn()`
+took no dtype parameter (`cuml/internals/base.pyx`'s `from_sklearn(cls,
+model)` signature had none, and `SVMBase.__init__` didn't expose `dtype`
+as a constructor option either — it was only ever set internally during
 `.fit()`/`cpu_to_gpu()`, hardcoded to `np.float64` when converting from a
-CPU model). Getting a genuinely float32 cuML SVR would mean bypassing
+CPU model). Getting a genuinely float32 cuML SVR would have meant bypassing
 `from_sklearn()` and manually setting `dtype`/`support_vectors_`/
 `dual_coef_`/etc. directly, replicating cuML's own private
 `_attrs_from_cpu` logic. That's a specific, real risk, not just "more
-private-API surface": `_get_svm_model()` picks its C++ template
+private-API surface": `_get_svm_model()` picked its C++ template
 (`SvmModel<float>` vs `SvmModel<double>`) from the `dtype` flag, then
-raw-pointer-reinterprets the underlying array's memory accordingly. If
+raw-pointer-reinterpreted the underlying array's memory accordingly. If
 that flag and the array's actual dtype ever disagreed, it wouldn't
 silently lose precision — it would read the wrong bytes entirely (garbage
-or a crash), with no GPU available here to catch it. Given the `cupy` tier
-already does float32 correctly and is the same math either way, it's the
-better home for a float32 GPU path than hacking `cuml`'s internals.
+or a crash), with no GPU available here to catch it. This risk (on top of
+the Pascal incompatibility) is a big part of why `cuml` was dropped
+entirely rather than kept around as a float32-patched second GPU tier.
 
 ## Batching
 
 Each backend gets its own default query-chunk size
-(`pydreg.backend.DEFAULT_QUERY_CHUNK`, overridable via `--query-chunk`/
-`--cuml-query-chunk`), sized for that backend's actual bottleneck:
+(`pydreg.backend.DEFAULT_QUERY_CHUNK`, overridable via `--query-chunk`),
+sized for that backend's actual bottleneck:
 
 - **NumPy**: bounded so the transient `(query_chunk, sv_chunk)`-shaped
   intermediate arrays stay a manageable size in memory — this tier is
   memory-bandwidth-bound, not compute-bound.
 - **scikit-learn**: libsvm's predict loop isn't memory-bound the same way,
   so its chunk size is mainly for streaming/checkpointing, not correctness.
-- **cuML**: chunked only to bound host→GPU transfer size; the full support
-  vector matrix is uploaded once, not chunked.
-- **cupy**: unlike cuML, this tier's own Python code materializes the
+- **cupy**: this tier's own Python code materializes the
   `(query_chunk, sv_chunk)` kernel-matrix intermediate directly, the same
-  as the NumPy tier does on the CPU — so it reuses NumPy's conservative
-  default rather than cuML's `2**20`, since that size was tuned assuming
-  cuML's internal C++ tiling, which this tier doesn't have. Unvalidated on
+  as the NumPy tier does on the CPU (unlike the old cuml tier, which tiled
+  the kernel matrix internally in C++ without ever materializing the whole
+  thing) — so it reuses NumPy's conservative default. Unvalidated on
   real GPU memory; likely worth tuning up once tested on real hardware.
 
 ## Overlapping feature extraction with scoring
@@ -295,7 +287,7 @@ never reads a bigWig while a background extraction is in flight, and a
 `ThreadPoolExecutor(max_workers=1)` guarantees only one extraction call is
 ever in progress regardless of how far ahead a chunk gets submitted. The
 overlap itself depends on `scorer.predict()` releasing the GIL while
-blocked on the GPU (true of CuPy/cuML's device-sync calls) — on the
+blocked on the GPU (true of CuPy's device-sync calls) — on the
 NumPy/scikit-learn CPU backends this can't hurt correctness, it just may
 not overlap as usefully since there's no GPU wait to hide behind.
 

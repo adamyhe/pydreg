@@ -1561,3 +1561,54 @@ implementing parallel extraction, and this write-up means that decision
 doesn't need re-deriving if a future run's ratio tips further. See
 `docs/OPTIMIZATION.md`'s "Overlapping feature extraction with scoring"
 section for the reader-facing summary.
+
+## 2026-07-15 — dropped the `cuml` backend tier entirely; `cupy` is now the only GPU backend
+
+Close-out of the investigation this whole branch has been running: given
+everything confirmed above --
+
+- `cuml.svm` silently returns wrong predictions below compute capability
+  7.0 (the original TITAN X finding).
+- `cupy` is correct on that same hardware and, after the fusion/batching/
+  float32 work, now measurably faster than `cuml` ever was, on both a
+  TITAN Xp and an A100.
+- Getting `cuml` to float32 (to close the speed gap a different way) was
+  investigated and found infeasible to do safely without real GPU access
+  to validate a private-attribute workaround.
+
+-- the user decided `cuml` should be dropped entirely rather than kept
+around as a second, worse GPU tier. Removed from `src/pydreg/backend.py`
+(`_cuml_installed`, `MIN_CUDA_COMPUTE_CAPABILITY`, `_cuda_compute_
+capability`, the `cuml` branch in `build_scorer()`, its `DEFAULT_QUERY_
+CHUNK` entry), `src/pydreg/cli.py` (`--backend` choices, `-c`/
+`--cuml-query-chunk`), `src/pydreg/pipeline.py` (`cuml_query_chunk` on
+`run()`/`_resolve_query_chunk()`), and `pyproject.toml`'s `gpu` extra
+(`cuml-cu12` -- `uv lock` dropped 36 transitive packages, the entire
+RAPIDS/CUDA dependency tree that came with it, down to just
+`cupy-cuda12x`).
+
+`detect_backend()` now auto-selects `cupy` whenever a usable CUDA device
+is present -- previously `cupy` was deliberately never auto-selected
+(explicit `--backend cupy` only) while it was still being validated; that
+validation is done, and there is no longer a second GPU tier for `cupy`
+to defer to. This also means `cupy`'s lack of a compute-capability floor
+is now a real, user-facing improvement: any CUDA GPU down to compute
+capability 3.0 gets picked up automatically and scores correctly, instead
+of the old silent-fallback-to-CPU behavior `cuml`'s Pascal gate needed.
+
+`to_sklearn_svr()` (`models.py`) and the `sklearn` backend tier are
+unaffected -- still used directly (`--backend sklearn`) and by `cupy`'s
+smoke-test cross-check diagnostic. Nothing about `_build_cupy_predict_fn`'s
+own implementation, its float32 decision, its smoke-test tolerance, the
+extraction prefetch, or the timing instrumentation changed here -- this
+was purely removing the now-redundant tier around it.
+
+Tests: deleted the four `cuml`-only cases in `tests/test_backend.py`
+(construction-failure, Pascal-compute-capability-rejection, and the
+`_cuda_compute_capability` unit test), renamed/repurposed the two shared
+`detect_backend()` tests to their `cupy` equivalents (same underlying
+`_cuda_runtime_available()` path, no longer gated behind
+`_cuml_installed()`), and rewrote `test_pipeline.py`'s
+`test_resolve_query_chunk_uses_cuml_specific_default` to drop the
+`cuml_query_chunk` assertions. 54 tests pass (58 minus the 4 fully-removed
+cases). `grep -rn cuml src/ tests/` returns nothing.

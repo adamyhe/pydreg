@@ -9,14 +9,14 @@ from pydreg import backend
 from pydreg.models import DREGModel
 
 
-def test_detect_backend_reports_missing_cuml(monkeypatch, caplog):
+def test_detect_backend_reports_missing_cupy(monkeypatch, caplog):
     backend.detect_backend.cache_clear()
-    monkeypatch.setattr(backend, "_cuml_installed", lambda: False)
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
 
     with caplog.at_level(logging.INFO, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
-    assert "cuml not installed" in caplog.text
+    assert "cupy not installed" in caplog.text
 
 
 def test_cuda_runtime_available_uses_cupy(monkeypatch):
@@ -31,96 +31,23 @@ def test_cuda_runtime_available_uses_cupy(monkeypatch):
     assert backend._cuda_runtime_available()
 
 
-def test_detect_backend_uses_cuml_when_cuda_runtime_available(monkeypatch):
+def test_detect_backend_uses_cupy_when_cuda_runtime_available(monkeypatch):
     backend.detect_backend.cache_clear()
-    monkeypatch.setattr(backend, "_cuml_installed", lambda: True)
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: True)
     monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: True)
-    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 80)
 
-    assert backend.detect_backend() == "cuml"
-
-
-def test_cuda_compute_capability_reads_cupy_device(monkeypatch):
-    class FakeDevice:
-        compute_capability = "61"
-
-    fake_cupy = types.SimpleNamespace(cuda=types.SimpleNamespace(Device=FakeDevice))
-    monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
-
-    assert backend._cuda_compute_capability() == 61
-
-
-def test_detect_backend_falls_back_to_numpy_on_pascal_compute_capability(monkeypatch, caplog):
-    # Real hardware finding: RAPIDS/cuML dropped Pascal (compute capability
-    # 6.x) support in 24.02 -- confirmed on a real TITAN X that running
-    # cuml there doesn't error, it silently returns wrong predictions. This
-    # must be caught before build_scorer(), not left to the smoke test.
-    backend.detect_backend.cache_clear()
-    monkeypatch.setattr(backend, "_cuml_installed", lambda: True)
-    monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: True)
-    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 61)
-
-    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
-        assert backend.detect_backend() == "numpy"
-
-    assert "compute capability 6.1 is below" in caplog.text
+    assert backend.detect_backend() == "cupy"
 
 
 def test_detect_backend_reports_no_cuda_without_probe_details(monkeypatch, caplog):
     backend.detect_backend.cache_clear()
-    monkeypatch.setattr(backend, "_cuml_installed", lambda: True)
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: True)
     monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: False)
 
     with caplog.at_level(logging.INFO, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
-    assert "cuml installed but no usable CUDA GPU detected at runtime -- falling back to CPU" in caplog.text
-
-
-def test_explicit_cuml_build_scorer_raises_when_construction_fails(monkeypatch):
-    class BrokenSVR:
-        @classmethod
-        def from_sklearn(cls, sk_model):
-            raise ZeroDivisionError("float division by zero")
-
-    fake_cuml = types.ModuleType("cuml")
-    fake_svm = types.ModuleType("cuml.svm")
-    fake_svm.SVR = BrokenSVR
-    fake_cuml.svm = fake_svm
-    monkeypatch.setitem(sys.modules, "cuml", fake_cuml)
-    monkeypatch.setitem(sys.modules, "cuml.svm", fake_svm)
-    monkeypatch.setattr(backend, "to_sklearn_svr", lambda dreg_model: object())
-    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 80)
-
-    class FakeModel:
-        _scorer_cache = {}
-
-    try:
-        backend.build_scorer(FakeModel(), "cuml")
-    except backend.BackendUnavailable as e:
-        assert "could not build a GPU model" in str(e)
-    else:
-        raise AssertionError("expected BackendUnavailable")
-
-
-def test_explicit_cuml_build_scorer_raises_on_pascal_compute_capability(monkeypatch):
-    fake_cuml = types.ModuleType("cuml")
-    fake_svm = types.ModuleType("cuml.svm")
-    fake_cuml.svm = fake_svm
-    monkeypatch.setitem(sys.modules, "cuml", fake_cuml)
-    monkeypatch.setitem(sys.modules, "cuml.svm", fake_svm)
-    monkeypatch.setattr(backend, "_cuda_compute_capability", lambda: 61)
-
-    class FakeModel:
-        _scorer_cache = {}
-
-    try:
-        backend.build_scorer(FakeModel(), "cuml")
-    except backend.BackendUnavailable as e:
-        assert "compute capability 6.1 is below" in str(e)
-        assert "silently returns wrong predictions" in str(e)
-    else:
-        raise AssertionError("expected BackendUnavailable")
+    assert "cupy installed but no usable CUDA GPU detected at runtime -- falling back to CPU" in caplog.text
 
 
 def _tiny_svr_model():

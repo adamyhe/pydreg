@@ -28,7 +28,7 @@ Three rounds of research (reading the R/C source directly, not from memory/docs)
 - Package name `pydreg`, managed with `uv` (`pyproject.toml` + `uv.lock`, both git-tracked).
 - bigWig I/O via `pybigtools` (Rust-backed), not pyBigWig.
 - Models hosted on HF at `adamyhe/dREG`; download/cache via `huggingface_hub.hf_hub_download` (hard core dependency — nearly every invocation needs it; no bundled local model).
-- Scoring backend: three real fallback tiers, cuML → `sklearn.svm.SVR` → dependency-free NumPy, in that order.
+- Scoring backend: three real fallback tiers, cuML → `sklearn.svm.SVR` → dependency-free NumPy, in that order. (Retrospective: cuML was later dropped entirely in favor of a custom CuPy kernel implementation after real-hardware testing found it silently wrong on pre-Volta GPUs — this plan predates that finding, kept as-written for the historical record; see `docs/PERF_LOG.md`'s 2026-07-15 "dropped the cuml backend tier entirely" entry for why, and every `cuML`/`cuml` reference below reflects the plan as originally written, not the current implementation.)
 - Full output parity with `run_dREG.R`: `.bed.gz`+`.tbi` for infp/peak.full/peak.score/peak.prob/raw.peak, plus `.bw` tracks for infp/peak.score/peak.prob. Zero external CLI/subprocess calls (no bedops/htslib/UCSC-tools) — replace with pandas + `pysam` (tabix bgzip/index) + `pybigtools` (bigwig write).
 - Single-process for v1 (vectorized NumPy/GPU batching only); architecture must not preclude adding multiprocessing later.
 

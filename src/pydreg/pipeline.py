@@ -64,7 +64,7 @@ def _score_positions(
     max_workers=1 guarantees at most one extraction ever runs at a time
     regardless of how far ahead a chunk gets submitted. The overlap itself
     relies on scorer.predict() releasing the GIL while it blocks on the GPU
-    (true for CuPy/cuML's device-sync calls) -- on the numpy/sklearn CPU
+    (true for CuPy's device-sync calls) -- on the numpy/sklearn CPU
     backends this prefetch still can't hurt correctness, just may not
     overlap as usefully since there's no GPU wait to hide behind.
 
@@ -124,11 +124,9 @@ def _score_positions(
     return scores
 
 
-def _resolve_query_chunk(scorer_backend, query_chunk=None, cuml_query_chunk=2**20):
+def _resolve_query_chunk(scorer_backend, query_chunk=None):
     if query_chunk is not None:
         return query_chunk
-    if scorer_backend == "cuml" and cuml_query_chunk is not None:
-        return cuml_query_chunk
     return backend.DEFAULT_QUERY_CHUNK[scorer_backend]
 
 
@@ -141,7 +139,6 @@ def run(
     pv_adjust="fdr",
     pv_threshold=0.05,
     query_chunk=None,
-    cuml_query_chunk=2**20,
     cupy_sv_chunk=None,
     peak_calling_cores=1,
     peak_calling_block_width=100,
@@ -152,7 +149,7 @@ def run(
 ):
     """Runs the full dREG peak-calling pipeline on a pair of bigWig files
     and (by default) writes the standard output set alongside `out_prefix`.
-    backend_name: None ("auto") or one of "cuml"/"cupy"/"sklearn"/"numpy" --
+    backend_name: None ("auto") or one of "cupy"/"sklearn"/"numpy" --
     see pydreg.backend. progress: show tqdm progress bars for the
     informative-position scan, position scoring, and peak calling (off by
     default for library use; pydreg.cli enables it; auto-hidden if stdout
@@ -165,7 +162,7 @@ def run(
     model = DREGModel.from_pretrained()
     rf_model = DREGPeakSplitForest.from_pretrained()
     scorer = backend.build_scorer(model, backend_name, cupy_sv_chunk=cupy_sv_chunk)
-    chunk = _resolve_query_chunk(scorer.backend, query_chunk, cuml_query_chunk)
+    chunk = _resolve_query_chunk(scorer.backend, query_chunk)
     logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)
 
     logger.info("scanning informative positions...")

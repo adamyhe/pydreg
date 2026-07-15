@@ -9,7 +9,7 @@ uv sync --extra gpu --group dev
 uv run pytest tests/ -q
 ```
 
-`uv sync --extra gpu` is safe on any platform: the `gpu` extra (cuML) only
+`uv sync --extra gpu` is safe on any platform: the `gpu` extra (CuPy) only
 resolves on Linux with a matching architecture, and is a no-op elsewhere
 rather than a failure.
 

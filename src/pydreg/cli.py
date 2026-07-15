@@ -15,14 +15,11 @@ def main(argv=None):
     parser.add_argument("out_prefix", help="output file prefix")
     parser.add_argument(
         "--backend",
-        choices=["auto", "cuml", "cupy", "sklearn", "numpy"],
+        choices=["auto", "cupy", "sklearn", "numpy"],
         default="auto",
-        help="scoring backend; 'auto' uses cuml when CuPy sees a CUDA device "
-        "with compute capability >=7.0, otherwise numpy. 'cupy' is an "
-        "experimental GPU tier that works on older GPUs too (not "
-        "auto-selected -- see docs/OPTIMIZATION.md). An explicit choice "
-        "raises if that backend isn't usable, rather than silently "
-        "falling back.",
+        help="scoring backend; 'auto' uses cupy when CuPy sees a usable CUDA "
+        "device, otherwise numpy. An explicit choice raises if that backend "
+        "isn't usable, rather than silently falling back.",
     )
     parser.add_argument("--smoothwidth", type=int, default=4)
     parser.add_argument("--pv-adjust", default="fdr")
@@ -33,15 +30,6 @@ def main(argv=None):
         default=None,
         help="positions scored per batch; defaults to a backend-specific size "
         "(see pydreg.backend.DEFAULT_QUERY_CHUNK)",
-    )
-    parser.add_argument(
-        "-c",
-        "--cuml-query-chunk",
-        type=int,
-        default=2**20,
-        help="positions scored per batch for the cuml backend specifically when "
-        "--query-chunk is not set; ignored by every other backend (including "
-        "cupy, which uses its own DEFAULT_QUERY_CHUNK entry)",
     )
     parser.add_argument(
         "--cupy-sv-chunk",
@@ -109,7 +97,6 @@ def main(argv=None):
         pv_adjust=args.pv_adjust,
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
-        cuml_query_chunk=args.cuml_query_chunk,
         cupy_sv_chunk=args.cupy_sv_chunk,
         peak_calling_cores=args.peak_calling_cores,
         peak_calling_block_width=args.peak_calling_block_width,
