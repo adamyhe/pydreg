@@ -984,6 +984,7 @@ dependencies = [
 [package.optional-dependencies]
 gpu = [
     { name = "cuml-cu12", marker = "platform_machine in 'x86_64 aarch64' and sys_platform == 'linux'" },
+    { name = "cupy-cuda12x", marker = "platform_machine in 'x86_64 aarch64' and sys_platform == 'linux'" },
 ]
 
 [package.dev-dependencies]
@@ -994,6 +995,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cuml-cu12", marker = "platform_machine in 'x86_64 aarch64' and sys_platform == 'linux' and extra == 'gpu'", specifier = ">=25.10" },
+    { name = "cupy-cuda12x", marker = "platform_machine in 'x86_64 aarch64' and sys_platform == 'linux' and extra == 'gpu'", specifier = ">=13.0" },
     { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "numba", specifier = ">=0.64.0" },
     { name = "numpy", specifier = ">=1.26" },

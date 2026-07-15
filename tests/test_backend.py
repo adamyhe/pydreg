@@ -5,6 +5,7 @@ import types
 import numpy as np
 
 from pydreg import backend
+from pydreg.models import DREGModel
 
 
 def test_detect_backend_reports_missing_cuml(monkeypatch, caplog):
@@ -117,6 +118,94 @@ def test_explicit_cuml_build_scorer_raises_on_pascal_compute_capability(monkeypa
     except backend.BackendUnavailable as e:
         assert "compute capability 6.1 is below" in str(e)
         assert "silently returns wrong predictions" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def _tiny_svr_model():
+    """A real DREGModel (not a hand-rolled fake) with a tiny synthetic SVR
+    -- built by bypassing __init__'s safetensors loading, since
+    _build_cupy_predict_fn/to_sklearn_svr need the real SV/coefs/gamma/rho
+    attributes DREGModel.predict itself uses. Reusing the real class (not
+    duplicating its predict formula in a fake) means these tests can't
+    silently drift out of sync with the reference math."""
+    model = object.__new__(DREGModel)
+    rng = np.random.default_rng(0)
+    model.n_features = 3
+    model.n_sv = 5
+    model.SV = rng.normal(size=(model.n_sv, model.n_features))
+    model.coefs = rng.normal(size=model.n_sv)
+    model.x_center = np.zeros(model.n_features)
+    model.x_scale = np.ones(model.n_features)
+    model.gamma = 0.5
+    model.rho = 0.1
+    model.y_scale = 2.0
+    model.y_center = -0.3
+    model._sq_sv = np.sum(model.SV**2, axis=1)
+    model._scorer_cache = {}
+    return model
+
+
+def _fake_cupy_module():
+    # A real GPU isn't available here -- this exercises
+    # _build_cupy_predict_fn's own wiring/formula (chunking, kernel math)
+    # on NumPy arrays standing in for CuPy ones, since CuPy's array API is
+    # a deliberate drop-in match for NumPy's.
+    return types.SimpleNamespace(
+        asarray=np.asarray,
+        zeros=np.zeros,
+        sum=np.sum,
+        exp=np.exp,
+        asnumpy=np.asarray,
+    )
+
+
+def test_build_cupy_predict_fn_matches_dreg_model_predict(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+
+    predict = backend._build_cupy_predict_fn(model)
+    X_raw = np.random.default_rng(1).normal(size=(4, model.n_features))
+    X_scaled = (X_raw - model.x_center) / model.x_scale
+
+    y_scaled = predict(X_scaled)
+    reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-10)
+
+
+def test_build_cupy_predict_fn_chunks_over_support_vectors(monkeypatch):
+    # sv_chunk smaller than n_sv exercises the multi-iteration accumulation
+    # loop, not just the single-chunk fast path.
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+
+    predict = backend._build_cupy_predict_fn(model, sv_chunk=2)
+    X_raw = np.random.default_rng(2).normal(size=(3, model.n_features))
+    X_scaled = (X_raw - model.x_center) / model.x_scale
+
+    y_scaled = predict(X_scaled)
+    reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-10)
+
+
+def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    model = _tiny_svr_model()
+
+    scorer = backend.build_scorer(model, "cupy")
+    X_raw = np.random.default_rng(3).normal(size=(4, model.n_features))
+
+    assert scorer.backend == "cupy"
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-8)
+
+
+def test_explicit_cupy_build_scorer_raises_when_not_installed():
+    model = _tiny_svr_model()
+
+    try:
+        backend.build_scorer(model, "cupy")
+    except backend.BackendUnavailable as e:
+        assert "cupy is not installed" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
 

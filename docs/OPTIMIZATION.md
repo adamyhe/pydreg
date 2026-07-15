@@ -11,12 +11,12 @@ made them. The full chronological research log — every benchmark, every
 dead end, every number — lives in `docs/PERF_LOG.md`; this document is the
 distilled "why it's built this way" version.
 
-## Scoring: three backends, and why NumPy (not scikit-learn) is the CPU default
+## Scoring: four backends, and why NumPy (not scikit-learn) is the CPU default
 
 Evaluating the pretrained SVR (605,187 support vectors) against every
 informative position is dominated by one computation: an RBF kernel matrix
-between the query positions and every support vector. `pydreg` offers three
-backends for this (`--backend {auto,cuml,sklearn,numpy}`):
+between the query positions and every support vector. `pydreg` offers four
+backends for this (`--backend {auto,cuml,cupy,sklearn,numpy}`):
 
 - **NumPy** (default on any machine without a usable GPU): computes the
   kernel matrix as one chunked matrix multiplication
@@ -26,6 +26,9 @@ backends for this (`--backend {auto,cuml,sklearn,numpy}`):
   `sklearn.svm.SVR` (via `to_sklearn_svr()`) and predicts through libsvm.
 - **cuML** (`pydreg[gpu]`, Linux + NVIDIA only): the same weights loaded
   into `cuml.svm.SVR.from_sklearn()`, running the kernel matrix on GPU.
+- **cupy** (`pydreg[gpu]`, experimental — see below): the exact same
+  chunked-matmul formula as the NumPy tier, run directly on a CuPy device
+  array instead of going through cuML's SVM machinery at all.
 
 scikit-learn is available (`--backend sklearn`) but is **never
 auto-selected on CPU** — it's measured at ~14-15x slower than the NumPy tier
@@ -70,6 +73,47 @@ confusing mid-pipeline smoke-test failure. That smoke test
 NumPy reference) remains in place regardless, as the last line of defense
 against *any* backend conversion issue, hardware-related or not.
 
+## The experimental `cupy` tier: same formula, no cuML, and it works on hardware cuML doesn't
+
+The Pascal finding above raises an obvious question: since cuML's own
+compiled SVM kernel is what's incompatible with older GPUs (not CUDA or
+GPU compute in general), could scoring be done on GPU *without* going
+through `cuml.svm` at all? `pydreg.backend._build_cupy_predict_fn` does
+exactly that — it's a near-verbatim port of `DREGModel.predict`'s chunked
+RBF dual-sum formula (same expanded squared-distance trick, same chunking
+over support vectors), just evaluated on a CuPy device array instead of a
+NumPy host array. Selectable via `--backend cupy`.
+
+Two things follow directly from that being *the same formula* rather than a
+separate implementation:
+
+- **No cross-library conversion risk.** The cuml/sklearn tiers depend on
+  `to_sklearn_svr()`'s private-attribute round trip and then on cuML's own
+  (or libsvm's own) independent kernel-evaluation code agreeing with
+  `DREGModel.predict` — which is exactly the class of bug the Pascal
+  investigation chased down. The cupy tier has nothing to independently
+  agree with; it *is* the reference formula, just relocated to the GPU.
+- **It isn't limited to compute capability ≥7.0.** CuPy's own array
+  primitives (elementwise ops, matmul via cuBLAS) support compute
+  capability ≥3.0 — RAPIDS/cuML's Pascal drop was a policy decision about
+  its own compiled kernels, not a CUDA-wide one. This tier should work on
+  the exact TITAN X that broke the cuml tier.
+
+**Caveats, stated plainly:** this was written and tested on a machine with
+no GPU at all (validated only against NumPy arrays standing in for CuPy
+ones in `tests/test_backend.py` — same chunking/formula logic, zero
+evidence about real GPU throughput or memory behavior). It lives on its own
+branch for exactly that reason: real-hardware validation may show it's
+slower than `cuml` (naive full-matrix chunking vs. cuML's internal C++
+tiling+caching), or hit a CuPy/driver quirk of its own, in which case the
+right call is to drop it, not force it in. It is **not** auto-selected by
+`detect_backend()` — only reachable via an explicit `--backend cupy` — and
+its `DEFAULT_QUERY_CHUNK` entry conservatively reuses the NumPy tier's
+memory-bound sizing rather than cuML's `2**20` (see "Batching" below for
+why that distinction matters here specifically). It also still runs through
+the same `_wrap_sklearn_like` first-batch smoke test as the other non-NumPy
+tiers, as a safety net.
+
 ## Batching
 
 Each backend gets its own default query-chunk size
@@ -83,6 +127,12 @@ Each backend gets its own default query-chunk size
   so its chunk size is mainly for streaming/checkpointing, not correctness.
 - **cuML**: chunked only to bound host→GPU transfer size; the full support
   vector matrix is uploaded once, not chunked.
+- **cupy**: unlike cuML, this tier's own Python code materializes the
+  `(query_chunk, sv_chunk)` kernel-matrix intermediate directly, the same
+  as the NumPy tier does on the CPU — so it reuses NumPy's conservative
+  default rather than cuML's `2**20`, since that size was tuned assuming
+  cuML's internal C++ tiling, which this tier doesn't have. Unvalidated on
+  real GPU memory; likely worth tuning up once tested on real hardware.
 
 ## Peak calling: parallelism and per-worker BLAS pinning
 

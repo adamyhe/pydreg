@@ -59,8 +59,14 @@ pydreg = "pydreg.cli:main"
 # cuml-cu12 itself requires Python >=3.11, so this project's own floor is
 # set to >=3.11 too -- keeps `uv sync --extra gpu` from ever failing on a
 # Python-version mismatch.
+#
+# cupy-cuda12x is listed explicitly (not just relied on as cuml-cu12's own
+# transitive dependency) for the experimental "cupy" backend tier
+# (pydreg.backend._build_cupy_predict_fn) -- see docs/OPTIMIZATION.md. It's
+# a real wheel on plain PyPI too, confirmed via the PyPI JSON API.
 gpu = [
   "cuml-cu12>=25.10; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
+  "cupy-cuda12x>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
 ]
 
 [dependency-groups]

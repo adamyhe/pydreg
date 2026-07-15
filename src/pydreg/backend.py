@@ -20,7 +20,18 @@ docs/OPTIMIZATION.md for the full investigation. This is exactly why
 _wrap_sklearn_like's first-batch smoke test exists -- and why
 detect_backend()/build_scorer() also check compute capability directly, so
 unsupported hardware is caught before or instead of a confusing
-mid-pipeline BackendUnavailable."""
+mid-pipeline BackendUnavailable.
+
+EXPERIMENTAL: a fourth tier, "cupy", evaluates DREGModel.predict's exact
+RBF dual-sum formula directly on a CuPy device array instead of routing
+through cuml.svm's own compiled kernel (see _build_cupy_predict_fn). CuPy's
+own array ops support compute capability >=3.0 -- including the Pascal
+hardware cuML dropped -- and being the same formula as the already-validated
+NumPy tier, it carries none of the cross-library conversion risk the cuml
+round-trip does. Not yet validated on real GPU hardware (this was written
+on a machine with no GPU at all) and not auto-selected by detect_backend()
+-- only reachable via an explicit --backend cupy, on its own branch, to be
+dropped if it doesn't pan out. See docs/OPTIMIZATION.md."""
 
 import functools
 import importlib.util
@@ -35,7 +46,14 @@ logger = logging.getLogger(__name__)
 # Default query-position chunk sizes per backend tier. Sized for the
 # pretrained SVR's shape (605,187 support vectors x 360 features); see
 # docs/PLANNING.md "Batching" for the memory-bound reasoning behind each.
-DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 2**20}
+# "cupy" reuses the "numpy" tier's conservative default rather than cuml's
+# 2**20 -- unlike cuml.svm (which tiles the kernel matrix internally in
+# C++ without ever materializing the whole thing), _build_cupy_predict_fn
+# materializes a (query_chunk, sv_chunk)-shaped intermediate directly on
+# the GPU, same as the NumPy tier does on the CPU, so it needs the same
+# kind of conservative sizing -- unvalidated on real GPU memory, tune this
+# up once tested on real hardware.
+DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cuml": 2**20, "cupy": 4096}
 
 
 class BackendUnavailable(RuntimeError):
@@ -45,6 +63,10 @@ class BackendUnavailable(RuntimeError):
 
 def _cuml_installed():
     return importlib.util.find_spec("cuml") is not None
+
+
+def _cupy_installed():
+    return importlib.util.find_spec("cupy") is not None
 
 
 def _cuda_runtime_available():
@@ -202,6 +224,43 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
     return predict_fn
 
 
+def _build_cupy_predict_fn(dreg_model, sv_chunk=20_000):
+    """Returns predict_fn(X_scaled) -> y_scaled (both host NumPy arrays --
+    matching _wrap_sklearn_like's expected interface, so it composes with
+    the same scaling/unscaling wrapper and smoke test as the sklearn/cuml
+    tiers) that evaluates DREGModel.predict's exact RBF dual-sum formula
+    on a CuPy device array, chunked over support vectors the same way
+    DREGModel.predict itself is chunked over the CPU. This is the *same
+    formula*, not a separate from-scratch kernel implementation, so (unlike
+    the cuml tier) there is no cuml.svm/libsvm conversion step that could
+    diverge -- and CuPy's own array ops support compute capability >=3.0,
+    below the >=7.0 floor cuml.svm silently gets wrong (see this module's
+    docstring)."""
+    import cupy as cp
+
+    SV = cp.asarray(dreg_model.SV)
+    coefs = cp.asarray(dreg_model.coefs)
+    sq_sv = cp.sum(SV**2, axis=1)
+    gamma = dreg_model.gamma
+    rho = dreg_model.rho
+    n_sv = dreg_model.n_sv
+
+    def predict(X_scaled):
+        X = cp.asarray(X_scaled)
+        sq_x = cp.sum(X**2, axis=1)
+        y_scaled = cp.zeros(X.shape[0])
+        for start in range(0, n_sv, sv_chunk):
+            end = min(start + sv_chunk, n_sv)
+            cross = X @ SV[start:end].T
+            sqdist = sq_x[:, None] + sq_sv[None, start:end] - 2 * cross
+            K = cp.exp(-gamma * sqdist)
+            y_scaled += K @ coefs[start:end]
+        y_scaled -= rho
+        return cp.asnumpy(y_scaled)
+
+    return predict
+
+
 def build_scorer(dreg_model, backend=None):
     """Builds (and caches, on `dreg_model._scorer_cache`) a Scorer for the
     requested backend. backend=None ("auto") picks the best available tier
@@ -235,6 +294,17 @@ def build_scorer(dreg_model, backend=None):
         except Exception as e:
             raise BackendUnavailable(f"cuml is installed but could not build a GPU model: {e}") from e
         predict_fn = _wrap_sklearn_like(dreg_model, gpu_model.predict, "cuml")
+
+    elif resolved == "cupy":
+        try:
+            import cupy  # noqa: F401
+        except ModuleNotFoundError as e:
+            raise BackendUnavailable("cupy is not installed (pip install 'pydreg[gpu]')") from e
+        try:
+            cupy_predict = _build_cupy_predict_fn(dreg_model)
+        except Exception as e:
+            raise BackendUnavailable(f"cupy is installed but could not build a GPU predict function: {e}") from e
+        predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy")
 
     elif resolved == "sklearn":
         try:

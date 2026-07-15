@@ -1115,3 +1115,61 @@ in `tests/test_backend.py` (13 backend tests, 47 total, all passing).
 This is exactly the scenario `_wrap_sklearn_like`'s smoke test was built
 for -- it caught a real, silent-wrong-answers hardware incompatibility
 before it reached any output file.
+
+## 2026-07-15 — experimental `cupy` backend tier (own branch, unvalidated)
+
+Follow-up to the Pascal finding above: the actual incompatibility is
+RAPIDS/cuML's own compiled SVM kernel dropping Pascal support in 24.02, not
+CUDA/GPU compute in general. Researched two alternatives to routing scoring
+through `cuml.svm`:
+
+1. **Constructing a cuML SVM more directly from raw parameters** (skipping
+   the `to_sklearn_svr()` round trip). Read cuML's `from_sklearn`/
+   `_attrs_from_cpu` source again: there's no more-direct public path, and
+   a private-API version of the same idea wouldn't fix anything -- the
+   Pascal bug lives in cuML's compiled CUDA kernel itself, not in how the
+   Python object gets built. Not pursued.
+2. **Reimplementing the RBF SVR directly on GPU arrays, bypassing
+   `cuml.svm` entirely.** `DREGModel.predict` is already just chunked array
+   ops (`@`, elementwise square/sub/div, `exp`, `sum`) -- CuPy mirrors
+   NumPy's API closely enough that this ports with almost no changes.
+   Checked both realistic array libraries for Pascal compatibility:
+   **CuPy still supports compute capability >=3.0** (no deprecation
+   signal), while **PyTorch dropped compute capability 6.1 in 2.8** (works
+   on <=2.7 only, per user reports on a GTX 1080 Ti). CuPy is also already
+   an unavoidable transitive dependency of `cuml-cu12`, so this doesn't add
+   a new dependency for existing `pydreg[gpu]` users. Went with CuPy.
+
+**Implementation** (`src/pydreg/backend.py`): `_build_cupy_predict_fn`
+ports `DREGModel.predict`'s exact formula (same expanded squared-distance
+trick, same SV-chunking loop) onto `cupy.asarray`-wrapped device arrays,
+returning a `predict_fn(X_scaled) -> y_scaled` matching
+`_wrap_sklearn_like`'s expected interface exactly -- so the cupy tier reuses
+that same wrapper (scaling/unscaling + first-batch smoke test) for free,
+with zero new wrapping code. Added `"cupy"` to `DEFAULT_QUERY_CHUNK`
+(reusing the NumPy tier's `4096` default rather than cuML's `2**20`, since
+this tier's own Python code materializes the `(query_chunk, sv_chunk)`
+intermediate directly on GPU the same way NumPy does on CPU -- cuML's
+`2**20` default assumed its internal C++ tiling, which this tier doesn't
+have). `--backend cupy` added to the CLI; `cupy-cuda12x` added explicitly
+to the `gpu` extra in `pyproject.toml` (previously only an implicit
+transitive dependency via `cuml-cu12`).
+
+Because it's the same formula as the already-validated NumPy tier and not
+a separate from-scratch kernel, there's no independent implementation for
+it to disagree with -- unlike the cuml/sklearn tiers, which depend on a
+private-attribute conversion step and a genuinely separate kernel-eval
+codebase (libsvm/cuML's own C++) agreeing with `DREGModel.predict`.
+
+**Explicitly unvalidated**: written and tested entirely on a machine with
+no GPU. `tests/test_backend.py` covers the chunking/formula logic against
+NumPy arrays standing in for CuPy ones (`_build_cupy_predict_fn` matches
+`DREGModel.predict` to ~1e-10 on a tiny synthetic SVR, both single-chunk and
+multi-chunk-over-support-vectors), and `build_scorer(..., "cupy")` wiring,
+but this says nothing about real GPU throughput, memory behavior, or
+whether CuPy's own compiled ops have some other hardware quirk. Per the
+user's request, this work lives on its own branch (`cupy-svr-backend`, off
+`main` post-#2) specifically so it can be dropped cleanly if real-hardware
+testing shows it's slower than `cuml` or doesn't work at all -- not merged
+into `detect_backend()`'s auto-selection, only reachable via an explicit
+`--backend cupy`. 51 tests pass (17 in `test_backend.py`).
