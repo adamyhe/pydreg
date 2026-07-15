@@ -86,6 +86,40 @@ class Scorer:
         return self._predict_fn(X)
 
 
+def _sklearn_cross_check_detail(dreg_model, sample, reference):
+    """On a non-sklearn backend's smoke-test failure, also runs the CPU
+    libsvm (scikit-learn) path on the same sample -- to_sklearn_svr()'s
+    conversion independently agrees with the NumPy reference to ~1e-9 (see
+    its docstring), so this pinpoints whether a divergence is specific to
+    the failing backend's own GPU/library conversion, or is instead shared
+    with any libsvm-style kernel evaluation (which would point at
+    DREGModel.predict's own expanded-form squared-distance formula being
+    the side that's actually wrong on this particular input, not the
+    backend being tested). Best-effort: swallows its own failures rather
+    than masking the original error with a second one."""
+    try:
+        sk_svr = to_sklearn_svr(dreg_model)
+        sample_scaled = (sample - dreg_model.x_center) / dreg_model.x_scale
+        sk_y = np.asarray(sk_svr.predict(sample_scaled)) * dreg_model.y_scale + dreg_model.y_center
+        sk_max_abs = float(np.max(np.abs(sk_y - reference)))
+    except Exception:
+        logger.debug("sklearn cross-check itself failed", exc_info=True)
+        return ""
+
+    if sk_max_abs > 1e-4:
+        return (
+            f"; sklearn (CPU libsvm) on the same sample also diverges from the "
+            f"NumPy reference (max_abs_diff={sk_max_abs:.6g}) -- this looks like a "
+            "NumPy-reference-side issue (e.g. DREGModel.predict's expanded-form "
+            "squared-distance formula losing precision on this input), not specific "
+            "to this backend"
+        )
+    return (
+        f"; sklearn (CPU libsvm) on the same sample agrees with the NumPy reference "
+        f"(max_abs_diff={sk_max_abs:.6g}) -- the divergence looks specific to this backend"
+    )
+
+
 def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
     """Both the sklearn and cuml tiers predict in the SVR's internal scaled
     feature space and need the same x-scale / y-unscale wrapping DREGModel
@@ -112,9 +146,12 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name):
                     if candidate.shape == reference.shape
                     else float("nan")
                 )
+                detail = ""
+                if backend_name != "sklearn" and candidate.shape == reference.shape:
+                    detail = _sklearn_cross_check_detail(dreg_model, sample, reference)
                 raise BackendUnavailable(
                     f"{backend_name} backend predictions do not match the NumPy reference "
-                    f"on a first-batch smoke test (max_abs_diff={max_abs:.6g}); "
+                    f"on a first-batch smoke test (max_abs_diff={max_abs:.6g}){detail}; "
                     "use --backend numpy until this backend conversion is fixed"
                 )
             validated = True

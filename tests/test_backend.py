@@ -114,3 +114,82 @@ def test_sklearn_like_wrapper_rejects_shifted_predictions():
         assert "do not match the NumPy reference" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
+
+
+def test_sklearn_like_wrapper_cross_check_flags_numpy_side_when_sklearn_also_diverges(monkeypatch):
+    # If a non-sklearn backend's smoke test fails, and scikit-learn's own
+    # libsvm predict on the same sample *also* diverges from the NumPy
+    # reference, that implicates DREGModel.predict itself rather than the
+    # failing backend's own GPU/library conversion.
+    model = TinyDREGModel()
+
+    class FakeSkSVR:
+        def predict(self, X_scaled):
+            return X_scaled[:, 0] - 2 * X_scaled[:, 1] + 1.0
+
+    monkeypatch.setattr(backend, "to_sklearn_svr", lambda dreg_model: FakeSkSVR())
+
+    def shifted_predict(X_scaled):
+        return X_scaled[:, 0] - 2 * X_scaled[:, 1] + 1.0
+
+    predict = backend._wrap_sklearn_like(model, shifted_predict, "fake")
+    X = np.array([[1.0, -1.0], [3.0, 7.0]])
+
+    try:
+        predict(X)
+    except backend.BackendUnavailable as e:
+        assert "also diverges from the NumPy reference" in str(e)
+        assert "NumPy-reference-side issue" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def test_sklearn_like_wrapper_cross_check_points_at_backend_when_sklearn_agrees(monkeypatch):
+    # If scikit-learn's own libsvm predict on the same sample agrees with
+    # the NumPy reference, the divergence looks specific to the failing
+    # backend, not to DREGModel.predict.
+    model = TinyDREGModel()
+
+    class FakeSkSVR:
+        def predict(self, X_scaled):
+            return X_scaled[:, 0] - 2 * X_scaled[:, 1]
+
+    monkeypatch.setattr(backend, "to_sklearn_svr", lambda dreg_model: FakeSkSVR())
+
+    def shifted_predict(X_scaled):
+        return X_scaled[:, 0] - 2 * X_scaled[:, 1] + 1.0
+
+    predict = backend._wrap_sklearn_like(model, shifted_predict, "fake")
+    X = np.array([[1.0, -1.0], [3.0, 7.0]])
+
+    try:
+        predict(X)
+    except backend.BackendUnavailable as e:
+        assert "agrees with the NumPy reference" in str(e)
+        assert "specific to this backend" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def test_sklearn_like_wrapper_skips_cross_check_for_sklearn_backend_itself(monkeypatch):
+    # backend_name="sklearn" IS the cross-check -- don't recurse into it.
+    model = TinyDREGModel()
+    calls = []
+    monkeypatch.setattr(
+        backend, "to_sklearn_svr", lambda dreg_model: calls.append(1) or None
+    )
+
+    def shifted_predict(X_scaled):
+        return X_scaled[:, 0] - 2 * X_scaled[:, 1] + 1.0
+
+    predict = backend._wrap_sklearn_like(model, shifted_predict, "sklearn")
+    X = np.array([[1.0, -1.0], [3.0, 7.0]])
+
+    try:
+        predict(X)
+    except backend.BackendUnavailable as e:
+        assert "diverges from the NumPy reference" not in str(e)
+        assert "agrees with the NumPy reference" not in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+    assert calls == []
