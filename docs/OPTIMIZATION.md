@@ -299,6 +299,61 @@ blocked on the GPU (true of CuPy/cuML's device-sync calls) — on the
 NumPy/scikit-learn CPU backends this can't hurt correctness, it just may
 not overlap as usefully since there's no GPU wait to hide behind.
 
+### Real measurements, and why extraction parallelism isn't implemented (yet)
+
+`_score_positions` logs accumulated `extract_seconds`/`predict_seconds`
+once per call (see its docstring), and real runs on both a TITAN Xp and an
+A100 confirmed the prefetch is working, with a clear pattern across the
+three call sites:
+
+| step | TITAN Xp (extract / predict) | A100 (extract / predict) |
+|---|---|---|
+| informative positions (bulk scan) | 196.90s / 733.57s | 193.81s / 338.67s |
+| gap-filled positions | 69.33s / 14.46s (reversed) | 58.15s / 6.65s (reversed) |
+| 10bp-densified positions | 154.40s / 534.75s | 153.29s / 245.90s |
+| **aggregate ratio (predict:extract)** | **3.05x** | **1.46x** |
+
+Two of the three steps are predict-dominated (extraction mostly hides
+behind the GPU wait, as intended) on both cards. The gap-filled-positions
+step is a real, isolated exception — extraction dominates there, plausibly
+because gap-filled points are scattered into sparse gaps by construction
+(`peaks.find_gap_infp`), which likely defeats `_extract_features_cluster`'s
+shared-fetch batching (clustering pays off for nearby points, not isolated
+ones). It's a small absolute contributor either way (~5-10% of total
+scoring time on these runs).
+
+The more interesting signal is the *aggregate ratio dropping from 3.05x to
+1.46x* between the two cards — extraction time is essentially unchanged
+(CPU-bound, GPU-independent), while predict time shrank substantially on
+the faster card, so the same fixed CPU cost is a growing fraction of the
+total. Extrapolate that trend (a faster GPU still, or `cupy`+float32
+becoming the default path on every card) and extraction could eventually
+stop being fully hideable. Estimated full-fix upside on the numbers
+above: only ~6-10% more wall time saved, since two of three steps are
+already well-overlapped — not enough on its own to justify the change
+today, but the trend is worth tracking.
+
+**Investigated whether extraction could be safely parallelized across
+multiple background workers, in case that trend continues.** Read
+pybigtools' actual Rust source (`jackh726/bigtools`,
+`pybigtools/src/reader.rs`): its `BBIReader.values()`/`.intervals()`/
+`.zoom_intervals()` all take `&mut self`, and since `BBIReader` isn't
+marked `unsendable` in its `#[pyclass]` attribute, PyO3 wraps it with a
+runtime borrow-check cell enforcing Rust's aliasing rules independent of
+the GIL — concurrently calling a read method from two threads on the
+*same* `BBIReader` object raises `PyBorrowMutError` (a safe, loud failure,
+not silent corruption, but still not usable concurrently). The underlying
+reader types are generic over `CachedBBIFileRead<ReopenableFile>`,
+though — built specifically around a `Reopen` trait meant for independent
+handles onto the same file. So the safe pattern, if this is ever
+implemented, is **one independently-opened `BBIReader` per worker
+thread** (`pydreg.io.open_bigwig()` is a thin wrapper around
+`pybigtools.open()`, trivial to call once per worker) rather than sharing
+`pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads. Not
+implemented — the current numbers don't justify the added complexity —
+but documented here specifically so this doesn't need re-deriving if the
+ratio ever tips further.
+
 ## Peak calling: parallelism and per-worker BLAS pinning
 
 The final peak-calling stage runs as one independent unit of work per broad

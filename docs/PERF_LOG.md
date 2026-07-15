@@ -1496,3 +1496,68 @@ logged numbers reflect them (loose lower bounds, since this is real
 wall-clock timing, not a mocked clock; ran 3x locally with no flakiness).
 58 tests pass. Next real run's log line will give the actual
 extract-vs-predict ratio instead of inferring it from `nvidia-smi`.
+
+## 2026-07-15 — real extract-vs-predict numbers from TITAN Xp and A100; researched (but didn't implement) parallel extraction
+
+Real log lines from the new instrumentation, both cards, all three
+`_score_positions` call sites:
+
+TITAN Xp:
+- informative positions: 196.90s extract / 733.57s predict
+- gap-filled positions: 69.33s extract / 14.46s predict (reversed)
+- 10bp-densified positions: 154.40s extract / 534.75s predict
+- aggregate: 420.63s extract / 1282.78s predict -- 3.05x predict:extract
+
+A100:
+- informative positions: 193.81s extract / 338.67s predict
+- gap-filled positions: 58.15s extract / 6.65s predict (reversed)
+- 10bp-densified positions: 153.29s extract / 245.90s predict
+- aggregate: 405.25s extract / 591.22s predict -- 1.46x predict:extract
+
+Two of three steps are predict-dominated on both cards (extraction mostly
+hides behind the GPU wait, confirming the prefetch fix works as intended).
+`gap-filled positions` is a real, isolated exception on both cards --
+extraction dominates there specifically, most likely because those points
+are scattered into sparse gaps by construction (`peaks.find_gap_infp`),
+defeating `_extract_features_cluster`'s shared-fetch batching (which only
+pays off for nearby, clusterable points). Small in absolute terms either
+way: ~5-10% of total scoring time on these runs.
+
+The more important signal: the *aggregate ratio* dropped from 3.05x
+(TITAN Xp) to 1.46x (A100) -- extraction time barely moved between cards
+(CPU-bound, GPU-independent: 196.90->193.81s, 69.33->58.15s,
+154.40->153.29s), while predict time shrank substantially on the faster
+card, so the same fixed CPU cost is a growing fraction of the total as
+scoring gets faster. Rough wall-clock-with-overlap estimates (predict time
+plus a small first-chunk lag, for the two predict-dominated steps, plus
+extract time plus a small lag for the reversed one): ~1346s on the TITAN
+Xp (~21% saved vs. fully serial 1703s) and ~651s on the A100 (~35% saved
+vs. fully serial 996s). A full fix to the gap-fill step's poor overlap
+would only add ~6-10% more on top of either -- not enough to justify
+implementing it today, but the compressing-ratio trend (as GPUs get
+faster, or once `cupy`+float32 is the default path everywhere) is worth
+tracking rather than dismissing outright.
+
+**Researched (not implemented) whether extraction could safely run across
+multiple background workers if that trend continues.** Read pybigtools'
+actual Rust source (`jackh726/bigtools`, `pybigtools/src/reader.rs`):
+`BBIReader.values()`/`.intervals()`/`.zoom_intervals()` all take `&mut
+self`, and since `BBIReader` is a normal `#[pyclass]` (not `unsendable`,
+unlike its iterator types), PyO3 wraps it with a runtime borrow-check cell
+enforcing Rust's aliasing rules independent of the GIL -- two threads
+calling a read method concurrently on the *same* `BBIReader` object would
+raise `PyBorrowMutError` (a safe, loud failure, not silent corruption, but
+still unusable concurrently). The underlying reader types are generic
+over `CachedBBIFileRead<ReopenableFile>`, built specifically around a
+`Reopen` trait meant for independent handles onto the same file -- so the
+safe pattern, if ever implemented, is one independently-opened `BBIReader`
+per worker thread (`pydreg.io.open_bigwig()` is a thin wrapper around
+`pybigtools.open()`, trivial to call once per worker) rather than sharing
+`pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
+
+Decision: document this (both the real numbers and the thread-safety
+research) and stop here for now -- the current numbers don't justify
+implementing parallel extraction, and this write-up means that decision
+doesn't need re-deriving if a future run's ratio tips further. See
+`docs/OPTIMIZATION.md`'s "Overlapping feature extraction with scoring"
+section for the reader-facing summary.
