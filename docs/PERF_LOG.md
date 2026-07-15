@@ -1440,3 +1440,14 @@ deterministic overlap-guarantee test (using `threading.Event`s to prove
 the second chunk's extraction actually starts *while* the first chunk's
 predict() is still blocked, not just that the whole call eventually
 finishes correctly -- ran 5x locally with no flakiness). 57 tests pass.
+
+**Confirmed on the same real TITAN X**: GPU utilization now runs
+consistently 90-100%, up from cycling 0-90% before this fix -- the
+prefetch is doing what it was supposed to. Given that, the remaining gap
+is small enough (well under 10%) that a full port of feature extraction
+to GPU (discussed as a possible follow-up, see the cupy-tier-vs-cuml
+scoring conversation) isn't obviously worth its cost right now -- that
+would be a genuinely bigger, riskier change (features.py is shared by
+every backend, would need a dual NumPy/CuPy path, and would need its own
+correctness validation the same way the RBF kernel did) for a much
+smaller remaining return than this fix already captured.
