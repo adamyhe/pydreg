@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.2.2"
+version = "0.2.3"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -57,6 +57,8 @@ classifiers = [
 
 [project.scripts]
 pydreg = "pydreg.cli:main"
+dreg = "pydreg.cli:main"
+dREG = "pydreg.cli:main"
 
 [project.optional-dependencies]
 # CUDA is Linux+CUDA only; the sys_platform/platform_machine marker means
