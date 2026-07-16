@@ -1612,3 +1612,101 @@ Tests: deleted the four `cuml`-only cases in `tests/test_backend.py`
 `test_resolve_query_chunk_uses_cuml_specific_default` to drop the
 `cuml_query_chunk` assertions. 54 tests pass (58 minus the 4 fully-removed
 cases). `grep -rn cuml src/ tests/` returns nothing.
+
+## 2026-07-16 — lowering the Python floor surfaced a real, pre-existing scipy dependency bug
+
+Follow-up to the `cuml` removal: `requires-python = ">=3.11"` was only set
+because the now-gone `cuml-cu12` needed it. Checked what the real floor
+should be via `uv pip compile pyproject.toml --python-version <N>`:
+3.10 resolved cleanly (including the `gpu` extra), 3.9 failed on
+`numba>=0.64.0`'s own `>=3.10` requirement. Lowered `requires-python` to
+`>=3.10` and widened CI to 3.10-3.14 on that basis (real execution, not
+just resolution -- see the 3.14 note below for why that distinction
+mattered).
+
+That CI run immediately failed on **Python 3.10 specifically**, but not on
+anything else: `AttributeError: module 'scipy.stats._qmvnt' has no
+attribute '_qmvn_inner'`. `_qmvn_inner` is the compiled QMC kernel
+`stats.py` drives directly (see that module's docstring) -- a real,
+load-bearing private API dependency, not a typo. Root cause: `uv`'s
+resolver picked `scipy==1.15.3` for Python 3.10 specifically (the newest
+scipy release still supporting it), and `_qmvn_inner` doesn't exist there
+-- confirmed empirically by installing several scipy versions in isolation
+(`uvx --with "scipy==X" python3 -c "..."`): absent through 1.15.3, present
+from 1.16.0 onward. The project's `scipy>=1.11` floor was simply wrong; it
+never surfaced before because CI only ever tested 3.11/3.12, which always
+resolved a scipy new enough anyway. This is a real bug independent of
+Python version -- anyone resolving scipy 1.11-1.15.x on *any* Python
+version would hit the same crash.
+
+Checked whether raising the floor to `scipy>=1.16` was compatible with
+keeping Python 3.10 support: it isn't -- `scipy>=1.16` itself requires
+Python `>=3.11` (confirmed via its PyPI metadata), so there's no scipy
+release with both `_qmvn_inner` and 3.10 support. Raising the real floor
+and dropping 3.10 turned out to be the same fix, not two separate
+decisions. `requires-python` moved back to `>=3.11`; `scipy>=1.11` ->
+`scipy>=1.16` in `pyproject.toml`, with the reasoning recorded inline as a
+comment so it isn't silently reverted later.
+
+Also dropped 3.14 from CI in the same pass: `pybigtools` has no `cp314`
+wheel on PyPI (confirmed: every release tops out at `cp313`), and building
+it from source fails too -- its own pinned PyO3 (0.22.6) explicitly
+refuses to compile for a Python newer than 3.13. An upstream limitation,
+not fixable here; revisit once `pybigtools` ships 3.14 wheels or bumps
+PyO3. This is exactly why the 3.14 classifier was deliberately withheld
+earlier (declared-but-unverified support) rather than added alongside
+3.10-3.13 -- real CI execution is what caught both failures (the scipy bug
+and the pybigtools build failure), where trusting `uv pip compile`
+resolution metadata alone had not.
+
+Process note: both `0.2.0` and `0.2.1` were merged and *published to PyPI*
+by the user between turns, before this doc update landed -- a reminder
+that "commit and push" work here can ship independently and quickly once
+reviewed, and that any further fix needs its own fresh version number
+(PyPI never allows re-uploading a version) and a fresh PR (a squash-merged
+PR closes; new commits need a new one). 54 tests pass throughout.
+
+## 2026-07-16 — real hardware: cupy needs the `[ctk]` extra, not bare `cupy-cuda12x`
+
+Real hardware hit `cupy is installed but could not build a GPU predict
+function: ... "CUDA versions below 12 are not supported."` on a machine
+whose NVIDIA driver reported CUDA 13.0 support (`nvidia-smi`) but had no
+separately-installed CUDA toolkit at all (`nvcc --version` missing,
+`CUDA_HOME`/`CUDA_PATH`/`LD_LIBRARY_PATH` all empty, no environment
+modules loaded). Confusing at first since the driver was clearly new
+enough -- but `nvidia-smi`'s "CUDA Version" field reports the *driver's*
+maximum supported API level, not what CUDA toolkit is actually available
+for CuPy to JIT-compile kernels with at runtime; those are two different
+things, and this machine had the former but not the latter.
+
+Root-caused via `cupy-cuda12x`'s own PyPI dependency metadata rather than
+guessing: as of CuPy 14.x (`cupy-cuda12x==14.1.1`, what a plain `>=13.0`
+install currently resolves to), the base package's unconditional
+dependencies are just `numpy` and a new `cuda-pathfinder` package --
+`cuda-toolkit[cublas,cudart,cufft,curand,cusolver,cusparse,nvrtc]==12.*`
+only comes in via an *optional* `[ctk]` extra. `cuda-pathfinder`'s job is
+to *locate* an existing CUDA toolkit, system-installed or via that extra
+-- on a machine with only a driver, it has nothing to find, and CuPy fails
+at JIT-compile time with this exact confusing CCCL error rather than a
+clear "toolkit not found" message.
+
+This regressed specifically *because* `cuml` was dropped: `cuml-cu12`
+transitively pulled in a full pip-installed CUDA 12.x runtime
+(`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`,
+etc. -- exactly the packages that disappeared from `uv.lock` when
+`cuml-cu12` was removed). `cupy` was silently finding and using those the
+entire time it was installed alongside `cuml`, masking that `cupy-
+cuda12x` alone was never actually self-contained. Removing `cuml` removed
+that accidental safety net without anyone noticing until real hardware
+with no system CUDA toolkit hit it.
+
+**Fix**: `pyproject.toml`'s `gpu` extra now requests `cupy-cuda12x[ctk]`
+instead of bare `cupy-cuda12x`. Verified via `uv lock` that this pulls the
+full CUDA 12.x toolkit (`nvidia-cuda-nvrtc-cu12`, `cuda-toolkit`,
+`nvidia-cublas-cu12`, etc.) back in as real pip dependencies -- the same
+self-contained runtime `cuml-cu12` used to provide as a side effect, now
+provided directly and intentionally instead of by accident. Doesn't
+depend on anything being installed system-wide. 54 tests pass (this is a
+pure dependency-metadata change, no code touched). Real-hardware
+confirmation of the fix itself still pending -- I have no GPU to verify
+end-to-end.

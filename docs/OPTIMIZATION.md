@@ -102,6 +102,39 @@ against *any* backend conversion issue, hardware-related or not — it's what
 caught the real cuml divergence above, and a real bug in `cupy`'s own
 fusion code during this tier's development (see below).
 
+### Installing `cupy` needs `[ctk]`, not just `cupy-cuda12x` alone
+
+Real hardware hit `cupy is installed but could not build a GPU predict
+function: ... catastrophic error: #error directive: "CUDA versions below 12
+are not supported."` on a machine with an NVIDIA driver reporting CUDA
+13.0 support but no separately-installed CUDA toolkit (`nvcc`) at all.
+Confusing, because the driver was more than new enough — but `nvidia-smi`'s
+"CUDA Version" field reports what the *driver* supports, not what CUDA
+toolkit is actually available for CuPy to JIT-compile kernels with at
+runtime, and those turned out to be two different things here.
+
+Root cause, found in `cupy-cuda12x`'s own PyPI dependency metadata: as of
+CuPy 14.x, the base package no longer unconditionally bundles its own CUDA
+toolkit (nvrtc/cudart/cublas/...) — it uses a new `cuda-pathfinder`
+dependency to *locate* one, either system-installed or via CuPy's own
+optional `[ctk]` extra. On a machine with only a driver and no
+separately-installed toolkit, `cuda-pathfinder` has nothing to find, and
+CuPy fails at JIT-compile time with this exact confusing error. This
+regressed specifically *because* the old `cuml` tier was dropped: `cuml-
+cu12` transitively pulled in a full pip-installed CUDA 12.x runtime
+(`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`,
+etc. — visible as exactly the packages that disappeared from `uv.lock`
+when `cuml-cu12` was removed), which `cupy` was silently finding and using
+the whole time it was installed alongside it. Removing `cuml` removed that
+accidental safety net.
+
+**Fix**: `pyproject.toml`'s `gpu` extra now requests `cupy-cuda12x[ctk]`,
+not bare `cupy-cuda12x` — confirmed via `uv lock` that this pulls the full
+CUDA 12.x toolkit (`nvidia-cuda-nvrtc-cu12`, `cuda-toolkit`, etc.) back in
+as real pip dependencies, the same self-contained runtime `cuml-cu12` used
+to provide as a side effect. Doesn't depend on anything being installed
+system-wide.
+
 ### Speeding it up: kernel fusion, then batch size
 
 Two independent levers, in the order they're worth pulling:

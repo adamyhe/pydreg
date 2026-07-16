@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.2.1"
+version = "0.2.2"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -69,8 +69,21 @@ pydreg = "pydreg.cli:main"
 # floor (Python >=3.10) is looser than this project's actual floor, which
 # is set by scipy>=1.16 (see the dependencies list above) -- not numba,
 # which was the initial (incorrect) assumption before CI caught it.
+#
+# The [ctk] extra matters, not just cupy-cuda12x alone: as of cupy 14.x,
+# the base package no longer unconditionally bundles its own CUDA toolkit
+# (nvrtc/cudart/cublas/...) -- it uses `cuda-pathfinder` to *locate* one,
+# system-installed or via [ctk]. On a machine with only an NVIDIA driver
+# and no separately-installed CUDA toolkit, cuda-pathfinder has nothing to
+# find, and cupy fails at JIT-compile time with a confusing
+# "CUDA versions below 12 are not supported" CCCL error -- confirmed on
+# real hardware (driver reporting CUDA 13.0, no nvcc/CUDA_HOME/modules at
+# all). [ctk] pulls in a real, self-contained CUDA 12.x toolkit (including
+# nvrtc) via pip, the same way cuml-cu12's own transitive dependencies used
+# to (silently) provide one before cuml was dropped -- see
+# docs/PERF_LOG.md.
 gpu = [
-  "cupy-cuda12x>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
+  "cupy-cuda12x[ctk]>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
 ]
 
 [dependency-groups]
