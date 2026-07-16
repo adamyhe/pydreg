@@ -63,22 +63,46 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
             vi = li + int(np.argmin(y[li : ri + 1]))
             rows.append(
                 {
-                    "dist": x[ri] - x[li], "LI": li, "RI": ri, "VI": vi,
-                    "start": x[li], "stop": x[ri], "valley": x[vi],
-                    "LS": y[li], "RS": y[ri], "VS": y[vi], "ST": 0,
+                    "dist": x[ri] - x[li],
+                    "LI": li,
+                    "RI": ri,
+                    "VI": vi,
+                    "start": x[li],
+                    "stop": x[ri],
+                    "valley": x[vi],
+                    "LS": y[li],
+                    "RS": y[ri],
+                    "VS": y[vi],
+                    "ST": 0,
                 }
             )
 
     first_pl, last_pl = int(peak_loci[0]), int(peak_loci[-1])
     left_row = {
-        "dist": x[first_pl] - x[0], "LI": 0, "RI": first_pl, "VI": 0,
-        "start": x[0], "stop": x[first_pl], "valley": x[0],
-        "LS": y[0], "RS": y[first_pl], "VS": y[0], "ST": -1,
+        "dist": x[first_pl] - x[0],
+        "LI": 0,
+        "RI": first_pl,
+        "VI": 0,
+        "start": x[0],
+        "stop": x[first_pl],
+        "valley": x[0],
+        "LS": y[0],
+        "RS": y[first_pl],
+        "VS": y[0],
+        "ST": -1,
     }
     right_row = {
-        "dist": x[-1] - x[last_pl], "LI": last_pl, "RI": n - 1, "VI": n - 1,
-        "start": x[last_pl], "stop": x[-1], "valley": x[-1],
-        "LS": y[last_pl], "RS": y[-1], "VS": y[-1], "ST": 1,
+        "dist": x[-1] - x[last_pl],
+        "LI": last_pl,
+        "RI": n - 1,
+        "VI": n - 1,
+        "start": x[last_pl],
+        "stop": x[-1],
+        "valley": x[-1],
+        "LS": y[last_pl],
+        "RS": y[-1],
+        "VS": y[-1],
+        "ST": 1,
     }
     rp = [left_row, *rows, right_row]
 
@@ -109,9 +133,13 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
             # window, is always equal to i_peak (identical window) -- reuse it.
             out_rows.append(
                 dict(
-                    start=x[i_left], stop=x[i_right],
+                    start=x[i_left],
+                    stop=x[i_right],
                     score=float(np.max(y_org[i_left : i_right + 1])),
-                    prob=-1.0, smooth_mode=x[i_peak], original_mode=0.0, centroid=0.0,
+                    prob=-1.0,
+                    smooth_mode=x[i_peak],
+                    original_mode=0.0,
+                    centroid=0.0,
                 )
             )
             continue
@@ -124,14 +152,21 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
         peak_window = y[i_left : i_right + 1]
         weights = np.arange(1, i_right - i_left + 2, dtype=float)
         y_centroid = np.sum(peak_window * weights) / np.sum(peak_window)
-        x_wc = round(y_centroid / (i_right - i_left) * (x[i_right] - x[i_left])) + x[i_left]
+        x_wc = (
+            round(y_centroid / (i_right - i_left) * (x[i_right] - x[i_left]))
+            + x[i_left]
+        )
 
         original_mode = x[i_left + int(np.argmax(y_org[i_left : i_right + 1]))]
         out_rows.append(
             dict(
-                start=x[i_peak] - w_left + 10, stop=x[i_peak] + w_right - 10,
+                start=x[i_peak] - w_left + 10,
+                stop=x[i_peak] + w_right - 10,
                 score=float(np.max(y_org[i_left : i_right + 1])),
-                prob=1 - pv, smooth_mode=x[i_peak], original_mode=original_mode, centroid=x_wc,
+                prob=1 - pv,
+                smooth_mode=x[i_peak],
+                original_mode=original_mode,
+                centroid=x_wc,
             )
         )
 
@@ -179,13 +214,16 @@ def _split_peak(model, rp):
     feature_cols = ("dist", "LD", "RD", "LS", "RS", "maxy", "d1", "d2", "d3", "dr")
     while any(row["ST"] == 0 for row in rp):
         active = [row for row in rp if row["ST"] == 0]
-        newdata = np.array([[row[col] for col in feature_cols] for row in active], dtype=float)
+        newdata = np.array(
+            [[row[col] for col in feature_cols] for row in active], dtype=float
+        )
         pred = model.predict(newdata)
         for row, pred_i in zip(active, pred):
             row["ST"] = 3 if pred_i > 0.5 else 2
 
         adjacent_merge = [
-            idx for idx in range(len(rp) - 1)
+            idx
+            for idx in range(len(rp) - 1)
             if rp[idx]["ST"] == 2 and rp[idx + 1]["ST"] == 2
         ]
         if not adjacent_merge:
@@ -287,9 +325,15 @@ def _collapse_regions(rp):
             peak_center = center[best] if best < len(center) else np.nan
             rpeak_rows.append(
                 dict(
-                    LI=LI, RI=RI, PI=center_i[best],
-                    start=start, stop=stop, center=peak_center,
-                    LS=LS, RS=RS, VS=max(center_s),
+                    LI=LI,
+                    RI=RI,
+                    PI=center_i[best],
+                    start=start,
+                    stop=stop,
+                    center=peak_center,
+                    LS=LS,
+                    RS=RS,
+                    VS=max(center_s),
                 )
             )
             LI = LS = start = None

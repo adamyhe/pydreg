@@ -1115,3 +1115,500 @@ in `tests/test_backend.py` (13 backend tests, 47 total, all passing).
 This is exactly the scenario `_wrap_sklearn_like`'s smoke test was built
 for -- it caught a real, silent-wrong-answers hardware incompatibility
 before it reached any output file.
+
+## 2026-07-15 — experimental `cupy` backend tier (own branch, unvalidated)
+
+Follow-up to the Pascal finding above: the actual incompatibility is
+RAPIDS/cuML's own compiled SVM kernel dropping Pascal support in 24.02, not
+CUDA/GPU compute in general. Researched two alternatives to routing scoring
+through `cuml.svm`:
+
+1. **Constructing a cuML SVM more directly from raw parameters** (skipping
+   the `to_sklearn_svr()` round trip). Read cuML's `from_sklearn`/
+   `_attrs_from_cpu` source again: there's no more-direct public path, and
+   a private-API version of the same idea wouldn't fix anything -- the
+   Pascal bug lives in cuML's compiled CUDA kernel itself, not in how the
+   Python object gets built. Not pursued.
+2. **Reimplementing the RBF SVR directly on GPU arrays, bypassing
+   `cuml.svm` entirely.** `DREGModel.predict` is already just chunked array
+   ops (`@`, elementwise square/sub/div, `exp`, `sum`) -- CuPy mirrors
+   NumPy's API closely enough that this ports with almost no changes.
+   Checked both realistic array libraries for Pascal compatibility:
+   **CuPy still supports compute capability >=3.0** (no deprecation
+   signal), while **PyTorch dropped compute capability 6.1 in 2.8** (works
+   on <=2.7 only, per user reports on a GTX 1080 Ti). CuPy is also already
+   an unavoidable transitive dependency of `cuml-cu12`, so this doesn't add
+   a new dependency for existing `pydreg[gpu]` users. Went with CuPy.
+
+**Implementation** (`src/pydreg/backend.py`): `_build_cupy_predict_fn`
+ports `DREGModel.predict`'s exact formula (same expanded squared-distance
+trick, same SV-chunking loop) onto `cupy.asarray`-wrapped device arrays,
+returning a `predict_fn(X_scaled) -> y_scaled` matching
+`_wrap_sklearn_like`'s expected interface exactly -- so the cupy tier reuses
+that same wrapper (scaling/unscaling + first-batch smoke test) for free,
+with zero new wrapping code. Added `"cupy"` to `DEFAULT_QUERY_CHUNK`
+(reusing the NumPy tier's `4096` default rather than cuML's `2**20`, since
+this tier's own Python code materializes the `(query_chunk, sv_chunk)`
+intermediate directly on GPU the same way NumPy does on CPU -- cuML's
+`2**20` default assumed its internal C++ tiling, which this tier doesn't
+have). `--backend cupy` added to the CLI; `cupy-cuda12x` added explicitly
+to the `gpu` extra in `pyproject.toml` (previously only an implicit
+transitive dependency via `cuml-cu12`).
+
+Because it's the same formula as the already-validated NumPy tier and not
+a separate from-scratch kernel, there's no independent implementation for
+it to disagree with -- unlike the cuml/sklearn tiers, which depend on a
+private-attribute conversion step and a genuinely separate kernel-eval
+codebase (libsvm/cuML's own C++) agreeing with `DREGModel.predict`.
+
+**Explicitly unvalidated**: written and tested entirely on a machine with
+no GPU. `tests/test_backend.py` covers the chunking/formula logic against
+NumPy arrays standing in for CuPy ones (`_build_cupy_predict_fn` matches
+`DREGModel.predict` to ~1e-10 on a tiny synthetic SVR, both single-chunk and
+multi-chunk-over-support-vectors), and `build_scorer(..., "cupy")` wiring,
+but this says nothing about real GPU throughput, memory behavior, or
+whether CuPy's own compiled ops have some other hardware quirk. Per the
+user's request, this work lives on its own branch (`cupy-svr-backend`, off
+`main` post-#2) specifically so it can be dropped cleanly if real-hardware
+testing shows it's slower than `cuml` or doesn't work at all -- not merged
+into `detect_backend()`'s auto-selection, only reachable via an explicit
+`--backend cupy`. 51 tests pass (17 in `test_backend.py`).
+
+## 2026-07-15 — cupy tier: correct on real hardware, but slow -- fused the elementwise glue, made batch size tunable
+
+First real-GPU report on the cupy tier from the 2026-07-15 entry above:
+no smoke-test divergence (formula/wiring confirmed correct), but slower
+than wanted. Two independent levers identified and implemented, in the
+order they matter:
+
+1. **Kernel fusion.** The two matmuls (`X @ SV.T`, `K @ coefs`) are already
+   cuBLAS GEMM calls -- near-optimal already. The elementwise formula
+   between them (`exp(-gamma * (sq_x + sq_sv - 2*cross))`) was ~5 separate
+   elementwise kernel launches, each round-tripping a full
+   `(query_chunk, sv_chunk)` array through GPU global memory -- pure
+   memory-bandwidth overhead on what's fundamentally a memory-bound step
+   (same underlying reason the NumPy tier itself is memory-bandwidth-bound;
+   see the "Batching" section of `docs/OPTIMIZATION.md`). Wrapped it in
+   `cupy.fuse()`, which JIT-compiles the whole chain into a single kernel
+   reading its inputs once and writing `K` once -- same formula, no
+   precision change, ~5x less memory traffic for that step. Bonus: it also
+   eliminates one live `(query_chunk, sv_chunk)`-shaped buffer (the old
+   separate `sqdist` intermediate no longer exists as its own array), which
+   freed up enough headroom to raise `_build_cupy_predict_fn`'s default
+   `sv_chunk` from `20_000` to `32_768` without exceeding the pre-fusion
+   tier's peak memory footprint.
+2. **Made batch size tunable rather than guessing at a fixed value.**
+   Unlike `cuml.svm` (tiles the kernel matrix internally in C++, never
+   materializing the whole thing), this tier's own Python code
+   materializes the `(query_chunk, sv_chunk)` intermediate directly -- so
+   for a fixed GPU memory budget, total kernel-launch iterations scale as
+   `total_queries * n_sv * 8 bytes / budget`, independent of how the budget
+   is split between the two chunk dimensions. Growing the budget (either
+   knob) is what reduces iteration count; rebalancing an unchanged budget
+   between the two dimensions does nothing. Added `cupy_sv_chunk` to
+   `backend.build_scorer()`/`pipeline.run()` and `--cupy-sv-chunk` to the
+   CLI (mirroring `--cuml-query-chunk`'s existing pattern) so the actual
+   ceiling can be found empirically per-GPU rather than guessed at from a
+   machine with no GPU at all.
+
+Also researched and explicitly deferred a third, bigger lever: **float32
+instead of float64**. This SVR is inherently float64 (exported that way
+from R); the smoke test's `rtol=atol=1e-4` tolerance would likely still
+pass at float32, but arithmetic-precision changes need their own explicit
+validation pass, unlike scheduling/fusion changes which are provably
+equivalent. Flagged as particularly relevant here since consumer Pascal
+GPUs (the exact hardware this tier exists for) have ~1:32 float64:float32
+throughput -- likely the single largest lever available, but not attempted
+without a way to validate it.
+
+Tests: `tests/test_backend.py`'s fake cupy module gained a `fuse` stand-in
+(calls the decorated function directly -- these tests exercise
+`_build_cupy_predict_fn`'s formula/chunking logic on NumPy, not cupy's own
+JIT, which needs a real GPU to mean anything) and a new test confirming
+`cupy_sv_chunk` threads from `build_scorer()` through to
+`_build_cupy_predict_fn`. 52 tests pass (18 in `test_backend.py`). No
+production math changed -- both levers are scheduling/batching changes
+only, verified against the same NumPy reference as before.
+
+## 2026-07-15 — cp.fuse() introduced a real ~3.5e-4 divergence on real GPU hardware; switched to cupy.ElementwiseKernel
+
+The fusion change above (`cp.fuse()`) tripped `_wrap_sklearn_like`'s own
+smoke test on real hardware: `max_abs_diff=0.000353735` against the NumPy
+reference, with sklearn (CPU libsvm, on the same sample) agreeing with
+NumPy to ~5.5e-11 -- pinning the divergence specifically to the fused cupy
+path, the same triage pattern the smoke-test cross-check was built for back
+in the original Pascal investigation, now paying off a second time on a
+bug of pydreg's own making rather than cuML's.
+
+`cp.fuse()` was the only change between the last known-good state and this
+one, so it's the confirmed cause -- but *why* couldn't be pinned down
+without GPU access to test either hypothesis directly. Two suspects:
+
+1. `gamma` was passed as a runtime Python-float **argument** into the
+   fused function. `cp.fuse()`'s JIT tracer infers argument types at
+   first call and compiles a fixed kernel from that -- it may not apply
+   the same dtype-promotion guarantees eager CuPy array ops do for a bare
+   Python scalar mixed with float64 arrays.
+2. `n_sv = 605,187` isn't divisible by `sv_chunk = 32,768`: the last of 19
+   chunks per predict() call has a different (smaller, 15,363-wide) shape
+   than the other 18. If `cp.fuse()`'s kernel cache keys loosely on shape
+   across repeated calls within the same chunking loop, a stale cached
+   kernel could plausibly mishandle the differently-shaped last chunk.
+
+Rather than debug fuse's internals blind, switched to
+`cupy.ElementwiseKernel` -- CuPy's older, far more battle-tested mechanism
+for exactly this "broadcast several arrays into one elementwise formula"
+pattern (used throughout cupy's own internals). It sidesteps both suspects
+at once: every argument's dtype is declared explicitly in the kernel
+signature (`"float64 cross, float64 sq_x, float64 sq_sv"` -- no promotion
+ambiguity possible), and `gamma` is baked directly into the kernel source
+as a literal (`f"out = exp(-{gamma!r} * ...)"`) rather than passed through
+at all, removing it as a per-call argument entirely. `ElementwiseKernel`
+also has no shape-based tracing/caching the way `fuse` does -- it's one
+compiled kernel, invoked generically for any broadcastable shape, so
+suspect 2 can't apply either.
+
+Same formula, same fusion benefit (one kernel launch, one read of each
+input, one write of `K`) -- just via a different, more explicit mechanism.
+`tests/test_backend.py`'s fake cupy module swapped its `fuse` stand-in for
+a `_FakeElementwiseKernel` that `eval()`s the kernel's operation string
+directly (valid since the CUDA C expression here happens to be
+syntactically identical Python) against NumPy arrays -- still can't catch
+this specific class of bug (it lives entirely in cupy's own kernel
+compilation, not in pydreg's formula/wiring), which is exactly why real
+end-to-end hardware validation caught it and the NumPy-standin unit tests
+didn't, and why this kind of change needs that real validation loop before
+being trusted. 52 tests pass.
+
+## 2026-07-15 — cupy tier downcast to float32; cuml tier deliberately not touched
+
+Motivated by confirming that the current pretrained dREG models are
+trained via Rgtsvm (not `e1071` -- `e1071` is now purely an
+S3-compatibility shim around it), and that Rgtsvm's own CUDA
+implementation has no double-precision path at all (traced through
+`Rgtsvm.cpp`/`svm.hpp`/`cuda_helpers.hpp`/`configure.ac` on GitHub -- see
+`docs/OPTIMIZATION.md`'s cupy-tier section for the full citation trail).
+The exported alphas/support-vectors/rho were themselves produced by a
+float32-limited training process, so their real accuracy ceiling was
+already float32 before ever reaching pydreg's float64 storage -- inference
+at float32 doesn't trade away precision the model actually has.
+
+Also checked libsvm's actual source (`cjlin1/libsvm`) to confirm the
+NumPy/scikit-learn tiers should NOT follow suit: `svm_node.value` is
+`double`, and `Kernel::k_function`/`svm_predict_values` (the predict path)
+operate in `double` throughout. `Qfloat` (`typedef float`) exists but only
+for the training-time kernel cache, never at predict time. So `e1071`'s
+CPU inference has always been genuinely double-precision, and pydreg's CPU
+tiers already match that -- downcasting them would be a real fidelity
+regression with no corresponding hardware motivation (the FP64-throughput
+problem is GPU-specific).
+
+**Implemented for `cupy`**: `_build_cupy_predict_fn`'s two GEMMs and fused
+RBF kernel now run in float32 (`SV`/`coefs`/`X` cast to `cp.float32`, the
+`ElementwiseKernel`'s types changed to `float32`, gamma's literal in the
+kernel source given an explicit `f` suffix -- an unsuffixed float literal
+is `double` in CUDA C, which would have silently promoted the whole
+expression back to double and defeated the point). `y_scaled` still
+accumulates in float64 (each chunk's small per-query contribution is
+upcast before adding) as cheap insurance against cross-chunk summation
+error, independent of the GEMM/kernel precision itself.
+
+Tests: `tests/test_backend.py`'s fake `ElementwiseKernel` needed two fixes
+to keep exercising this on NumPy -- the kernel body is CUDA C, not Python,
+so `expf(...)` (not a Python name) and `f`-suffixed float literals (not
+valid Python syntax) both get normalized away before `eval`. Tolerances in
+the four cupy-path tests loosened from `atol=1e-10`/`1e-8` to `1e-5`,
+reflecting genuinely-expected float32 rounding rather than a bug -- same
+reasoning as the earlier Cholesky pivot-order tolerance fix, not a
+weakening of the safety net. 52 tests pass.
+
+**Deliberately not implemented for `cuml`**: investigated whether
+`cuml.svm.SVR.from_sklearn()` could be coaxed into float32 and concluded
+it can't be done safely without real hardware to validate against.
+`from_sklearn(cls, model)` takes no dtype parameter at all
+(`cuml/internals/base.pyx`), and `dtype` is only ever set internally
+during `.fit()`/`cpu_to_gpu()` (hardcoded to `np.float64` when converting
+from a CPU model, per the earlier Pascal investigation's source read of
+`_attrs_from_cpu`). A working float32 path would require bypassing
+`from_sklearn()` and manually replicating that private attribute-setting
+logic -- and `_get_svm_model()` picks its C++ template
+(`SvmModel<float>`/`SvmModel<double>`) from the `dtype` flag, then
+raw-pointer-reinterprets the array's memory accordingly. Getting the flag
+and the actual underlying array dtype out of sync wouldn't just lose
+precision, it would read the wrong bytes entirely -- a real risk with zero
+way to catch it without a GPU. Recommended `cupy` as the float32 GPU path
+instead, since it's the same math and already correct.
+
+## 2026-07-15 — float32 tripped the smoke test as expected; loosened its tolerance for cupy specifically, with a real number behind it
+
+The float32 downcast above hit `_wrap_sklearn_like`'s own smoke test on
+real hardware: `max_abs_diff=0.000227605` against the NumPy reference,
+with sklearn (CPU libsvm) on the same sample agreeing with that reference
+to ~5.5e-11 -- same triage pattern as the original Pascal investigation,
+this time confirming the divergence is cupy's own float32 arithmetic
+rather than a bug.
+
+Root-caused rather than just accepted: the expanded-form squared-distance
+formula (`sq_x + sq_sv - 2*cross`) is a textbook catastrophic-cancellation
+setup for nearby feature vectors -- two large, nearly-equal terms whose
+small difference is what actually matters. Negligible in float64 (~15-16
+significant digits, losing a few to cancellation still leaves plenty), but
+float32 only has ~7 to begin with, so the same absolute cancellation
+consumes a much larger fraction of the available precision. Checked
+whether upcasting the subtract/exp step to float64 would help (cheap,
+since that step is memory-bound not compute-bound, so it wouldn't cost the
+FP64 GEMM throughput penalty this whole tier exists to avoid) -- it
+wouldn't: `cross`'s own rounding error is already present the moment the
+float32 GEMM produces it, so promoting arithmetic *after* that point can't
+recover precision already lost. A real fix would need a fundamentally
+different mixed-precision GEMM technique (e.g. FP32 accumulation with an
+FP32 residual-correction pass); not attempted, no hardware to validate it
+against.
+
+Naive "float32 epsilon accumulated over 605,187 independent terms" napkin
+math lands around ~1e-4 -- the observed 2.28e-4 is consistent with that
+order of magnitude plus the cancellation amplification on top, not
+wildly larger in a way that would suggest a second, unrelated bug.
+
+**Fix**: `_wrap_sklearn_like` gained `rtol`/`atol` parameters (previously
+hardcoded to `1e-4`/`1e-4`). `build_scorer()` now passes a new
+`CUPY_SMOKE_TEST_ATOL = 5e-4` constant for the `cupy` tier specifically --
+`sklearn`/`cuml` keep the default `1e-4`, since both are genuinely
+float64 and nothing about their expected precision changed. The new
+constant's value comes directly from the real measured divergence plus
+margin, not a guess -- same principle as every other tolerance decision
+this project has made (e.g. the `_permuted_cholesky` pivot-order test
+fix): characterize the real mechanism first, confirm it's not masking an
+actual bug, then loosen deliberately with a documented number behind it.
+
+Tests: two new cases in `tests/test_backend.py` place a smoke-test
+divergence at a precise, known distance from the reference (via a
+`_build_cupy_predict_fn` wrapper that adds a fixed offset, since the
+NumPy-standin fake doesn't reproduce real float32 rounding) -- one in the
+1e-4..5e-4 band (must not raise, proving the looser tolerance actually
+applies to `cupy`), one past 5e-4 (must still raise, proving the looser
+tolerance doesn't disable the check entirely). 54 tests pass.
+
+## 2026-07-15 — float32 exposed feature extraction as the new bottleneck; overlapped it with GPU scoring via a one-chunk prefetch
+
+Real-hardware confirmation of the float32 result above: TITAN X throughput
+went 794 -> 9732 pos/s (~12.3x). Checked the implied FLOPS both times as a
+sanity check -- 794 pos/s implies ~346 GFLOPS (matches the TITAN X's
+~343 GFLOPS FP64 ceiling almost exactly, the same number from the original
+Pascal investigation); 9732 pos/s implies ~4.2 TFLOPS, roughly 40-45% of
+the card's ~9.5-11 TFLOPS FP32 peak -- a reasonable real-world GEMM
+efficiency, well short of a naive 32x (FP64:FP32 ratio) because the
+elementwise/memory-bound portion of the kernel doesn't scale the same way,
+and because of the bottleneck found next.
+
+Per the earlier prediction (this was flagged as a real risk before there
+were numbers to confirm it, back when discussing whether a P100 would
+even be GPU-bound): `nvidia-smi` on this same TITAN X run now showed
+utilization cycling 0-90% between chunks, instead of staying maxed out.
+Classic Amdahl's-law consequence -- cutting the GPU-bound step's cost by
+~12x exposed the *other* per-chunk step, CPU-bound feature extraction
+(bigWig I/O + binning), as the new relatively-larger bottleneck. Same
+issue independently observed on an A100 running `cuml` (unrelated to the
+float32 work, confirming this is backend-agnostic, not cupy-specific) --
+`_score_positions`'s extract-then-predict loop was always strictly
+sequential, it just didn't matter while the GPU step was slow enough to
+dominate regardless.
+
+**Fix**: `pipeline._score_positions` now runs a one-chunk-ahead prefetch --
+a single background thread (`ThreadPoolExecutor(max_workers=1)`) extracts
+the *next* chunk's features while the main thread's `scorer.predict()`
+call blocks on the current chunk's GPU work. Relies on `scorer.predict()`
+releasing the GIL during that block (true of CuPy/cuML's device-sync
+calls) for the overlap to actually help; harmless either way on CPU
+backends. Safe specifically because only one thread ever touches the
+bigWig readers at a time -- the main thread never reads a bigWig while a
+background extraction is in flight, and `max_workers=1` guarantees at
+most one extraction is ever in progress. Pure scheduling change: same
+extraction/scoring calls, same inputs, same order, so no output change is
+expected. `_score_positions`'s per-chromosome nested loop was flattened
+into `_iter_score_chunks`, a flat generator across every chromosome
+group -- needed so the prefetch has one uniform "next chunk" boundary to
+reason about, including the last-chunk-of-one-chromosome ->
+first-chunk-of-the-next-one transition, not two different loop shapes to
+special-case.
+
+Tests: `tests/test_pipeline.py` gained three cases -- `_iter_score_chunks`
+flattening across chromosomes/chunk boundaries, `_score_positions`
+producing the exact expected result for a checkable (not just
+zeros-shaped) fake scorer across multiple chunks and chromosomes, and a
+deterministic overlap-guarantee test (using `threading.Event`s to prove
+the second chunk's extraction actually starts *while* the first chunk's
+predict() is still blocked, not just that the whole call eventually
+finishes correctly -- ran 5x locally with no flakiness). 57 tests pass.
+
+**Confirmed on the same real TITAN X**: GPU utilization now runs
+consistently 90-100%, up from cycling 0-90% before this fix -- the
+prefetch is doing what it was supposed to. Given that, the remaining gap
+is small enough (well under 10%) that a full port of feature extraction
+to GPU (discussed as a possible follow-up, see the cupy-tier-vs-cuml
+scoring conversation) isn't obviously worth its cost right now -- that
+would be a genuinely bigger, riskier change (features.py is shared by
+every backend, would need a dual NumPy/CuPy path, and would need its own
+correctness validation the same way the RBF kernel did) for a much
+smaller remaining return than this fix already captured.
+
+**Update, same day**: a closer look at the utilization graph showed it's
+actually spikier than "steady 90-100%" -- and, notably, landing in a
+similar 50-80% band on *both* the TITAN Xp and an A100. That cross-hardware
+consistency is itself informative: it argues against a GPU-architecture-
+specific explanation (e.g. Pascal's weak FP64, irrelevant to the A100) and
+for the CPU-extraction-throughput hypothesis instead -- if feature
+extraction's throughput is now the shared limiting factor, any GPU fast
+enough to be waiting on it should show a similar pattern regardless of
+its own architecture.
+
+Mechanism: the prefetch is one chunk deep with a single background
+worker. If per-chunk extraction now takes *longer* on average than a
+chunk's `scorer.predict()` (very plausible after cutting predict's cost by
+~12x while extraction is unchanged), every cycle looks like: GPU busy
+during predict(), then idle while the main thread waits for that cycle's
+already-behind extraction -- a spiky trace, not a plateau. Deepening the
+prefetch queue with the same single worker wouldn't fix this: a bigger
+queue only smooths *variance* between chunks, it can't fix a *systematic*
+throughput mismatch where one worker's total extraction rate is below the
+GPU's now-much-faster consumption rate. The two real levers would be
+bigger chunks (spreads `_extract_features_cluster`'s fixed per-chunk setup
+cost over more positions, though not guaranteed to fix a rate mismatch if
+both stages scale ~linearly with chunk size) or parallelizing extraction
+across multiple background workers (directly addresses a throughput
+mismatch, but reopens a correctness question the single-worker design
+deliberately avoided: whether pybigtools bigWig reads are safe to run
+concurrently from multiple threads against the same reader object --
+unverified, and getting it wrong would be a real bug, not just a
+performance one).
+
+Rather than guess further from a utilization percentage, added direct
+timing instead: `_score_positions` now accumulates `extract_seconds`
+(summed on the background worker) and `predict_seconds` (timed on the main
+thread) and logs both once at the end of the call (INFO level, one line,
+not a repeated progress log -- explicitly not the kind of noise just
+demoted to DEBUG elsewhere in this same session). Since the two run
+concurrently by design, they intentionally don't sum to the call's wall
+time -- the log message says so directly, to head off reading them as a
+serial breakdown. New test in `tests/test_pipeline.py` injects real
+`time.sleep()` delays into fake extract/predict functions and asserts the
+logged numbers reflect them (loose lower bounds, since this is real
+wall-clock timing, not a mocked clock; ran 3x locally with no flakiness).
+58 tests pass. Next real run's log line will give the actual
+extract-vs-predict ratio instead of inferring it from `nvidia-smi`.
+
+## 2026-07-15 — real extract-vs-predict numbers from TITAN Xp and A100; researched (but didn't implement) parallel extraction
+
+Real log lines from the new instrumentation, both cards, all three
+`_score_positions` call sites:
+
+TITAN Xp:
+- informative positions: 196.90s extract / 733.57s predict
+- gap-filled positions: 69.33s extract / 14.46s predict (reversed)
+- 10bp-densified positions: 154.40s extract / 534.75s predict
+- aggregate: 420.63s extract / 1282.78s predict -- 3.05x predict:extract
+
+A100:
+- informative positions: 193.81s extract / 338.67s predict
+- gap-filled positions: 58.15s extract / 6.65s predict (reversed)
+- 10bp-densified positions: 153.29s extract / 245.90s predict
+- aggregate: 405.25s extract / 591.22s predict -- 1.46x predict:extract
+
+Two of three steps are predict-dominated on both cards (extraction mostly
+hides behind the GPU wait, confirming the prefetch fix works as intended).
+`gap-filled positions` is a real, isolated exception on both cards --
+extraction dominates there specifically, most likely because those points
+are scattered into sparse gaps by construction (`peaks.find_gap_infp`),
+defeating `_extract_features_cluster`'s shared-fetch batching (which only
+pays off for nearby, clusterable points). Small in absolute terms either
+way: ~5-10% of total scoring time on these runs.
+
+The more important signal: the *aggregate ratio* dropped from 3.05x
+(TITAN Xp) to 1.46x (A100) -- extraction time barely moved between cards
+(CPU-bound, GPU-independent: 196.90->193.81s, 69.33->58.15s,
+154.40->153.29s), while predict time shrank substantially on the faster
+card, so the same fixed CPU cost is a growing fraction of the total as
+scoring gets faster. Rough wall-clock-with-overlap estimates (predict time
+plus a small first-chunk lag, for the two predict-dominated steps, plus
+extract time plus a small lag for the reversed one): ~1346s on the TITAN
+Xp (~21% saved vs. fully serial 1703s) and ~651s on the A100 (~35% saved
+vs. fully serial 996s). A full fix to the gap-fill step's poor overlap
+would only add ~6-10% more on top of either -- not enough to justify
+implementing it today, but the compressing-ratio trend (as GPUs get
+faster, or once `cupy`+float32 is the default path everywhere) is worth
+tracking rather than dismissing outright.
+
+**Researched (not implemented) whether extraction could safely run across
+multiple background workers if that trend continues.** Read pybigtools'
+actual Rust source (`jackh726/bigtools`, `pybigtools/src/reader.rs`):
+`BBIReader.values()`/`.intervals()`/`.zoom_intervals()` all take `&mut
+self`, and since `BBIReader` is a normal `#[pyclass]` (not `unsendable`,
+unlike its iterator types), PyO3 wraps it with a runtime borrow-check cell
+enforcing Rust's aliasing rules independent of the GIL -- two threads
+calling a read method concurrently on the *same* `BBIReader` object would
+raise `PyBorrowMutError` (a safe, loud failure, not silent corruption, but
+still unusable concurrently). The underlying reader types are generic
+over `CachedBBIFileRead<ReopenableFile>`, built specifically around a
+`Reopen` trait meant for independent handles onto the same file -- so the
+safe pattern, if ever implemented, is one independently-opened `BBIReader`
+per worker thread (`pydreg.io.open_bigwig()` is a thin wrapper around
+`pybigtools.open()`, trivial to call once per worker) rather than sharing
+`pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
+
+Decision: document this (both the real numbers and the thread-safety
+research) and stop here for now -- the current numbers don't justify
+implementing parallel extraction, and this write-up means that decision
+doesn't need re-deriving if a future run's ratio tips further. See
+`docs/OPTIMIZATION.md`'s "Overlapping feature extraction with scoring"
+section for the reader-facing summary.
+
+## 2026-07-15 — dropped the `cuml` backend tier entirely; `cupy` is now the only GPU backend
+
+Close-out of the investigation this whole branch has been running: given
+everything confirmed above --
+
+- `cuml.svm` silently returns wrong predictions below compute capability
+  7.0 (the original TITAN X finding).
+- `cupy` is correct on that same hardware and, after the fusion/batching/
+  float32 work, now measurably faster than `cuml` ever was, on both a
+  TITAN Xp and an A100.
+- Getting `cuml` to float32 (to close the speed gap a different way) was
+  investigated and found infeasible to do safely without real GPU access
+  to validate a private-attribute workaround.
+
+-- the user decided `cuml` should be dropped entirely rather than kept
+around as a second, worse GPU tier. Removed from `src/pydreg/backend.py`
+(`_cuml_installed`, `MIN_CUDA_COMPUTE_CAPABILITY`, `_cuda_compute_
+capability`, the `cuml` branch in `build_scorer()`, its `DEFAULT_QUERY_
+CHUNK` entry), `src/pydreg/cli.py` (`--backend` choices, `-c`/
+`--cuml-query-chunk`), `src/pydreg/pipeline.py` (`cuml_query_chunk` on
+`run()`/`_resolve_query_chunk()`), and `pyproject.toml`'s `gpu` extra
+(`cuml-cu12` -- `uv lock` dropped 36 transitive packages, the entire
+RAPIDS/CUDA dependency tree that came with it, down to just
+`cupy-cuda12x`).
+
+`detect_backend()` now auto-selects `cupy` whenever a usable CUDA device
+is present -- previously `cupy` was deliberately never auto-selected
+(explicit `--backend cupy` only) while it was still being validated; that
+validation is done, and there is no longer a second GPU tier for `cupy`
+to defer to. This also means `cupy`'s lack of a compute-capability floor
+is now a real, user-facing improvement: any CUDA GPU down to compute
+capability 3.0 gets picked up automatically and scores correctly, instead
+of the old silent-fallback-to-CPU behavior `cuml`'s Pascal gate needed.
+
+`to_sklearn_svr()` (`models.py`) and the `sklearn` backend tier are
+unaffected -- still used directly (`--backend sklearn`) and by `cupy`'s
+smoke-test cross-check diagnostic. Nothing about `_build_cupy_predict_fn`'s
+own implementation, its float32 decision, its smoke-test tolerance, the
+extraction prefetch, or the timing instrumentation changed here -- this
+was purely removing the now-redundant tier around it.
+
+Tests: deleted the four `cuml`-only cases in `tests/test_backend.py`
+(construction-failure, Pascal-compute-capability-rejection, and the
+`_cuda_compute_capability` unit test), renamed/repurposed the two shared
+`detect_backend()` tests to their `cupy` equivalents (same underlying
+`_cuda_runtime_available()` path, no longer gated behind
+`_cuml_installed()`), and rewrote `test_pipeline.py`'s
+`test_resolve_query_chunk_uses_cuml_specific_default` to drop the
+`cuml_query_chunk` assertions. 54 tests pass (58 minus the 4 fully-removed
+cases). `grep -rn cuml src/ tests/` returns nothing.

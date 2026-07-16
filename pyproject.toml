@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.1.2"
+version = "0.2.0"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -49,18 +49,19 @@ classifiers = [
 pydreg = "pydreg.cli:main"
 
 [project.optional-dependencies]
-# cuML/RAPIDS is Linux+CUDA only; the sys_platform/platform_machine marker
-# means `uv sync --extra gpu` simply omits this package on macOS/Windows/
-# unsupported architectures rather than failing. No custom package index is
-# needed as of RAPIDS 25.10 -- cuml-cu12 ships as a real wheel on plain PyPI
-# (confirmed via the PyPI JSON API). Never depend on the bare `cuml` name on
-# PyPI -- that's an unrelated, unmaintained, ancient package (v0.6.1).
+# CUDA is Linux+CUDA only; the sys_platform/platform_machine marker means
+# `uv sync --extra gpu` simply omits this package on macOS/Windows/
+# unsupported architectures rather than failing.
 #
-# cuml-cu12 itself requires Python >=3.11, so this project's own floor is
-# set to >=3.11 too -- keeps `uv sync --extra gpu` from ever failing on a
-# Python-version mismatch.
+# cupy-cuda12x backs the "cupy" backend tier
+# (pydreg.backend._build_cupy_predict_fn) -- see docs/OPTIMIZATION.md. It's
+# a real wheel on plain PyPI, confirmed via the PyPI JSON API. (This extra
+# used to also pull in cuml-cu12 for a now-removed "cuml" tier, which is
+# why requires-python below is >=3.11 rather than cupy-cuda12x's own
+# >=3.10 floor -- left as-is since lowering it is a separate decision that
+# affects every user, not just GPU ones.)
 gpu = [
-  "cuml-cu12>=25.10; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
+  "cupy-cuda12x>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
 ]
 
 [dependency-groups]

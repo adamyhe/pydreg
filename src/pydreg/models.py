@@ -18,31 +18,32 @@ with x_scaled = (x_raw - x_center) / x_scale. It is trivial to batch on any
 array framework (NumPy, PyTorch, CuPy) without depending on the internals of
 any particular SVM library.
 
-On scikit-learn and cuML:
+On scikit-learn:
 - scikit-learn's SVR *can* be made to predict with these weights, but only by
   writing to its private, undocumented libsvm-facing attributes
   (support_vectors_, _dual_coef_, _intercept_, _n_support, ...) and skipping
   .fit() entirely -- see `to_sklearn_svr()` below. Verified to match
   DREGModel.predict()'s NumPy math to ~1e-9 (sklearn 1.8.0). One gotcha:
   `_n_support` must have shape (2,) even for regression, or libsvm's C code
-  segfaults.
-- cuML supports this too, via a real, documented, stable public API:
-  `cuml.svm.SVR.from_sklearn(sklearn_svr)` (added in cuML 25.06). It reads
-  `dual_coef_`, `support_vectors_`, `intercept_`, `support_`, `_gamma`,
-  `_sparse`, `fit_status_`, `shape_fit_`, `n_iter_` off exactly the kind of
-  sklearn SVR object `to_sklearn_svr()` builds, copies them to GPU arrays,
-  and cuML's `_predict()` rebuilds its C++ model struct from those arrays on
-  *every call* -- it is not tied to state built only during `.fit()`. Only
-  dense RBF-kernel SVR is covered by this interop path, which is exactly this
-  model's shape (605k x 360 dense support vectors). See pydreg/backend.py for
-  the tiered dispatch that uses this.
+  segfaults. See pydreg/backend.py for the tiered dispatch (the "sklearn"
+  backend, and the smoke-test cross-check both other backends use) that
+  relies on this.
+
+  (This project used to also feed the same sklearn SVR object into
+  `cuml.svm.SVR.from_sklearn()` for a "cuml" GPU tier -- dropped after
+  real-hardware testing found it silently wrong on GPUs below compute
+  capability 7.0, with no safe way to work around cuML's own hardcoded
+  float64 dtype either; see docs/PERF_LOG.md. The "cupy" tier that replaced
+  it doesn't go through sklearn at all -- it evaluates this same dual-sum
+  formula directly on a CuPy array, see _build_cupy_predict_fn in
+  backend.py.)
 
 DREGPeakSplitForest is a small `randomForest` R package regression forest
 (500 trees, <=153 nodes each, 10 continuous peak-shape features), used only
 in the final peak-calling stage (see pydreg/rfsplit.py) to decide whether two
 adjacent local maxima in a broad peak should be merged or split. It runs on a
 handful of candidate peak splits per genome, not per genomic position, so
-there is no GPU/cuML case to make here -- plain NumPy tree traversal is more
+there is no GPU case to make here -- plain NumPy tree traversal is more
 than fast enough. The traversal is taken directly from this package's actual
 C source (src/regTree.c, predictRegTree()):
 
@@ -62,10 +63,7 @@ by reading the shipped C source and by internal consistency checks
 predict() call -- the R toolchain available during porting couldn't compile
 the `randomForest` package (unrelated broken linker). Low risk given the
 algorithm is unambiguous and taken verbatim from source, but worth a real
-cross-check if that matters for your use case. Likewise, cuML's
-from_sklearn() path was verified by reading cuML's source, not by running it
-on real GPU hardware -- do a real end-to-end run before depending on it in
-production.
+cross-check if that matters for your use case.
 """
 
 import json
@@ -75,11 +73,13 @@ import numpy as np
 
 from ._safetensors_io import open_safetensors
 
-DEFAULT_REPO_ID = "adamyhe/dREG"
+DEFAULT_REPO_ID = "adamyhe/pydreg"
 
 
 @numba.njit(cache=True)
-def _forest_predict(nodestatus, bestvar, left_daughter, right_daughter, xbestsplit, nodepred, X):
+def _forest_predict(
+    nodestatus, bestvar, left_daughter, right_daughter, xbestsplit, nodepred, X
+):
     """JIT-compiled literal translation of src/regTree.c's predictRegTree(),
     looped over trees x queries x node-depth in compiled code -- see
     DREGPeakSplitForest's module docstring. Called with tiny X (a handful of
@@ -165,7 +165,6 @@ def to_sklearn_svr(model):
     """Builds a real sklearn.svm.SVR whose .predict() reproduces
     DREGModel.predict()'s NumPy math to ~1e-9 (verified on sklearn 1.8.0).
 
-    Also the intended input to `cuml.svm.SVR.from_sklearn()` for a GPU
     version of the same weights -- see pydreg/backend.py and the module
     docstring above."""
     from sklearn.svm import SVR as SkSVR
@@ -222,6 +221,11 @@ class DREGPeakSplitForest:
         split_peak() to decide merge vs. split)."""
         X = np.asarray(X, dtype=np.float64)
         return _forest_predict(
-            self.nodestatus, self.bestvar, self.left_daughter, self.right_daughter,
-            self.xbestsplit, self.nodepred, X,
+            self.nodestatus,
+            self.bestvar,
+            self.left_daughter,
+            self.right_daughter,
+            self.xbestsplit,
+            self.nodepred,
+            X,
         )

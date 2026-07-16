@@ -15,11 +15,11 @@ def main(argv=None):
     parser.add_argument("out_prefix", help="output file prefix")
     parser.add_argument(
         "--backend",
-        choices=["auto", "cuml", "sklearn", "numpy"],
+        choices=["auto", "cupy", "sklearn", "numpy"],
         default="auto",
-        help="scoring backend; 'auto' uses cuml when CuPy sees a CUDA device, "
-        "otherwise numpy. An explicit choice raises if that backend isn't "
-        "usable, rather than silently falling back.",
+        help="scoring backend; 'auto' uses cupy when CuPy sees a usable CUDA "
+        "device, otherwise numpy. An explicit choice raises if that backend "
+        "isn't usable, rather than silently falling back.",
     )
     parser.add_argument("--smoothwidth", type=int, default=4)
     parser.add_argument("--pv-adjust", default="fdr")
@@ -32,12 +32,14 @@ def main(argv=None):
         "(see pydreg.backend.DEFAULT_QUERY_CHUNK)",
     )
     parser.add_argument(
-        "-c",
-        "--cuml-query-chunk",
+        "--cupy-sv-chunk",
         type=int,
-        default=2**20,
-        help="positions scored per batch for the cuml backend when --query-chunk "
-        "is not set; ignored by CPU backends",
+        default=None,
+        help="support vectors (of 605,187) evaluated per GPU kernel/GEMM call "
+        "for the cupy backend specifically; defaults to "
+        "_build_cupy_predict_fn's own default. The main lever for trading GPU "
+        "memory for fewer, larger (better-amortized) kernel launches -- real "
+        "headroom varies by card, so this is left tunable rather than hardcoded",
     )
     parser.add_argument(
         "--peak-calling-cores",
@@ -95,7 +97,7 @@ def main(argv=None):
         pv_adjust=args.pv_adjust,
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
-        cuml_query_chunk=args.cuml_query_chunk,
+        cupy_sv_chunk=args.cupy_sv_chunk,
         peak_calling_cores=args.peak_calling_cores,
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,

@@ -61,7 +61,9 @@ def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_wind
 
     def strand_vector(raw):
         left_full = raw[:max_dist]  # positions center-max_dist .. center-1, far->near
-        right_full = raw[max_dist + 1 :]  # positions center+1 .. center+max_dist, near->far
+        right_full = raw[
+            max_dist + 1 :
+        ]  # positions center+1 .. center+max_dist, near->far
 
         blocks = []
         for W, H in zip(window_sizes, half_n_windows):
@@ -76,8 +78,12 @@ def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_wind
     # (read_genomic_data.c:414-415) -- both strands are absolute-valued per
     # base pair at read time, before any binning. Must be applied here, to
     # the raw per-bp buffer, not to the summed bins: sum(abs(x)) != abs(sum(x)).
-    raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, center - max_dist, center + max_dist + 1))
-    raw_rev = np.abs(io.fetch_raw(bw_minus, chrom, center - max_dist, center + max_dist + 1))
+    raw_fwd = np.abs(
+        io.fetch_raw(bw_plus, chrom, center - max_dist, center + max_dist + 1)
+    )
+    raw_rev = np.abs(
+        io.fetch_raw(bw_minus, chrom, center - max_dist, center + max_dist + 1)
+    )
     return np.concatenate([strand_vector(raw_fwd), strand_vector(raw_rev)])
 
 
@@ -137,7 +143,9 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
 _MAX_SHARED_FETCH_WIDTH = 5_000_000
 
 
-def _extract_features_cluster(bw_plus, bw_minus, chrom, cluster_centers, max_dist, window_sizes, half_n_windows):
+def _extract_features_cluster(
+    bw_plus, bw_minus, chrom, cluster_centers, max_dist, window_sizes, half_n_windows
+):
     lo = int(cluster_centers[0]) - max_dist
     hi = int(cluster_centers[-1]) + max_dist + 1
     offsets = (cluster_centers - lo).astype(np.int64)
@@ -154,7 +162,9 @@ def _extract_features_cluster(bw_plus, bw_minus, chrom, cluster_centers, max_dis
     return np.concatenate([fwd, rev], axis=1)
 
 
-def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+def extract_features_batch(
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
+):
     """Same as extract_features(), for an array of centers on one
     chromosome. Returns (n_centers, n_features).
 
@@ -181,7 +191,11 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
     start_i = 0
     while start_i < n:
         end_i = start_i + 1
-        while end_i < n and (sorted_centers[end_i] - sorted_centers[start_i]) <= _MAX_SHARED_FETCH_WIDTH:
+        while (
+            end_i < n
+            and (sorted_centers[end_i] - sorted_centers[start_i])
+            <= _MAX_SHARED_FETCH_WIDTH
+        ):
             end_i += 1
         cluster = sorted_centers[start_i:end_i]
         out[order[start_i:end_i]] = _extract_features_cluster(

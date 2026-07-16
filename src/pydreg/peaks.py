@@ -35,7 +35,6 @@ from tqdm.auto import tqdm
 
 from . import rfsplit, stats
 
-
 PEAK_CALLING_BLOCK_WIDTH = 500
 _WORKER_STATE = {}
 logger = logging.getLogger(__name__)
@@ -114,8 +113,12 @@ def get_broadpeak_summary(infp_bed, threshold=0):
             scores = infp_scores[lo:hi]
             rows.append(
                 dict(
-                    chrom=chrom, start=start, end=end,
-                    min=scores.min(), max=scores.max(), mean=scores.mean(),
+                    chrom=chrom,
+                    start=start,
+                    end=end,
+                    min=scores.min(),
+                    max=scores.max(),
+                    mean=scores.mean(),
                     sum=scores.sum(),
                     stdev=scores.std(ddof=1) if scores.shape[0] > 1 else 0.0,
                     count=scores.shape[0],
@@ -210,9 +213,14 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
         logger.info(
             "informative score distribution: min=%.4f q01=%.4f median=%.4f q99=%.4f max=%.4f; "
             "negative=%d zero=%d noise=%d sigma=%s",
-            np.min(finite_scores), np.quantile(finite_scores, 0.01),
-            np.median(finite_scores), np.quantile(finite_scores, 0.99),
-            np.max(finite_scores), len(negative), len(zeros), len(noise),
+            np.min(finite_scores),
+            np.quantile(finite_scores, 0.01),
+            np.median(finite_scores),
+            np.quantile(finite_scores, 0.99),
+            np.max(finite_scores),
+            len(negative),
+            len(zeros),
+            len(noise),
             f"{sigma:.6g}" if np.isfinite(sigma) else "nan",
         )
     else:
@@ -225,7 +233,9 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
             "the scoring backend or input/model convention is wrong"
         )
 
-    gap_bed = find_gap_infp(infp_bed[[chrom_col, start_col, end_col, score_col]], min_score)
+    gap_bed = find_gap_infp(
+        infp_bed[[chrom_col, start_col, end_col, score_col]], min_score
+    )
     if gap_bed is not None and len(gap_bed) > 0:
         gap_bed = gap_bed[["chrom", "start", "end"]]
         gap_bed.columns = [chrom_col, start_col, end_col]
@@ -237,7 +247,9 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
     else:
         newinfp = infp_bed.copy()
         newinfp["infp"] = 1
-    newinfp = newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(drop=True)
+    newinfp = newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(
+        drop=True
+    )
 
     peak_broad = get_broadpeak_summary(
         newinfp[[chrom_col, start_col, end_col, score_col]], threshold=0.05
@@ -245,12 +257,19 @@ def get_dense_infp(infp_bed, score_fn, threshold=0.05):
 
     dense_infp = _pred_dense_infp(
         peak_broad[peak_broad["max"] >= min_score] if peak_broad is not None else None,
-        newinfp, score_fn, chrom_col, start_col, end_col, score_col,
+        newinfp,
+        score_fn,
+        chrom_col,
+        start_col,
+        end_col,
+        score_col,
     )
     return dense_infp, peak_broad, min_score
 
 
-def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col, score_col):
+def _pred_dense_infp(
+    dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col, score_col
+):
     if dreg_peak is None or len(dreg_peak) == 0:
         return newinfp
 
@@ -279,14 +298,18 @@ def _pred_dense_infp(dreg_peak, newinfp, score_fn, chrom_col, start_col, end_col
 
     r_dense = pd.concat(new_dense, ignore_index=True)
     r_dense[end_col] = r_dense[start_col] + 1
-    r_dense[score_col] = score_fn(r_dense, desc="scoring 10bp-densified broad-peak positions")
+    r_dense[score_col] = score_fn(
+        r_dense, desc="scoring 10bp-densified broad-peak positions"
+    )
     r_dense = r_dense[r_dense[score_col] > 0.05]
     if len(r_dense) == 0:
         return newinfp
 
     r_dense["infp"] = 0
     newinfp = pd.concat([newinfp, r_dense], ignore_index=True)
-    return newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(drop=True)
+    return newinfp.sort_values([chrom_col, start_col], kind="stable").reset_index(
+        drop=True
+    )
 
 
 def _init_peak_worker(
@@ -335,7 +358,12 @@ def _call_peak_block(task):
 
         t_find_rf_peaks = time.perf_counter()
         result = rfsplit.find_rf_peaks(
-            rf_model, xp, yp, amp_threshold=min_score, smoothwidth=smoothwidth, cor_mat=cor_mat
+            rf_model,
+            xp,
+            yp,
+            amp_threshold=min_score,
+            smoothwidth=smoothwidth,
+            cor_mat=cor_mat,
         )
         find_rf_peaks_seconds += time.perf_counter() - t_find_rf_peaks
         if result is None:
@@ -358,7 +386,9 @@ def _call_peak_block(task):
     return pd.concat(raw_rows, ignore_index=True), profile
 
 
-def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width):
+def _peak_calling_tasks(
+    dense_sorted, candidates, chrom_col, start_col, end_col, block_width
+):
     for chrom, chr_peaks in candidates.groupby("chrom", sort=False):
         chr_infp = dense_sorted[dense_sorted[chrom_col] == chrom]
         infp_starts = chr_infp[start_col].to_numpy()
@@ -387,10 +417,18 @@ def _peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col,
 
 
 def call_peaks(
-    dense_infp, peak_broad, min_score, rf_model,
-    smoothwidth=4, pv_adjust="fdr", pv_threshold=0.05, progress=False,
-    peak_calling_cores=1, peak_calling_block_width=100,
-    pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=1e-3,
+    dense_infp,
+    peak_broad,
+    min_score,
+    rf_model,
+    smoothwidth=4,
+    pv_adjust="fdr",
+    pv_threshold=0.05,
+    progress=False,
+    peak_calling_cores=1,
+    peak_calling_block_width=100,
+    pmv_laplace_cdf_maxpts=25000,
+    pmv_laplace_cdf_eps=1e-3,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
@@ -414,9 +452,13 @@ def call_peaks(
     center)."""
     chrom_col, start_col, end_col, score_col = dense_infp.columns[:4]
     if not np.isfinite(min_score):
-        raise ValueError(f"min_score must be finite before peak calling, got {min_score}")
+        raise ValueError(
+            f"min_score must be finite before peak calling, got {min_score}"
+        )
 
-    cor_mat = stats.build_cormat(dense_infp[start_col].to_numpy(), dense_infp[score_col].to_numpy())
+    cor_mat = stats.build_cormat(
+        dense_infp[start_col].to_numpy(), dense_infp[score_col].to_numpy()
+    )
 
     if peak_broad is None or len(peak_broad) == 0:
         return None, None
@@ -429,12 +471,20 @@ def call_peaks(
     if pmv_laplace_cdf_maxpts is not None:
         pmv_laplace_cdf_maxpts = int(pmv_laplace_cdf_maxpts)
     pmv_laplace_cdf_eps = float(pmv_laplace_cdf_eps)
-    tasks = list(_peak_calling_tasks(dense_sorted, candidates, chrom_col, start_col, end_col, block_width))
+    tasks = list(
+        _peak_calling_tasks(
+            dense_sorted, candidates, chrom_col, start_col, end_col, block_width
+        )
+    )
     logger.info(
         "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s) "
         "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g)",
-        len(candidates), len(tasks), block_width, peak_calling_cores,
-        pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps,
+        len(candidates),
+        len(tasks),
+        block_width,
+        peak_calling_cores,
+        pmv_laplace_cdf_maxpts,
+        pmv_laplace_cdf_eps,
     )
     raw_rows = []
     completed_results = [None] * len(tasks)
@@ -449,7 +499,9 @@ def call_peaks(
     completed_blocks = 0
     last_profile_log = time.perf_counter()
     pbar = tqdm(
-        total=len(candidates), desc="calling peaks", unit="peak",
+        total=len(candidates),
+        desc="calling peaks",
+        unit="peak",
         disable=None if progress else True,
     )
     _init_peak_worker(
@@ -474,7 +526,9 @@ def call_peaks(
         find_rf_peaks_non_pmv = max(
             profile_totals["find_rf_peaks_seconds"] - profile_totals["pmv_seconds"], 0.0
         )
-        other_block = max(profile_totals["seconds"] - profile_totals["find_rf_peaks_seconds"], 0.0)
+        other_block = max(
+            profile_totals["seconds"] - profile_totals["find_rf_peaks_seconds"], 0.0
+        )
         return find_rf_peaks_non_pmv, other_block
 
     def maybe_log_progress(force=False):
@@ -484,13 +538,25 @@ def call_peaks(
             return
         last_profile_log = now
         find_rf_peaks_non_pmv, other_block = _profile_breakdown()
-        logger.info(
+        # DEBUG, not INFO: this rate-limited (every 60s) progress line is
+        # redundant with the "calling peaks" tqdm bar under normal -v/INFO
+        # logging -- the one-time summary at the end of call_peaks() (same
+        # fields) is what's actually useful at INFO level. Left as a
+        # DEBUG-level call rather than deleted so the profiling data is
+        # still available if ever needed.
+        logger.debug(
             "peak-calling progress: %d/%d blocks, %d peaks profiled, %.2fs block CPU, "
             "%.2fs in %d pmv_laplace call(s) / %d CDF eval(s), %.2fs non-pmv find_rf_peaks, "
             "%.2fs other block overhead",
-            completed_blocks, len(tasks), profile_totals["peaks"], profile_totals["seconds"],
-            profile_totals["pmv_seconds"], profile_totals["pmv_calls"],
-            profile_totals["pmv_cdf_evals"], find_rf_peaks_non_pmv, other_block,
+            completed_blocks,
+            len(tasks),
+            profile_totals["peaks"],
+            profile_totals["seconds"],
+            profile_totals["pmv_seconds"],
+            profile_totals["pmv_calls"],
+            profile_totals["pmv_cdf_evals"],
+            find_rf_peaks_non_pmv,
+            other_block,
         )
 
     if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
@@ -507,7 +573,10 @@ def call_peaks(
                     pmv_laplace_cdf_eps,
                 ),
             ) as pool:
-                futures = {pool.submit(_call_peak_block, task): idx for idx, task in enumerate(tasks)}
+                futures = {
+                    pool.submit(_call_peak_block, task): idx
+                    for idx, task in enumerate(tasks)
+                }
                 for future in as_completed(futures):
                     idx = futures[future]
                     task = tasks[idx]
@@ -518,7 +587,9 @@ def call_peaks(
                     pbar.update(len(task[1]))
                     maybe_log_progress()
         except (OSError, NotImplementedError) as e:
-            logger.warning("parallel peak calling unavailable (%s); falling back to serial", e)
+            logger.warning(
+                "parallel peak calling unavailable (%s); falling back to serial", e
+            )
             for idx, task in enumerate(tasks):
                 result, profile = _call_peak_block(task)
                 collect_profile(profile)
@@ -540,16 +611,26 @@ def call_peaks(
     logger.info(
         "peak-calling profile: %.2fs block CPU time, %.2fs in %d pmv_laplace call(s) / "
         "%d CDF eval(s), %.2fs non-pmv find_rf_peaks, %.2fs other block overhead",
-        profile_totals["seconds"], profile_totals["pmv_seconds"],
-        profile_totals["pmv_calls"], profile_totals["pmv_cdf_evals"],
-        find_rf_peaks_non_pmv, other_block,
+        profile_totals["seconds"],
+        profile_totals["pmv_seconds"],
+        profile_totals["pmv_calls"],
+        profile_totals["pmv_cdf_evals"],
+        find_rf_peaks_non_pmv,
+        other_block,
     )
 
     if not raw_rows:
         return None, None
     raw_peak = pd.concat(raw_rows, ignore_index=True)
     raw_peak.columns = [
-        "chr", "start", "end", "score", "prob", "smooth.mode", "original.mode", "centroid",
+        "chr",
+        "start",
+        "end",
+        "score",
+        "prob",
+        "smooth.mode",
+        "original.mode",
+        "centroid",
     ]
 
     peak_bed = select_sig_peak(raw_peak, pv_adjust, pv_threshold)
@@ -563,7 +644,9 @@ def select_sig_peak(raw_peak, pv_adjust="fdr", pv_threshold=0.05):
     before and by construction from the adjustment."""
     from statsmodels.stats.multitest import multipletests
 
-    peak_bed = raw_peak[["chr", "start", "end", "score", "prob", "original.mode"]].copy()
+    peak_bed = raw_peak[
+        ["chr", "start", "end", "score", "prob", "original.mode"]
+    ].copy()
     peak_bed.columns = ["chr", "start", "end", "score", "prob", "center"]
     peak_bed = peak_bed[peak_bed["prob"] != -1]
 
@@ -571,8 +654,14 @@ def select_sig_peak(raw_peak, pv_adjust="fdr", pv_threshold=0.05):
     # Only "fdr" (the default, an alias for "BH" in R too) is ever actually
     # used by the real pipeline; the rest are here for completeness.
     method = {
-        "fdr": "fdr_bh", "BH": "fdr_bh", "BY": "fdr_by", "bonferroni": "bonferroni",
-        "holm": "holm", "hochberg": "simes-hochberg", "hommel": "hommel", "none": None,
+        "fdr": "fdr_bh",
+        "BH": "fdr_bh",
+        "BY": "fdr_by",
+        "bonferroni": "bonferroni",
+        "holm": "holm",
+        "hochberg": "simes-hochberg",
+        "hommel": "hommel",
+        "none": None,
     }.get(pv_adjust, pv_adjust)
     if method is not None:
         peak_bed["prob"] = multipletests(peak_bed["prob"].to_numpy(), method=method)[1]
