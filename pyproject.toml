@@ -8,11 +8,20 @@ version = "0.2.1"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.0",
-  "scipy>=1.11",
+  # >=1.16 specifically: scipy.stats._qmvnt._qmvn_inner (the compiled QMC
+  # kernel stats.py drives directly, see that module's docstring) doesn't
+  # exist before 1.16.0 -- confirmed empirically (1.15.3 lacks it, 1.16.0
+  # has it). The old >=1.11 floor was simply wrong; CI catching this on a
+  # real resolution against Python 3.10 (which can only resolve up to
+  # 1.15.3) is what surfaced it. scipy>=1.16 itself requires Python
+  # >=3.11, which is also why this project's requires-python floor can't
+  # go below 3.11 -- there is no scipy release with both _qmvn_inner and
+  # Python 3.10 support.
+  "scipy>=1.16",
   "statsmodels>=0.14",
   "scikit-learn>=1.4",
   "pybigtools>=0.3",
@@ -40,7 +49,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -57,11 +65,10 @@ pydreg = "pydreg.cli:main"
 #
 # cupy-cuda12x backs the "cupy" backend tier
 # (pydreg.backend._build_cupy_predict_fn) -- see docs/OPTIMIZATION.md. It's
-# a real wheel on plain PyPI, confirmed via the PyPI JSON API, and only
-# needs Python >=3.10 -- matching this project's own requires-python floor
-# below, which is actually set by numba>=0.64.0's own >=3.10 requirement
-# (verified via `uv pip compile pyproject.toml --python-version 3.10/3.9`:
-# 3.10 resolves cleanly including this extra, 3.9 fails on numba alone).
+# a real wheel on plain PyPI, confirmed via the PyPI JSON API. Its own
+# floor (Python >=3.10) is looser than this project's actual floor, which
+# is set by scipy>=1.16 (see the dependencies list above) -- not numba,
+# which was the initial (incorrect) assumption before CI caught it.
 gpu = [
   "cupy-cuda12x>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
 ]
