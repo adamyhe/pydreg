@@ -42,11 +42,14 @@ def main(argv=None):
         "headroom varies by card, so this is left tunable rather than hardcoded",
     )
     parser.add_argument(
+        "-p",
         "--peak-calling-cores",
         type=int,
         default=1,
         help="worker processes for the final CPU peak-calling stage; legacy "
-        "dREG parallelized this stage in 500-peak blocks",
+        "dREG parallelized this stage in 500-peak blocks. Set this to the max "
+        "number of cores you can spare -- the default of 1 is just a safe "
+        "starting point, not a recommendation",
     )
     parser.add_argument(
         "--peak-calling-block-width",
