@@ -18,9 +18,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 3.10 excluded: scipy>=1.16 (needed for scipy.stats._qmvnt._qmvn_inner,
+        # see pyproject.toml) itself requires Python >=3.11.
+        # 3.14 excluded: pybigtools has no cp314 wheel yet, and building
+        # it from source fails -- its own pinned PyO3 (0.22.6) doesn't
+        # support 3.14 yet either. Revisit once pybigtools ships 3.14
+        # wheels/bumps PyO3.
         python-version:
           - "3.11"
           - "3.12"
+          - "3.13"
 
     steps:
       - name: Check out repository
