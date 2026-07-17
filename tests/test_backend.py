@@ -178,13 +178,13 @@ def test_explicit_cupy_build_scorer_tolerates_a_divergence_between_the_two_toler
     monkeypatch,
 ):
     # cupy's GEMMs/kernel are deliberately float32 -- CUPY_SMOKE_TEST_ATOL
-    # (5e-4) exists specifically so a real divergence in this band (bigger
+    # (1e-3) exists specifically so a real divergence in this band (bigger
     # than the default 1e-4, but expected for float32) doesn't raise.
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
     model = _tiny_svr_model()
-    # y_scale=2.0 on this fixture, so a 1.5e-4 offset in y_scaled space is
-    # 3e-4 in the final (unscaled) space the smoke test actually compares.
-    monkeypatch.setattr(backend, "_build_cupy_predict_fn", _cupy_build_with_offset(1.5e-4))
+    # y_scale=2.0 on this fixture, so a 3e-4 offset in y_scaled space is
+    # 6e-4 in the final (unscaled) space the smoke test actually compares.
+    monkeypatch.setattr(backend, "_build_cupy_predict_fn", _cupy_build_with_offset(3e-4))
 
     scorer = backend.build_scorer(model, "cupy")
     X_raw = np.random.default_rng(5).normal(size=(4, model.n_features))

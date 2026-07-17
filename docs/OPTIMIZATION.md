@@ -237,9 +237,9 @@ recommended.
 
 **Confirmed on real hardware, and the smoke test's tolerance adjusted
 accordingly.** The float32 switch tripped `_wrap_sklearn_like`'s own
-smoke test: a real `max_abs_diff` of ~2.3e-4 against the float64 NumPy
-reference, with sklearn (CPU libsvm) independently agreeing with that same
-reference to ~5.5e-11 on the same sample — the same cross-check pattern
+smoke test: real `max_abs_diff` values from ~2.3e-4 to ~5.4e-4 against the
+float64 NumPy reference, with sklearn (CPU libsvm) independently agreeing
+with that same reference to ~6e-11 on the same sample — the same cross-check pattern
 from the original Pascal investigation, this time confirming the
 divergence is cupy's own (expected) float32 arithmetic, not a conversion
 bug. Root cause: the expanded-form squared-distance formula
@@ -252,7 +252,7 @@ the subsequent subtract/exp step at higher precision doesn't recover it,
 so this isn't cheaply fixable without a fundamentally different
 mixed-precision GEMM technique. `_wrap_sklearn_like` now takes an
 `atol`/`rtol` override, and `build_scorer()` passes a `CUPY_SMOKE_TEST_ATOL
-= 5e-4` for the `cupy` tier specifically (`sklearn` keeps the default
+= 1e-3` for the `cupy` tier specifically (`sklearn` keeps the default
 `1e-4`, since it's genuinely float64) — loosened deliberately, with a real
 measured number plus margin behind it, not a blanket weakening of the
 safety net.
