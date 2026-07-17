@@ -8,8 +8,10 @@ installed pybigtools package (not just its docs): `values(bins=n, summary=
 "sum", exact=True, uncovered=0.0, fillna=0.0)` gives exact per-tile literal
 sums (matching R's step.bpQuery.bigWig), and `values(start, end, fillna=0.0,
 oob=0.0)` accepts out-of-chromosome-bounds start/end directly and returns a
-full-length array zero-padded at the out-of-bounds positions -- no manual
-clipping/padding needed on the Python side.
+full-length array zero-padded at the out-of-bounds positions. Missing
+chromosomes/contigs still raise from pybigtools, so raw fetch handles that
+case explicitly as all-zero signal for strand-specific inputs where one
+bigWig may not contain every contig present in the other.
 """
 
 import numpy as np
@@ -22,6 +24,11 @@ def open_bigwig(path):
 
 def chrom_sizes(bw):
     return dict(bw.chroms())
+
+
+def _is_missing_chrom_error(exc):
+    msg = str(exc).lower()
+    return "no chrom" in msg and "found" in msg
 
 
 def windowed_sum(bw, chrom, phase, window, chrom_size):
@@ -49,9 +56,15 @@ def windowed_sum(bw, chrom, phase, window, chrom_size):
 def fetch_raw(bw, chrom, start, end):
     """Raw per-bp signal over [start, end), zero-filled at uncovered
     positions AND at any portion of the range outside the chromosome
-    (start < 0 or end > chrom size) -- always returns an array of length
-    end - start."""
-    return bw.values(chrom, start, end, fillna=0.0, oob=0.0)
+    (start < 0 or end > chrom size). If the bigWig lacks `chrom` entirely,
+    that strand contributes all-zero signal over the requested span. Always
+    returns an array of length end - start."""
+    try:
+        return bw.values(chrom, start, end, fillna=0.0, oob=0.0)
+    except KeyError as e:
+        if _is_missing_chrom_error(e):
+            return np.zeros(max(0, end - start), dtype=float)
+        raise
 
 
 def write_bed_gz(df, path, columns=None):

@@ -81,7 +81,7 @@ Dependency direction is one-way: `pipeline.py` → everything; `peaks.py` → `s
 
 Params used in production (both `run_dREG.R` and `run_predict.R`): `depth=0, window=400, step=50, use_ANDOR=True` (`use_OR` is dead code — branch order makes it unreachable when `use_ANDOR=True`).
 
-- Chromosomes scanned = plus-strand bigWig's chromosomes with `chromSize > 2500` (strict). **Known upstream bug, replicate faithfully, do not fix**: the minus-strand chromosome list is computed in R but never actually merged in (`unique(q_chroms, bw_minus$chroms)` — R treats the 2nd arg as `incomparables`, not a vector to union). The pretrained model's expected input distribution was produced by this exact scan; "fixing" it would change results.
+- Chromosomes scanned = plus-strand bigWig's chromosomes with `chromSize > 2500` (strict). **Known upstream bug/quirk, replicate faithfully, do not fix**: the minus-strand chromosome list is computed in R but never actually merged in (`unique(q_chroms, bw_minus$chroms)` — R treats the 2nd arg as `incomparables`, not a vector to union). The pretrained model's expected input distribution was produced by this exact scan; "fixing" it would change results. Consequence: plus-only contigs can produce informative positions, while minus-only contigs are missed by the initial scan.
 - Per chromosome, for each phase `x` in `[0, 50, 100, ..., 400]` (9 phases):
   - **OR pass**: tile width 100bp at phase `x`; keep tile if `plus_signed_sum + minus_abs_sum > 2`.
   - **AND pass**: tile width 1000bp at phase `x`; keep tile if `plus_signed_sum > 0 AND minus_abs_sum > 0`.
@@ -103,7 +103,7 @@ Stage A, precisely:
   - Left flank bin `j∈[0,H-1]`: covers `[C-W*H+j*W, C-W*H+(j+1)*W-1]` (bin 0 farthest, bin H-1 adjacent-left).
   - Right flank bin `j∈[H,2H-1]`: covers `[C+(j-H)*W+1, C+(j-H+1)*W]` (bin H adjacent-right, bin 2H-1 farthest).
   - Vectorizes as: reshape the fetched left/right-of-center arrays into `(H, W)` blocks per zoom, `.sum(axis=1)` — smaller zooms simply use the innermost slice of the full `max_dist`-wide fetch.
-- **Edge handling**: any bp `<0` or beyond available chromosome data contributes 0 (bins zero-initialized; skip, never NA/error).
+- **Edge/missing-contig handling**: any bp `<0` or beyond available chromosome data contributes 0 (bins zero-initialized; skip, never NA/error). If one strand's bigWig lacks the queried chromosome/contig entirely, that strand likewise contributes all-zero signal over the requested span. This preserves the plus-driven scan behavior above: plus-only contigs emitted by `infp.py` are scoreable, while the absent minus strand is treated as no signal rather than a hard read failure.
 - **Sign handling**: both strands' raw per-bp signal is `abs()`'d immediately at fetch time, before any binning — see the sourced note below. Bin sums are therefore always non-negative.
 - **Layout — NOT interleaved per zoom**: `[FWD block: zoom0(2H0) | zoom1(2H1) | ...] || [REV block: zoom0(2H0) | zoom1(2H1) | ...]` — all-forward-then-all-reverse, zooms in `window_sizes` order. For the pretrained model: 180 fwd + 180 rev = 360 total. This exact order must match the pretrained weight vector bit-for-bit.
 - **Logistic scaling**, independently per zoom AND per strand (10 independent computations for the pretrained model's 5 zooms × 2 strands):

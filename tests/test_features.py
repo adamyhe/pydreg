@@ -2,7 +2,7 @@ import numpy as np
 import pybigtools
 import pytest
 
-from pydreg import features, io
+from pydreg import features, infp, io
 
 
 @pytest.fixture
@@ -127,3 +127,34 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
         bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
     )
     np.testing.assert_array_equal(naive, batched)
+
+
+def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
+    plus_path = str(tmp_path / "plus.bw")
+    minus_path = str(tmp_path / "minus.bw")
+
+    bw = pybigtools.open(plus_path, "w")
+    bw.write(
+        {"chrUn_gl000233": 5000},
+        [("chrUn_gl000233", 100, 300, 5.0)],
+    )
+    bw = pybigtools.open(minus_path, "w")
+    bw.write({"chr1": 5000}, [("chr1", 10, 11, -1.0)])
+
+    bw_plus = io.open_bigwig(plus_path)
+    bw_minus = io.open_bigwig(minus_path)
+    positions = infp.get_informative_positions(bw_plus, bw_minus)
+
+    assert set(positions["chrom"]) == {"chrUn_gl000233"}
+
+    X = features.extract_features_batch(
+        bw_plus,
+        bw_minus,
+        "chrUn_gl000233",
+        positions["start"].to_numpy(),
+        [10],
+        [1],
+    )
+
+    assert X.shape == (len(positions), 4)
+    np.testing.assert_allclose(X[:, 2:], 0.01)

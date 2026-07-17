@@ -105,6 +105,7 @@ This is validated directly against the original: on real test data, pydreg's cal
 ## Caveats
 
 - `minus.bw`'s sign doesn't matter: both informative-position detection and feature extraction take the absolute value of the minus-strand signal (the latter matching the original C's `bigwig_readi(..., abs=1, ...)` read call, which strips sign from both strands before any binning) — see `docs/PLANNING.md` for the sourced trace.
+- Chromosome/contig selection follows the original plus-strand-driven scan: contigs present only in `plus.bw` can still be scored, with the missing `minus.bw` contig treated as all-zero signal during feature extraction; contigs present only in `minus.bw` are not discovered by the initial informative-position scan.
 - A handful of upstream R bugs/quirks are faithfully replicated rather than fixed, because the pretrained model's expected behavior was produced by that exact code (e.g. a `mean()`-argument-binding bug in the p-value calculation, an off-by-one in broad-peak merging that drops the last group per chromosome, and others) — see `docs/PLANNING.md` for the full list and reasoning.
 - Peak-calling p-values have small inherent run-to-run noise (the per-summit p-value's underlying quasi-Monte-Carlo integral is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice, and is reflected in the 0.999728 (not exactly 1.0) Jaccard index above.
 

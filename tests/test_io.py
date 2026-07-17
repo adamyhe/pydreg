@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pybigtools
 
 from pydreg import io
 
@@ -23,6 +24,17 @@ def test_fetch_raw_zero_pads_out_of_bounds(synthetic_bigwig_pair):
     raw = io.fetch_raw(bw, "chr1", -50, 50)
     assert raw.shape[0] == 100
     assert np.all(raw[:50] == 0)
+
+
+def test_fetch_raw_missing_chromosome_returns_zeroes(tmp_path):
+    path = str(tmp_path / "one_chrom.bw")
+    bw = pybigtools.open(path, "w")
+    bw.write({"chr1": 1000}, [("chr1", 10, 20, 1.0)])
+
+    raw = io.fetch_raw(io.open_bigwig(path), "chrMissing", -25, 75)
+
+    assert raw.shape[0] == 100
+    assert np.all(raw == 0)
 
 
 def test_write_bed_gz_sorts_and_tabix_indexes(tmp_path):
