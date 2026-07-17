@@ -73,7 +73,19 @@ import numpy as np
 
 from ._safetensors_io import open_safetensors
 
-DEFAULT_REPO_ID = "adamyhe/pydreg"
+HF_REPO_ID = "adamyhe/pydreg"
+HF_MODEL_FILENAME = "svm.model.safetensors.zst"
+HF_RF_MODEL_FILENAME = "rf.model.safetensors.zst"
+DEFAULT_REPO_ID = HF_REPO_ID
+
+
+def _cached_or_download(repo_id, filename, **hf_kwargs):
+    from huggingface_hub import hf_hub_download, try_to_load_from_cache
+
+    cached = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+    if isinstance(cached, str):
+        return cached
+    return hf_hub_download(repo_id=repo_id, filename=filename, **hf_kwargs)
 
 
 @numba.njit(cache=True)
@@ -134,11 +146,9 @@ class DREGModel:
 
     @classmethod
     def from_pretrained(
-        cls, repo_id=DEFAULT_REPO_ID, filename="svm.model.safetensors.zst", **hf_kwargs
+        cls, repo_id=DEFAULT_REPO_ID, filename=HF_MODEL_FILENAME, **hf_kwargs
     ):
-        from huggingface_hub import hf_hub_download
-
-        path = hf_hub_download(repo_id=repo_id, filename=filename, **hf_kwargs)
+        path = _cached_or_download(repo_id, filename, **hf_kwargs)
         return cls(path)
 
     def predict(self, X_raw, chunk=20_000):
@@ -207,11 +217,9 @@ class DREGPeakSplitForest:
 
     @classmethod
     def from_pretrained(
-        cls, repo_id=DEFAULT_REPO_ID, filename="rf.model.safetensors.zst", **hf_kwargs
+        cls, repo_id=DEFAULT_REPO_ID, filename=HF_RF_MODEL_FILENAME, **hf_kwargs
     ):
-        from huggingface_hub import hf_hub_download
-
-        path = hf_hub_download(repo_id=repo_id, filename=filename, **hf_kwargs)
+        path = _cached_or_download(repo_id, filename, **hf_kwargs)
         return cls(path)
 
     def predict(self, X):
