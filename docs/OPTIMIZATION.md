@@ -4,12 +4,19 @@
 change the pipeline's output: same scores, same peaks, same
 faithfully-replicated R quirks (see `docs/PLANNING.md`) — verified against
 the existing test suite and, for the peak-calling changes below, directly
-against real dREG output (0.999728 Jaccard index on test data; see
+against real dREG output (~0.999 Jaccard index on test data; see
 `docs/METHODS.md`). This document explains the resulting design choices at a
 level meant for anyone using or extending `pydreg`, not just the people who
 made them. The full chronological research log — every benchmark, every
 dead end, every number — lives in `docs/PERF_LOG.md`; this document is the
 distilled "why it's built this way" version.
+
+## End-to-end performance
+
+On an NVIDIA P100 using 16 cores, pydreg is consistently faster and uses
+less peak memory than dREG across completed paired experiments:
+
+![dREG versus pydreg walltime and peak RSS](timing_comparison.svg)
 
 ## Scoring: three backends, why NumPy (not scikit-learn) is the CPU default, and why the GPU tier is `cupy` (not `cuML`)
 

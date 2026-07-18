@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="680" viewBox="0 0 1500 680" role="img">
+<title>dreg versus pydreg walltime and peak memory</title>
+<desc>Two log-scale scatterplots. Every completed experiment is below the equality diagonal, showing lower walltime and peak memory for pydreg.</desc>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #202124; }
+.title { font-size: 22px; font-weight: 600; } .axis { font-size: 15px; }
+.tick, .note { font-size: 12px; fill: #5f6368; }
+.plot { fill: #fff; stroke: #9aa0a6; } .grid { stroke: #e3e6e8; stroke-width: 1; }
+.diagonal { stroke: #5f6368; stroke-width: 2; stroke-dasharray: 7 6; }
+.mark { fill: #2878b5; stroke: #174a6e; stroke-width: 1.5; }
+</style>
+<text x="100" y="32" class="title">Walltime</text>
+<rect x="100" y="70" width="550" height="500" class="plot"/>
+<line x1="100.0" y1="70" x2="100.0" y2="570" class="grid"/>
+<line x1="100" y1="570.0" x2="650" y2="570.0" class="grid"/>
+<text x="100.0" y="595" class="tick" text-anchor="middle">0.25</text>
+<text x="88" y="574.0" class="tick" text-anchor="end">0.25</text>
+<line x1="210.0" y1="70" x2="210.0" y2="570" class="grid"/>
+<line x1="100" y1="470.0" x2="650" y2="470.0" class="grid"/>
+<text x="210.0" y="595" class="tick" text-anchor="middle">0.5</text>
+<text x="88" y="474.0" class="tick" text-anchor="end">0.5</text>
+<line x1="320.0" y1="70" x2="320.0" y2="570" class="grid"/>
+<line x1="100" y1="370.0" x2="650" y2="370.0" class="grid"/>
+<text x="320.0" y="595" class="tick" text-anchor="middle">1</text>
+<text x="88" y="374.0" class="tick" text-anchor="end">1</text>
+<line x1="430.0" y1="70" x2="430.0" y2="570" class="grid"/>
+<line x1="100" y1="270.0" x2="650" y2="270.0" class="grid"/>
+<text x="430.0" y="595" class="tick" text-anchor="middle">2</text>
+<text x="88" y="274.0" class="tick" text-anchor="end">2</text>
+<line x1="540.0" y1="70" x2="540.0" y2="570" class="grid"/>
+<line x1="100" y1="170.0" x2="650" y2="170.0" class="grid"/>
+<text x="540.0" y="595" class="tick" text-anchor="middle">4</text>
+<text x="88" y="174.0" class="tick" text-anchor="end">4</text>
+<line x1="650.0" y1="70" x2="650.0" y2="570" class="grid"/>
+<line x1="100" y1="70.0" x2="650" y2="70.0" class="grid"/>
+<text x="650.0" y="595" class="tick" text-anchor="middle">8</text>
+<text x="88" y="74.0" class="tick" text-anchor="end">8</text>
+<line x1="100.0" y1="570.0" x2="650.0" y2="70.0" class="diagonal"/>
+<circle cx="543.9" cy="353.2" r="7" class="mark"><title>G1: dreg 4.10, pydreg 1.12</title></circle>
+<circle cx="362.1" cy="504.3" r="7" class="mark"><title>G2: dreg 1.30, pydreg 0.39</title></circle>
+<circle cx="441.4" cy="438.0" r="7" class="mark"><title>G3: dreg 2.15, pydreg 0.62</title></circle>
+<circle cx="433.0" cy="449.8" r="7" class="mark"><title>G5: dreg 2.04, pydreg 0.58</title></circle>
+<circle cx="376.3" cy="496.3" r="7" class="mark"><title>G7: dreg 1.43, pydreg 0.42</title></circle>
+<circle cx="511.6" cy="373.2" r="7" class="mark"><title>GM12878_groseq: dreg 3.35, pydreg 0.98</title></circle>
+<circle cx="429.2" cy="449.2" r="7" class="mark"><title>Jurkat_ChROseq: dreg 1.99, pydreg 0.58</title></circle>
+<circle cx="381.4" cy="484.9" r="7" class="mark"><title>Jurkat_ChROseq_1: dreg 1.47, pydreg 0.45</title></circle>
+<circle cx="358.2" cy="511.5" r="7" class="mark"><title>Jurkat_ChROseq_2: dreg 1.27, pydreg 0.38</title></circle>
+<circle cx="364.3" cy="508.6" r="7" class="mark"><title>Jurkat_PROseq: dreg 1.32, pydreg 0.38</title></circle>
+<circle cx="384.3" cy="493.3" r="7" class="mark"><title>Jurkat_leChROseq: dreg 1.50, pydreg 0.43</title></circle>
+<circle cx="361.0" cy="506.1" r="7" class="mark"><title>K562_groseq: dreg 1.29, pydreg 0.39</title></circle>
+<text x="375.0" y="632" class="axis" text-anchor="middle">dreg walltime (hours, log scale)</text>
+<text x="40" y="320.0" class="axis" text-anchor="middle" transform="rotate(-90 40 320.0)">pydreg walltime (hours, log scale)</text>
+<text x="108" y="90" class="note" text-anchor="start">Below diagonal favors pydreg</text>
+<text x="850" y="32" class="title">Peak memory</text>
+<rect x="850" y="70" width="550" height="500" class="plot"/>
+<line x1="850.0" y1="70" x2="850.0" y2="570" class="grid"/>
+<line x1="850" y1="570.0" x2="1400" y2="570.0" class="grid"/>
+<text x="850.0" y="595" class="tick" text-anchor="middle">4</text>
+<text x="838" y="574.0" class="tick" text-anchor="end">4</text>
+<line x1="987.5" y1="70" x2="987.5" y2="570" class="grid"/>
+<line x1="850" y1="445.0" x2="1400" y2="445.0" class="grid"/>
+<text x="987.5" y="595" class="tick" text-anchor="middle">8</text>
+<text x="838" y="449.0" class="tick" text-anchor="end">8</text>
+<line x1="1125.0" y1="70" x2="1125.0" y2="570" class="grid"/>
+<line x1="850" y1="320.0" x2="1400" y2="320.0" class="grid"/>
+<text x="1125.0" y="595" class="tick" text-anchor="middle">16</text>
+<text x="838" y="324.0" class="tick" text-anchor="end">16</text>
+<line x1="1262.5" y1="70" x2="1262.5" y2="570" class="grid"/>
+<line x1="850" y1="195.0" x2="1400" y2="195.0" class="grid"/>
+<text x="1262.5" y="595" class="tick" text-anchor="middle">32</text>
+<text x="838" y="199.0" class="tick" text-anchor="end">32</text>
+<line x1="1400.0" y1="70" x2="1400.0" y2="570" class="grid"/>
+<line x1="850" y1="70.0" x2="1400" y2="70.0" class="grid"/>
+<text x="1400.0" y="595" class="tick" text-anchor="middle">64</text>
+<text x="838" y="74.0" class="tick" text-anchor="end">64</text>
+<line x1="850.0" y1="570.0" x2="1400.0" y2="70.0" class="diagonal"/>
+<circle cx="1291.8" cy="420.5" r="7" class="mark"><title>G1: dreg 37.10, pydreg 9.17</title></circle>
+<circle cx="1279.1" cy="525.4" r="7" class="mark"><title>G2: dreg 34.80, pydreg 5.12</title></circle>
+<circle cx="1285.0" cy="470.8" r="7" class="mark"><title>G3: dreg 35.85, pydreg 6.93</title></circle>
+<circle cx="1284.5" cy="475.5" r="7" class="mark"><title>G5: dreg 35.75, pydreg 6.75</title></circle>
+<circle cx="1285.0" cy="503.2" r="7" class="mark"><title>G7: dreg 35.84, pydreg 5.79</title></circle>
+<circle cx="1286.1" cy="462.1" r="7" class="mark"><title>GM12878_groseq: dreg 36.03, pydreg 7.28</title></circle>
+<circle cx="1289.8" cy="478.6" r="7" class="mark"><title>Jurkat_ChROseq: dreg 36.72, pydreg 6.64</title></circle>
+<circle cx="1286.7" cy="516.0" r="7" class="mark"><title>Jurkat_ChROseq_1: dreg 36.14, pydreg 5.40</title></circle>
+<circle cx="1286.9" cy="510.2" r="7" class="mark"><title>Jurkat_ChROseq_2: dreg 36.19, pydreg 5.57</title></circle>
+<circle cx="1286.4" cy="506.8" r="7" class="mark"><title>Jurkat_PROseq: dreg 36.10, pydreg 5.68</title></circle>
+<circle cx="1287.7" cy="494.7" r="7" class="mark"><title>Jurkat_leChROseq: dreg 36.33, pydreg 6.07</title></circle>
+<circle cx="1287.2" cy="524.8" r="7" class="mark"><title>K562_groseq: dreg 36.25, pydreg 5.14</title></circle>
+<text x="1125.0" y="632" class="axis" text-anchor="middle">dreg maximum RSS (GiB, log scale)</text>
+<text x="790" y="320.0" class="axis" text-anchor="middle" transform="rotate(-90 790 320.0)">pydreg maximum RSS (GiB, log scale)</text>
+<text x="858" y="90" class="note" text-anchor="start">Below diagonal favors pydreg</text>
+</svg>

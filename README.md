@@ -7,7 +7,15 @@
 
 An inference-only Python port of [dREG](https://github.com/Danko-Lab/dREG) (Danko Lab) — detects active transcriptional regulatory elements (promoters and enhancers) from PRO-seq/GRO-seq nascent-transcription data.
 
-Given a pair of strand-specific bigWig files, `pydreg` scores every informative genomic position with a pretrained SVR model, then calls significant peaks with FDR control, mirroring the original R package's recommended `run_dREG.R` pipeline end to end.
+Given a pair of strand-specific bigWig files, pydreg scores every informative genomic position with a pretrained SVR model, then calls significant peaks with FDR control, mirroring the original R package's recommended `run_dREG.R` pipeline end to end.
+
+## Performance
+
+pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA P100 with 16 cores, we obtain about 3.4x and about one quarter the RAM usage:
+
+![dREG versus pydreg walltime and peak RSS](https://raw.githubusercontent.com/adamyhe/pydreg/main/docs/timing_comparison.svg)
+
+Peak calls from pydreg have ~0.999 Jaccard similarity with official dREG peak calls.
 
 ## Installation
 
