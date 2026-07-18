@@ -9,6 +9,7 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; f
 .diagonal { stroke: #5f6368; stroke-width: 2; stroke-dasharray: 7 6; }
 .mark { fill: #2878b5; stroke: #174a6e; stroke-width: 1.5; }
 </style>
+<rect width="1500" height="680" fill="#fff"/>
 <text x="100" y="32" class="title">Walltime</text>
 <rect x="100" y="70" width="550" height="500" class="plot"/>
 <line x1="100.0" y1="70" x2="100.0" y2="570" class="grid"/>

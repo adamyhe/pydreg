@@ -129,6 +129,7 @@ def main():
         '.diagonal { stroke: #5f6368; stroke-width: 2; stroke-dasharray: 7 6; }',
         '.mark { fill: #2878b5; stroke: #174a6e; stroke-width: 1.5; }',
         '</style>',
+        '<rect width="1500" height="680" fill="#fff"/>',
     ]
     svg.extend(panel(rows, "wall_hours_dreg", "wall_hours_pydreg", (0.25, 8), [0.25, 0.5, 1, 2, 4, 8],
                      "dreg walltime (hours, log scale)", "pydreg walltime (hours, log scale)", "Walltime", 100))
