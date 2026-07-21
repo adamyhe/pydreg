@@ -96,6 +96,7 @@ def _r_seq(from_, to, by):
 # computed once, lazily, and reused by every pmv_laplace call in the process.
 _Z_GRID = None
 _Z_WIDTHS = None
+_Z_WEIGHTS = None
 # R's mvtnorm::pmvnorm() (called with no `algorithm=` override by peak_calling.R's
 # pmvLaplace()) runs on mvtnorm's own GenzBretz(maxpts=25000, abseps=1e-3, releps=0)
 # default -- confirmed from mvtnorm's R source (R/mvt.R) and its algorithms.Rd doc.
@@ -136,7 +137,7 @@ def get_pmv_laplace_cdf_options():
 
 
 def _z_grid():
-    global _Z_GRID, _Z_WIDTHS
+    global _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS
     if _Z_GRID is None:
         z = np.concatenate(
             [
@@ -151,7 +152,18 @@ def _z_grid():
         )
         _Z_GRID = z
         _Z_WIDTHS = z[1:] - z[:-1]
-    return _Z_GRID, _Z_WIDTHS
+        # exp(-z0) underflows to exactly 0.0 in float64 for z0 >= ~745 -- true
+        # for the grid's entire top tail (10^3..10^20, 1e100; 19/290 points),
+        # input-independent since it depends only on z0. Precomputed once so
+        # pmv_laplace can skip _qmvn_adaptive entirely for those indices: any
+        # finite pi times an exact 0.0 is 0.0 exactly (IEEE 754), so this is
+        # not an approximation -- it's the same p0[i] the full computation
+        # would have produced, just without spending a QMC integration to
+        # get there. (The grid's very last point, z0=1e100, is separately
+        # never used at all -- p_max sums p0[:-1] -- but it happens to also
+        # have exp(-z0)==0.0, so no separate case is needed for it.)
+        _Z_WEIGHTS = np.exp(-z)
+    return _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS
 
 
 # SciPy's Genz-Bretz CDF integration (scipy.stats._qmvnt, used internally by
@@ -410,8 +422,11 @@ def pmv_laplace(x, cor_mat):
     Perf note: the z-integration grid and SciPy's QMC lattice construction
     (see the `_cbc_lattice` caching above) are cached across calls -- a whole
     call_peaks run shares one cor_mat, and the grid/lattice are pure
-    constants -- since this runs once per peak summit, genome-wide. The up
-    to 291 box-CDF evaluations themselves are driven by `_qmvn_adaptive`'s
+    constants -- since this runs once per peak summit, genome-wide. Of the
+    grid's 290 points, 19 have a weight (`exp(-z0)`) that underflows to
+    exactly 0.0 in float64 and are skipped without ever calling
+    `_qmvn_adaptive` (see `_z_grid()`'s comment) -- so up to 272, not 291,
+    box-CDF evaluations. Those evaluations are driven by `_qmvn_adaptive`'s
     small-start schedule (see its docstring) rather than SciPy's public
     `multivariate_normal.cdf`, which forces every evaluation through a
     ~5000-sample floor regardless of how easy the box is -- this was the
@@ -435,14 +450,21 @@ def pmv_laplace(x, cor_mat):
         if p_norm > 0.99:
             return p_norm
 
-        z, widths = _z_grid()
-        p0 = np.empty_like(z)
+        z, widths, z_weights = _z_grid()
+        p0 = np.zeros_like(z)
         for i, z0 in enumerate(z):
+            weight = z_weights[i]
+            if weight == 0.0:
+                # p0[i] = pi * weight would be 0.0 regardless of pi (any
+                # finite value times an exact IEEE 0.0 is 0.0) -- skip the
+                # QMC integration entirely rather than spend it on a result
+                # that's already determined. See _z_grid()'s comment.
+                continue
             scaled = abs_x / np.sqrt(z0)
             pi, n_calls = _qmvn_adaptive(
                 cor_mat, -scaled, scaled, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS
             )
-            p0[i] = pi * np.exp(-z0)
+            p0[i] = pi * weight
             cdf_evals += n_calls
         p_max = min(float(np.sum(widths * p0[:-1])), 1.0)
         return p_max

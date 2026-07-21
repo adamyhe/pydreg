@@ -1726,3 +1726,153 @@ depend on anything being installed system-wide. 54 tests pass (this is a
 pure dependency-metadata change, no code touched). Real-hardware
 confirmation of the fix itself still pending -- I have no GPU to verify
 end-to-end.
+
+## 2026-07-21 — real production profile confirms `pmv_laplace` is still 96% of block CPU; skip 19 provably-zero z-grid evals (bit-identical, not just noise-band)
+
+A real production run on a machine (`G6`) reported, via the 3-way block-CPU
+split added in the 2026-07-14 entry above: `7356.62s block CPU time,
+7066.77s in 64262 pmv_laplace call(s) / 12468435 CDF eval(s), 272.94s
+non-pmv find_rf_peaks, 16.91s other block overhead`. Breakdown: `pmv_seconds`
+is **96.06%** of block CPU, `find_rf_peaks_non_pmv` 3.71%, `other_block`
+0.23%. This directly answers the open question the 3-way split was built to
+answer: after everything shipped in the 2026-07-14 entries (R-fidelity
+precision fix, lattice caching, small-start adaptive sampling, numba
+Cholesky -- ~173x on the dev machine), `pmv_laplace` is *still* the
+overwhelming bottleneck on a real genome-wide run, not the RF-split/
+DataFrame-assembly candidates flagged as possible next targets in that
+entry. (Separately, `194.0` CDF evals/call -- below the "usually 291"
+ceiling -- confirmed as the expected effect of `pmv_laplace`'s existing
+`p_norm > 0.99` early exit, not a bug: roughly a third of these 64,262
+peaks are comfortably non-significant and skip the full z-grid entirely.)
+
+**New finding, from re-reading `pmv_laplace`'s z-grid loop
+(`stats.py:438-448`) with this profile in hand**: every one of the grid's
+290 points calls the expensive `_qmvn_adaptive` QMC integration
+unconditionally, then multiplies the result by `exp(-z0)` and (separately)
+discards the very last point entirely (`p0[:-1]` in the final sum). But
+`exp(-z0)` underflows to **exactly** `0.0` in float64 once `z0 >= ~745` --
+and the grid's own top tail (`10^3` through `10^20`, plus the always-unused
+`1e100`) is entirely inside that zone. Checked directly against the real
+grid (`_z_grid()`): **19 of 290 points (6.55%)** have `exp(-z0) == 0.0`
+exactly, and that set already includes the separately-unused last point --
+no extra special-casing needed for it. This is not a precision/tolerance
+argument like every other `pmv_laplace` change in this log -- IEEE 754
+guarantees `0.0 * finite_value == 0.0` exactly, so `p0[i]` at these indices
+is already provably `0.0` regardless of what `_qmvn_adaptive` would have
+returned. Skipping the call entirely and hardcoding `p0[i] = 0.0` there
+produces the literal same `p_max`, not an approximation of it.
+
+**Verification** (stronger than the usual "within QMC noise" bar, since
+this claims exact equivalence): reproduced the pre-change loop and the
+post-change loop as standalone functions sharing one *seeded* `rng` object
+per case, confirmed the shared-rng draws before the skipped tail are
+identical in both versions (the 19 skippable indices are the grid's last
+19 entries, so skipping them can't perturb any rng draw consumed by an
+earlier, still-computed index), then ran both against 5 random order-5
+`cor_mat`/`x` cases: **all 5 produced bit-identical `p_max` values**
+(`old==new` `True` in every case, not just close). All 58 tests pass
+afterward.
+
+**Shipped**: `_z_grid()` now also caches `_Z_WEIGHTS = np.exp(-z)`
+alongside the existing `z`/`widths` cache (three-way return, one call site
+updated). `pmv_laplace`'s z-grid loop checks `weight == 0.0` before calling
+`_qmvn_adaptive` and `continue`s (leaving `p0[i]` at its `np.zeros_like`
+default of `0.0`) rather than spending a QMC integration on an
+already-determined answer.
+
+**Measured** (4 representative cases, 30 reps each, this machine, comparing
+against a standalone reference implementing the exact pre-change loop):
+
+| case | old ms/call | new ms/call | speedup |
+|---|---|---|---|
+| hard_mid_prob | 21.32 | 17.42 | 1.22x |
+| small_x | 16.89 | 15.83 | 1.07x |
+| wide_x | 18.73 | 17.48 | 1.07x |
+| asymmetric | 16.90 | 16.24 | 1.04x |
+
+Smaller than most other wins in this log (expected -- only 19/290 grid
+points are affected, and a chunk of real calls already skip the whole grid
+via the `p_norm > 0.99` early exit), and noisier across repeated runs on
+this shared dev machine than the clean ~6.5% eval-count reduction would
+imply on its own -- but it's free: zero risk, bit-identical output, no
+tolerance to justify. At `pmv_laplace`'s measured 96% share of block CPU on
+the G6 production run, even this modest per-call win is a real few-percent
+reduction in total peak-calling wall time for the cost of a null check.
+
+## 2026-07-21 — investigated (and rejected) replacing the z-grid with an analytic/deterministic quadrature; found a real, pre-existing discretization bias in R's own grid along the way
+
+Asked directly: is there an analytic alternative to `pmv_laplace`'s two
+levels of numerical simulation (the QMC box-probability kernel, and the
+290-point z-grid Riemann sum around it)? Worth separating the two questions
+-- they have very different answers.
+
+**Inner problem (the box probability itself): no closed form exists for
+d>=3.** This is a well-established fact in the numerical-methods literature
+(Genz & Bretz), not a gap specific to this port -- d=1 is `erf`, d=2 has a
+closed form (SciPy already uses one internally, `_bvnu`, for reduced
+sub-problems inside its own kernel), but d>=3 fundamentally requires
+numerical integration. This is exactly why R's `mvtnorm` and SciPy both use
+randomized QMC for it; nothing to fix or improve here.
+
+**Outer problem (mixing over the Laplace/Exponential variable): a
+principled deterministic quadrature exists, and it's *more accurate* than
+R's grid -- which turned out to be the actual finding worth recording.**
+`pmv_laplace` computes `integral_0^inf exp(-z) * P(box(x/sqrt(z))) dz` via
+R's literal 290-point ad hoc log-then-linear grid (a hand-rolled Riemann
+sum, not derived from quadrature theory). That integral has weight
+`exp(-z)` on `[0, inf)` -- textbook Gauss-Laguerre territory
+(`numpy.polynomial.laguerre.laggauss`), which in principle needs far fewer
+evaluation points than 290 to converge.
+
+Tried it directly (`p_gauss_laguerre`, prototype only, not shipped):
+**doesn't converge reliably as a naive drop-in.** At N up to 48 nodes, 3 of
+4 representative cases converged among themselves but to a value clearly
+different from R's grid; one case (`small_x`) was still visibly rising with
+N, not yet converged at all. Root cause: standard Gauss-Laguerre nodes are
+placed at fixed positions calibrated to the weight function alone, with no
+awareness of where a *particular* box's probability actually transitions
+from ~1 to ~0 (which depends on `|x|` and `cor_mat`, varies per peak, and
+can be far outside the fixed nodes' effective range for a given N). Making
+this converge reliably would need per-call adaptive node rescaling to the
+box's own characteristic scale -- a real numerical-methods sub-project, not
+a one-line swap.
+
+**The more important finding came from isolating *why* Gauss-Laguerre
+disagreed with R's grid instead of assuming quadrature error was the whole
+story.** Computed the *true* value of the integral independently (adaptive
+`scipy.integrate.quad`, no grid, no randomness) and separately computed
+R's own 290-point grid with **QMC noise removed entirely** -- substituting
+the exact high-precision `scipy.stats.multivariate_normal.cdf` for the
+inner box probability instead of the stochastic `_qmvn_adaptive` kernel,
+which isolates the grid's own discretization error from any randomness:
+
+| case | true integral (`quad`) | R's 290-pt grid, no QMC noise | bias |
+|---|---|---|---|
+| hard_mid_prob | 0.3157 | 0.3386 | +7.3% |
+| wide_x | 0.9419 | 0.9916 | +5.3% |
+| small_x | 0.0361 | 0.0528 | **+46.1%** |
+
+**R's own z-grid has a real, large, case-dependent discretization bias,
+independent of any randomness.** This is not a QMC artifact (confirmed by
+removing QMC entirely) and not a pydreg translation bug (confirmed by
+replicating R's exact literal grid formula, `peak_calling.R`'s
+`pmvLaplace`, verbatim). It's inherent to the original R algorithm's own
+hand-rolled grid, baked into every p-value dREG has ever produced with it,
+including whatever the pretrained model's calibration and every downstream
+significance threshold were built against.
+
+**Conclusion: not adoptable, for the same reason the `mean(p.max, p.min)`
+mis-binding bug earlier in this file is preserved rather than fixed.** A
+correctly-converged deterministic quadrature would be *more accurate* than
+R's grid in an absolute sense, but that's exactly the problem -- it would
+make pydreg's p-values diverge from what real dREG actually computes, not
+converge to them. This is a fundamentally different situation from the
+CBC-vs-Korobov lattice question (2026-07-14 Phase B0 entry above), which
+was validated as agreeing with R's method within ordinary QMC noise before
+being accepted; here the discrepancy is large, structural, and has nothing
+to do with noise. Given the project's core validation metric is agreement
+with real dREG (0.999728 Jaccard index), adopting a more "correct" method
+here would actively hurt that number, not help it. Closing this
+investigation with no code shipped -- recorded so a future session doesn't
+re-derive the same dead end, and doesn't mistake R's grid bias for a bug
+needing a fix rather than a quirk needing preservation.
