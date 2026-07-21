@@ -11,7 +11,7 @@ Given a pair of strand-specific bigWig files, pydreg scores every informative ge
 
 ## Performance
 
-pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA P100 with 16 cores, we obtain about a 3.4x speed-up with one quarter the RAM usage:
+pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA P100 with 16 cores, we obtain about a 3.4x speed-up and a 4-7x reduction in peak RSS:
 
 ![dREG versus pydreg walltime and peak RSS](https://raw.githubusercontent.com/adamyhe/pydreg/main/docs/timing_comparison.svg)
 

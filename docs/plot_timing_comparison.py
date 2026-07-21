@@ -42,6 +42,20 @@ def read_tool(root, tool):
     return runs
 
 
+def read_existing(path):
+    if not path.exists():
+        return {}
+    with path.open(newline="") as handle:
+        rows = csv.DictReader(handle, delimiter="\t")
+        return {
+            row["experiment"]: {
+                key: value if key == "experiment" else float(value)
+                for key, value in row.items()
+            }
+            for row in rows
+        }
+
+
 def point(value, low, high, start, length, invert=False):
     fraction = (math.log(value) - math.log(low)) / (math.log(high) - math.log(low))
     if invert:
@@ -99,9 +113,9 @@ def main():
     dreg = read_tool(root, "dreg")
     pydreg = read_tool(root, "pydreg")
     names = sorted(dreg.keys() & pydreg.keys())
-    rows = []
+    rows_by_name = read_existing(root / "timing_comparison.tsv")
     for name in names:
-        rows.append({
+        rows_by_name[name] = {
             "experiment": name,
             "wall_hours_dreg": dreg[name]["wall_seconds"] / 3600,
             "wall_hours_pydreg": pydreg[name]["wall_seconds"] / 3600,
@@ -109,11 +123,15 @@ def main():
             "rss_gib_pydreg": pydreg[name]["rss_kb"] / 1024**2,
             "wall_speedup": dreg[name]["wall_seconds"] / pydreg[name]["wall_seconds"],
             "rss_reduction": dreg[name]["rss_kb"] / pydreg[name]["rss_kb"],
-        })
+        }
+    rows = [rows_by_name[name] for name in sorted(rows_by_name)]
+
+    if not rows:
+        raise SystemExit("No valid paired timing data found")
 
     fields = list(rows[0])
     with (root / "timing_comparison.tsv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
