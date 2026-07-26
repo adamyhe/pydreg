@@ -21,6 +21,18 @@ def main(argv=None):
         "device, otherwise numpy. An explicit choice raises if that backend "
         "isn't usable, rather than silently falling back.",
     )
+    parser.add_argument(
+        "--svr-model",
+        default=None,
+        help="local SVR scorer model file (.safetensors or .safetensors.zst); "
+        "omitted uses the pretrained Hugging Face weight",
+    )
+    parser.add_argument(
+        "--rf-model",
+        default=None,
+        help="local random-forest peak-splitter model file (.safetensors or "
+        ".safetensors.zst); omitted uses the pretrained Hugging Face weight",
+    )
     parser.add_argument("--smoothwidth", type=int, default=4)
     parser.add_argument("--pv-adjust", default="fdr")
     parser.add_argument("--pv-threshold", type=float, default=0.05)
@@ -96,6 +108,8 @@ def main(argv=None):
         args.minus_bw,
         args.out_prefix,
         backend_name=backend_name,
+        svr_model_path=args.svr_model,
+        rf_model_path=args.rf_model,
         smoothwidth=args.smoothwidth,
         pv_adjust=args.pv_adjust,
         pv_threshold=args.pv_threshold,

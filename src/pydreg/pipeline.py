@@ -130,11 +130,27 @@ def _resolve_query_chunk(scorer_backend, query_chunk=None):
     return backend.DEFAULT_QUERY_CHUNK[scorer_backend]
 
 
+def _load_models(svr_model_path=None, rf_model_path=None):
+    model = (
+        DREGModel(svr_model_path)
+        if svr_model_path is not None
+        else DREGModel.from_pretrained()
+    )
+    rf_model = (
+        DREGPeakSplitForest(rf_model_path)
+        if rf_model_path is not None
+        else DREGPeakSplitForest.from_pretrained()
+    )
+    return model, rf_model
+
+
 def run(
     plus_bw_path,
     minus_bw_path,
     out_prefix,
     backend_name=None,
+    svr_model_path=None,
+    rf_model_path=None,
     smoothwidth=4,
     pv_adjust="fdr",
     pv_threshold=0.05,
@@ -150,17 +166,17 @@ def run(
     """Runs the full dREG peak-calling pipeline on a pair of bigWig files
     and (by default) writes the standard output set alongside `out_prefix`.
     backend_name: None ("auto") or one of "cupy"/"sklearn"/"numpy" --
-    see pydreg.backend. progress: show tqdm progress bars for the
-    informative-position scan, position scoring, and peak calling (off by
-    default for library use; pydreg.cli enables it; auto-hidden if stdout
-    isn't a terminal regardless). Returns a dict with
-    dense_infp/raw_peak/peak_bed/min_score for programmatic use regardless
-    of write_outputs."""
+    see pydreg.backend. svr_model_path/rf_model_path: optional local
+    .safetensors[.zst] model files; omitted paths use the pretrained Hugging
+    Face weights. progress: show tqdm progress bars for the informative-
+    position scan, position scoring, and peak calling (off by default for
+    library use; pydreg.cli enables it; auto-hidden if stdout isn't a terminal
+    regardless). Returns a dict with dense_infp/raw_peak/peak_bed/min_score
+    for programmatic use regardless of write_outputs."""
     bw_plus = io.open_bigwig(plus_bw_path)
     bw_minus = io.open_bigwig(minus_bw_path)
 
-    model = DREGModel.from_pretrained()
-    rf_model = DREGPeakSplitForest.from_pretrained()
+    model, rf_model = _load_models(svr_model_path, rf_model_path)
     scorer = backend.build_scorer(model, backend_name, cupy_sv_chunk=cupy_sv_chunk)
     chunk = _resolve_query_chunk(scorer.backend, query_chunk)
     logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)

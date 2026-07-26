@@ -39,6 +39,8 @@ If you want the Python API (`from pydreg import pipeline`, see below) available 
 
 Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/pydreg`](https://huggingface.co/adamyhe/pydreg) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub`.
 
+If you already have compatible exported model files, pass them with `--svr-model /path/to/svm.model.safetensors.zst` and `--rf-model /path/to/rf.model.safetensors.zst`, or use `pipeline.run(..., svr_model_path=..., rf_model_path=...)` from Python.
+
 ## Usage
 
 ### CLI
@@ -61,6 +63,8 @@ Options:
 | `--peak-calling-block-width N`        | `100`            | Candidate broad peaks handed to each peak-calling worker per task; smaller blocks improve load balancing on uneven peak sizes. Tune alongside `--peak-calling-cores`.                                                                                                                                                                         |
 | `--query-chunk N`                     | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`). Pure batching — does not change scores.                                                                                                                                                                                              |
 | `--cupy-sv-chunk N`                   | `32768`          | Support vectors (of 605,187) evaluated per GPU kernel/GEMM call for the `cupy` backend specifically. The main lever for trading GPU memory for fewer, larger, better-amortized kernel launches — real headroom varies by card, so sweep a few values on your target GPU (see `docs/OPTIMIZATION.md`). Pure batching — does not change scores. |
+| `--svr-model PATH`                    | pretrained       | Local SVR scorer model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                                           |
+| `--rf-model PATH`                     | pretrained       | Local random-forest peak-splitter model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                           |
 | `--no-progress`                       | off              | Disable tqdm progress bars (auto-hidden anyway when stdout isn't a terminal).                                                                                                                                                                                                                                                                 |
 | `-v`, `--verbose`                     | off              | Log progress at INFO level.                                                                                                                                                                                                                                                                                                                   |
 
@@ -79,7 +83,14 @@ Options:
 ```python
 from pydreg import pipeline
 
-result = pipeline.run("plus.bw", "minus.bw", "out_prefix", backend_name=None)
+result = pipeline.run(
+    "plus.bw",
+    "minus.bw",
+    "out_prefix",
+    backend_name=None,
+    svr_model_path=None,
+    rf_model_path=None,
+)
 # result: {"dense_infp": ..., "raw_peak": ..., "peak_bed": ..., "min_score": ...}
 ```
 

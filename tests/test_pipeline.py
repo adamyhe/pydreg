@@ -149,6 +149,74 @@ def test_resolve_query_chunk_uses_backend_specific_default():
     assert pipeline._resolve_query_chunk("numpy", query_chunk=123) == 123
 
 
+def test_load_models_uses_local_paths_when_provided(monkeypatch):
+    calls = []
+
+    class LocalSVR:
+        def __init__(self, path):
+            calls.append(("svr-local", path))
+
+        @classmethod
+        def from_pretrained(cls):
+            calls.append(("svr-pretrained", None))
+            return cls("downloaded-svr")
+
+    class LocalRF:
+        def __init__(self, path):
+            calls.append(("rf-local", path))
+
+        @classmethod
+        def from_pretrained(cls):
+            calls.append(("rf-pretrained", None))
+            return cls("downloaded-rf")
+
+    monkeypatch.setattr(pipeline, "DREGModel", LocalSVR)
+    monkeypatch.setattr(pipeline, "DREGPeakSplitForest", LocalRF)
+
+    model, rf_model = pipeline._load_models("svr.safetensors.zst", "rf.safetensors.zst")
+
+    assert isinstance(model, LocalSVR)
+    assert isinstance(rf_model, LocalRF)
+    assert calls == [
+        ("svr-local", "svr.safetensors.zst"),
+        ("rf-local", "rf.safetensors.zst"),
+    ]
+
+
+def test_load_models_keeps_pretrained_default(monkeypatch):
+    calls = []
+
+    class LocalSVR:
+        def __init__(self, path):
+            calls.append(("svr-local", path))
+
+        @classmethod
+        def from_pretrained(cls):
+            calls.append(("svr-pretrained", None))
+            return cls("downloaded-svr")
+
+    class LocalRF:
+        def __init__(self, path):
+            calls.append(("rf-local", path))
+
+        @classmethod
+        def from_pretrained(cls):
+            calls.append(("rf-pretrained", None))
+            return cls("downloaded-rf")
+
+    monkeypatch.setattr(pipeline, "DREGModel", LocalSVR)
+    monkeypatch.setattr(pipeline, "DREGPeakSplitForest", LocalRF)
+
+    pipeline._load_models()
+
+    assert calls == [
+        ("svr-pretrained", None),
+        ("svr-local", "downloaded-svr"),
+        ("rf-pretrained", None),
+        ("rf-local", "downloaded-rf"),
+    ]
+
+
 def test_pipeline_runs_end_to_end_on_synthetic_signal(synthetic_bigwig_pair, tmp_path, dreg_model, rf_model):
     plus_path, minus_path = synthetic_bigwig_pair
     out_prefix = str(tmp_path / "out")
