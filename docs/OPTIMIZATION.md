@@ -18,12 +18,12 @@ less peak memory than dREG across completed paired experiments:
 
 ![dREG versus pydreg walltime and peak RSS](timing_comparison.svg)
 
-## Scoring: three backends, why NumPy (not scikit-learn) is the CPU default, and why the GPU tier is `cupy` (not `cuML`)
+## Scoring: four backends, why NumPy (not scikit-learn) is the CPU default, and why the GPU tiers are `cupy`/`mlx` (not `cuML`)
 
 Evaluating the pretrained SVR (605,187 support vectors) against every
 informative position is dominated by one computation: an RBF kernel matrix
-between the query positions and every support vector. `pydreg` offers three
-backends for this (`--backend {auto,cupy,sklearn,numpy}`):
+between the query positions and every support vector. `pydreg` offers four
+backends for this (`--backend {auto,cupy,mlx,sklearn,numpy}`):
 
 - **NumPy** (default on any machine without a usable GPU): computes the
   kernel matrix as one chunked matrix multiplication
@@ -34,6 +34,11 @@ backends for this (`--backend {auto,cupy,sklearn,numpy}`):
 - **cupy** (`pydreg[gpu]`, Linux + NVIDIA only, auto-selected whenever a
   usable CUDA device is present): the exact same chunked-matmul formula as
   the NumPy tier, run directly on a CuPy device array.
+- **mlx** (`pydreg[mlx]`, macOS + Apple Silicon only, auto-selected
+  whenever a usable Metal GPU is present and cupy isn't applicable): the
+  same chunked-matmul formula again, this time on an MLX device array
+  running on the machine's Metal GPU. See "Apple Silicon: the `mlx` tier"
+  below.
 
 scikit-learn is available (`--backend sklearn`) but is **never
 auto-selected on CPU** — it's measured at ~14-15x slower than the NumPy tier
@@ -282,6 +287,72 @@ or a crash), with no GPU available here to catch it. This risk (on top of
 the Pascal incompatibility) is a big part of why `cuml` was dropped
 entirely rather than kept around as a float32-patched second GPU tier.
 
+### Apple Silicon: the `mlx` tier
+
+`pydreg.backend._build_mlx_predict_fn` is the Apple Silicon counterpart to
+`_build_cupy_predict_fn` above — the same near-verbatim port of
+`DREGModel.predict`'s chunked RBF dual-sum formula, run on an
+[MLX](https://github.com/ml-explore/mlx) device array (Apple's own array
+framework, targeting the machine's Metal GPU) instead of a CuPy one. Same
+motivation as `cupy`: it's the *same formula*, not a routed-through
+third-party SVM library, so there's no independent kernel-evaluation
+codebase that could silently disagree with the NumPy reference — just a
+different array backend for identical math. Developed and validated
+end-to-end on real Apple M4 hardware.
+
+**float32 isn't a choice here — it's the only option.** Metal has no
+float64 support at all: a plain float64 matmul on an MLX GPU array raises
+`ValueError: float64 is not supported on the GPU`, confirmed directly on
+real hardware. This differs from `cupy`, where float32 was a deliberate
+speed tradeoff justified by tracing Rgtsvm's own training precision back to
+its float32 ceiling (see above) — for `mlx`, double precision was never on
+the table to begin with. One consequence: unlike `cupy`'s `y_scaled` (a
+float64 array accumulated entirely on-device), MLX has nowhere on-device to
+hold a float64 accumulator, so `_build_mlx_predict_fn` pulls each chunk's
+small `(query_chunk,)`-sized result back to a host NumPy float64 array and
+accumulates there instead — a cheap transfer (one short vector per
+iteration, not the full `(query_chunk, sv_chunk)` kernel matrix), giving
+the same cross-chunk summation insurance `cupy`'s on-device accumulator
+does, just on the host.
+
+**Fusion needed no fallback.** The elementwise glue between the two GEMMs
+is wrapped in `mx.compile`, MLX's own supported graph-fusion mechanism —
+the direct counterpart to `cupy.ElementwiseKernel` above. Unlike the cupy
+tier, which had to abandon its first attempt (`cp.fuse()`) after it produced
+a real divergence on actual hardware, `mx.compile` handled this function's
+actual call pattern correctly the first time, including the exact
+shape-mismatch case that broke `cp.fuse()` (`n_sv=605,187` isn't divisible
+by `sv_chunk`, so the last chunk is a smaller, different shape than the
+rest) — confirmed on real M4 hardware, not just assumed. So there was no
+need to drop down to a hand-written custom Metal kernel
+(`mx.fast.metal_kernel`) the way the cupy tier dropped from `cp.fuse()` to
+`ElementwiseKernel`. `gamma` is still closed over as a plain Python float
+rather than passed as a traced `mx.compile` argument, matching
+`ElementwiseKernel`'s literal-gamma approach for the same reason (avoiding
+any dtype-promotion ambiguity between a Python scalar and the float32
+arrays it multiplies) — and since Metal has no float64 path to silently
+fall back into, a clean float32 result here is itself confirmation the
+promotion behaved as intended, not just a hope.
+
+**Confirmed on real hardware, against the real pretrained model** (605,187
+SVs x 360 features): max-abs-diff against the NumPy float64 reference was
+~1.1e-4 on a small batch and ~3.4e-4 at a 4096-query batch — comfortably
+inside `MLX_SMOKE_TEST_ATOL` (`1e-3`, reusing `CUPY_SMOKE_TEST_ATOL`'s
+value, since both tiers hit the identical float32 catastrophic-cancellation
+limitation in the identical expanded-form squared-distance formula — see
+above), and the same order of magnitude as `cupy`'s own measured
+2.3e-4–5.4e-4 range on real NVIDIA hardware. Speed: ~19x faster than the
+NumPy tier at that same 4096-query batch size on an Apple M4 (1.19s vs
+23.1s per call, warm/post-compile). See `docs/PERF_LOG.md`'s 2026-08-10
+entry for the full numbers.
+
+Not yet investigated: real `--mlx-sv-chunk` memory-headroom tuning. MLX's
+unified memory means its actual constraint (shared with the whole OS, not a
+dedicated VRAM pool the way a discrete NVIDIA GPU has) is a different shape
+than `cupy`'s, so the sv_chunk tuning guidance in "Speeding it up" above
+doesn't necessarily transfer as-is — worth its own investigation if this
+tier's real-world memory behavior ever becomes a practical concern.
+
 ## Batching
 
 Each backend gets its own default query-chunk size
@@ -299,6 +370,11 @@ sized for that backend's actual bottleneck:
   the kernel matrix internally in C++ without ever materializing the whole
   thing) — so it reuses NumPy's conservative default. Unvalidated on
   real GPU memory; likely worth tuning up once tested on real hardware.
+- **mlx**: same shape as `cupy` (materializes the `(query_chunk, sv_chunk)`
+  intermediate directly), so it reuses the same default too. Real headroom
+  is unswept here as well — see "Apple Silicon: the `mlx` tier" above for
+  why `cupy`'s tuning numbers don't necessarily transfer given MLX's
+  unified-memory model.
 
 ## Overlapping feature extraction with scoring
 

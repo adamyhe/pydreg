@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.2.6"
+version = "0.2.7"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -86,6 +86,15 @@ dREG = "pydreg.cli:main"
 # docs/PERF_LOG.md.
 gpu = [
   "cupy-cuda12x[ctk]>=13.0; sys_platform == 'linux' and platform_machine in 'x86_64 aarch64'",
+]
+# Backs the "mlx" backend tier (pydreg.backend._build_mlx_predict_fn) --
+# Apple Silicon GPU acceleration via Apple's own MLX array framework, see
+# docs/OPTIMIZATION.md. mlx's PyPI wheels only target macOS on Apple
+# Silicon (no Linux/Intel/Windows build), hence the platform marker --
+# `uv sync --extra mlx` simply omits this package everywhere else rather
+# than failing, same pattern as the `gpu` extra above.
+mlx = [
+  "mlx>=0.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [dependency-groups]

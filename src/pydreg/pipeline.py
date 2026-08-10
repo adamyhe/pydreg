@@ -156,6 +156,7 @@ def run(
     pv_threshold=0.05,
     query_chunk=None,
     cupy_sv_chunk=None,
+    mlx_sv_chunk=None,
     peak_calling_cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
@@ -165,7 +166,7 @@ def run(
 ):
     """Runs the full dREG peak-calling pipeline on a pair of bigWig files
     and (by default) writes the standard output set alongside `out_prefix`.
-    backend_name: None ("auto") or one of "cupy"/"sklearn"/"numpy" --
+    backend_name: None ("auto") or one of "cupy"/"mlx"/"sklearn"/"numpy" --
     see pydreg.backend. svr_model_path/rf_model_path: optional local
     .safetensors[.zst] model files; omitted paths use the pretrained Hugging
     Face weights. progress: show tqdm progress bars for the informative-
@@ -177,7 +178,9 @@ def run(
     bw_minus = io.open_bigwig(minus_bw_path)
 
     model, rf_model = _load_models(svr_model_path, rf_model_path)
-    scorer = backend.build_scorer(model, backend_name, cupy_sv_chunk=cupy_sv_chunk)
+    scorer = backend.build_scorer(
+        model, backend_name, cupy_sv_chunk=cupy_sv_chunk, mlx_sv_chunk=mlx_sv_chunk
+    )
     chunk = _resolve_query_chunk(scorer.backend, query_chunk)
     logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)
 

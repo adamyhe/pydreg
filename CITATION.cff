@@ -1,0 +1,79 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata below.
+  pydreg is an inference-only port of dREG (Danko Lab) -- please also
+  cite the original dREG papers listed under `references` below (and in
+  the README's "Citation" section) to credit the underlying method.
+type: software
+title: pydreg
+version: 0.2.7
+date-released: '2026-08-10'
+abstract: >-
+  An inference-only Python port of dREG (Danko Lab) for detecting active
+  transcriptional regulatory elements (promoters and enhancers) from
+  PRO-seq/GRO-seq nascent-transcription data.
+authors:
+  - given-names: Adam Youlin
+    family-names: He
+    email: adamyhe@gmail.com
+license: GPL-3.0-only
+repository-code: https://github.com/adamyhe/pydreg
+url: https://github.com/adamyhe/pydreg
+keywords:
+  - bioinformatics
+  - bigwig
+  - genomics
+  - transcriptional regulation
+  - pro-seq
+  - gro-seq
+  - peak calling
+  - svm
+references:
+  - type: article
+    title: Identification of active transcriptional regulatory elements from GRO-seq data
+    authors:
+      - given-names: Charles G
+        family-names: Danko
+      - given-names: Stephanie L
+        family-names: Hyland
+      - given-names: Leighton J
+        family-names: Core
+      - given-names: Andre L
+        family-names: Martins
+      - given-names: Colin T
+        family-names: Waters
+      - given-names: Hyung Won
+        family-names: Lee
+      - given-names: Vivian G
+        family-names: Cheung
+      - given-names: W Lee
+        family-names: Kraus
+      - given-names: John T
+        family-names: Lis
+      - given-names: Adam
+        family-names: Siepel
+    journal: Nature Methods
+    volume: '12'
+    issue: '5'
+    start: '433'
+    end: '438'
+    year: 2015
+    doi: 10.1038/nmeth.3329
+  - type: article
+    title: Identification of regulatory elements from nascent transcription using dREG
+    authors:
+      - given-names: Zhong
+        family-names: Wang
+      - given-names: Tinyi
+        family-names: Chu
+      - given-names: Lauren A
+        family-names: Choate
+      - given-names: Charles G
+        family-names: Danko
+    journal: Genome Research
+    volume: '29'
+    issue: '2'
+    start: '293'
+    end: '303'
+    year: 2018
+    doi: 10.1101/gr.238279.118

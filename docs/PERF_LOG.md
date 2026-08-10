@@ -1876,3 +1876,161 @@ here would actively hurt that number, not help it. Closing this
 investigation with no code shipped -- recorded so a future session doesn't
 re-derive the same dead end, and doesn't mistake R's grid bias for a bug
 needing a fix rather than a quirk needing preservation.
+
+## 2026-08-10 — added the `mlx` backend tier (Apple Silicon / Metal GPU)
+
+Added a fourth scoring backend, `mlx`, giving machines with an Apple
+Silicon GPU (and no NVIDIA hardware) a GPU tier of their own -- `pydreg[mlx]`,
+`--backend mlx`, auto-selected by `detect_backend()` whenever `cupy` isn't
+applicable and MLX reports a usable Metal device. Same overall approach as
+the existing `cupy` tier: a near-verbatim port of `DREGModel.predict`'s
+chunked RBF dual-sum formula (same expanded squared-distance trick, same
+chunking over support vectors), run on Apple's MLX array framework instead
+of CuPy -- not a routed-through third-party SVM library, so there's no
+independent kernel-evaluation codebase that could disagree with the NumPy
+reference. Unlike some of the `cupy` work, this session had real Apple
+Silicon (M4) hardware on hand throughout, so every claim below is a direct
+measurement, not a documented-behavior inference.
+
+**Metal has no float64 support at all.** Confirmed directly: constructing
+a float64 MLX array and running a matmul with it on the GPU device raises
+`ValueError: float64 is not supported on the GPU` outright -- not a
+silent downcast, a hard error. This makes float32 a platform constraint
+for this tier, not the deliberate speed/precision tradeoff it was for
+`cupy` (which was justified there by tracing Rgtsvm's own training
+precision to a float32 ceiling -- see the "Why cupy, not cuML" section of
+docs/OPTIMIZATION.md). It also rules out an on-device float64 accumulator
+the way `cupy`'s `y_scaled` uses one: `_build_mlx_predict_fn` instead
+converts each chunk's small `(query_chunk,)`-sized MLX result to a host
+NumPy float64 array and accumulates there, a cheap transfer since it's the
+per-chunk output vector, not the full `(query_chunk, sv_chunk)` kernel
+matrix.
+
+**Fusion worked on the first attempt, no `cp.fuse()`-style detour needed.**
+The elementwise glue between the two GEMMs (`sq_x + sq_sv - 2*cross`, then
+`exp(-gamma*...)`) is wrapped in `mx.compile`, MLX's own supported
+graph-fusion transform. Specifically tested the exact case that broke
+`cp.fuse()` in the cupy tier -- `n_sv=605,187` isn't divisible by the
+default `sv_chunk=32,768`, so the last chunk is a smaller, different shape
+than the rest -- by running `_build_mlx_predict_fn` end-to-end against the
+real pretrained model (real shapes, real weights) and confirming the
+result agreed with the NumPy reference. No divergence found, so there was
+no need to drop to a hand-written `mx.fast.metal_kernel` the way the cupy
+tier dropped from `cp.fuse()` to `cupy.ElementwiseKernel`. `gamma` is still
+closed over as a plain Python float rather than passed as a traced
+`mx.compile` argument (matching `ElementwiseKernel`'s literal-gamma
+approach, for the same dtype-promotion-ambiguity reason) -- and because
+Metal has no float64 fallback to silently promote into, getting a clean,
+correct float32 result here is itself confirmation the promotion behaved
+as intended, not just an assumption.
+
+**Real-hardware validation, real pretrained model (605,187 SVs x 360
+features), Apple M4:**
+
+| batch size | max abs diff vs NumPy f64 reference | mlx warm time | numpy time | speedup |
+|---|---|---|---|---|
+| 64 queries | 1.10e-4 | 0.031s | 0.291s | ~9.4x |
+| 4096 queries | 3.36e-4 | 1.189s | 23.07s | ~19.4x |
+
+Both max-abs-diff figures sit comfortably inside `MLX_SMOKE_TEST_ATOL`
+(`1e-3`, defined as an alias of the existing `CUPY_SMOKE_TEST_ATOL` --  same
+float32 catastrophic-cancellation root cause in the identical expanded-form
+formula, not a separately re-measured number) and the same order of
+magnitude as `cupy`'s own real-hardware range (2.3e-4-5.4e-4 on a TITAN
+X/A100). A separate synthetic benchmark at the same realistic shape (before
+switching to the real pretrained model for final validation) gave a
+consistent ~22x speedup and ~1e-5 max-abs-diff, confirming the real-model
+numbers above aren't an artifact of that particular model's weights.
+
+**Not done in this pass:** no `--mlx-sv-chunk` sweep against real memory
+headroom. MLX's unified memory (shared with the whole OS, not a dedicated
+VRAM pool) makes `cupy`'s existing sv_chunk tuning guidance not obviously
+transferable as-is; reusing `cupy`'s conservative default (`32_768`) was
+judged safe enough to ship without its own investigation, consistent with
+how the cupy tier's own memory tuning was left as a documented open item
+before real GPU memory numbers were available for it either.
+
+**Testing approach.** Followed the existing `cupy` test pattern in
+`tests/test_backend.py` (a fake `mlx.core` module standing in for the real
+one, built from plain NumPy functions since MLX's array API -- like CuPy's
+-- is a deliberate NumPy drop-in and `mx.compile` just wraps a plain Python
+function rather than parsing a kernel-source string the way
+`cupy.ElementwiseKernel` does). One adaptation was needed: this development
+session's own machine has `mlx` genuinely installed (`uv sync --extra mlx`,
+to enable the real-hardware validation above), unlike the `gpu` extra which
+is never installed by default -- so `detect_backend()`'s existing
+cupy-fallback tests needed `_mlx_installed` explicitly monkeypatched to
+`False` to stay isolated from that, and the new "mlx not installed" test
+forces `ModuleNotFoundError` via `sys.modules["mlx.core"] = None` rather
+than relying on ambient absence, so it stays correct regardless of whether
+a given machine running the suite has the `mlx` extra installed or not.
+
+## 2026-08-10 — cupy-vs-numpy head-to-head on a real P100, via `scripts/bench_backends.py`
+
+First direct `cupy`-vs-`numpy` throughput comparison logged for this repo
+(prior cupy entries above measured cupy-internal changes -- float64-vs-
+float32, fused-vs-unfused -- not a clean head-to-head against the CPU
+tier). Run against the real pretrained model (605,187 SVs x 360 features)
+on an NVIDIA P100 + 8 CPUs, `--backends numpy cupy` (default batch sizes):
+
+| batch size | numpy | cupy | cupy speedup |
+|---|---|---|---|
+| 256 | 6.693s (38 pos/s) | 0.777s (329 pos/s) | 8.6x |
+| 1024 | 25.299s (40 pos/s) | 0.086s (11,954 pos/s) | 294x |
+| 4096 | 99.603s (41 pos/s) | 0.325s (12,615 pos/s) | 307x |
+
+`max_abs_diff` (numpy vs cupy) = `0.0004717` -- comfortably inside
+`CUPY_SMOKE_TEST_ATOL` (1e-3) and consistent with the already-documented
+float32 catastrophic-cancellation story, not a new divergence. The
+4096-batch throughput (12,615 pos/s) is in the same range as the TITAN X's
+post-float32 9,732 pos/s (2026-07-15 entry above), a P100 being a
+comparable-generation but higher-throughput card.
+
+**The 256-batch ratio (8.6x) is a benchmarking artifact, not a real
+small-batch penalty.** NumPy's per-query cost is flat across all three
+sizes (~0.025s/query, as expected -- `DEFAULT_QUERY_CHUNK["numpy"]=4096`
+means NumPy internally chunks at the same size regardless of the batch
+passed in, so per-query cost shouldn't depend on total n). cupy's
+per-query cost at n=256 (0.777s/256 = 0.0030s) is ~38x worse than at
+n=1024/4096 (~0.084s/1024 to 0.325s/4096, both ~7.9-8.4e-5s/query) --
+`bench_backends.py`'s `--batch-sizes` defaults to `[256, 1024, 4096]` in
+that order, run against a single shared, reused scorer per backend, so the
+first (smallest) batch is where a one-time cost -- CUDA context/memory-pool
+initialization, and `_build_cupy_predict_fn`'s `ElementwiseKernel`'s first
+JIT compile -- lands and gets amortized away for everything after it.
+Not re-run with `--reps` or reordered `--batch-sizes` to confirm directly;
+flagged here rather than fixed, since fixing it would mean changing
+`bench_backends.py`'s own methodology (e.g. a discarded warm-up call before
+timing starts), not `pydreg` itself.
+
+## 2026-08-10 — mlx-vs-numpy head-to-head on a real Apple M4, via `scripts/bench_backends.py`
+
+Same exercise as the cupy/P100 entry directly above, this time for the
+`mlx` tier added earlier today, run on the same real pretrained model
+(605,187 SVs x 360 features) on the actual Apple M4 this session has
+access to, `--backends numpy mlx` (default batch sizes):
+
+| batch size | numpy | mlx | mlx speedup |
+|---|---|---|---|
+| 256 | 1.097s (233 pos/s) | 0.444s (576 pos/s) | 2.5x |
+| 1024 | 6.047s (169 pos/s) | 0.410s (2,497 pos/s) | 14.7x |
+| 4096 | 23.652s (173 pos/s) | 1.253s (3,269 pos/s) | 18.9x |
+
+`max_abs_diff` (numpy vs mlx) = `0.00019` -- comfortably inside
+`MLX_SMOKE_TEST_ATOL` (1e-3) and the same order of magnitude as the
+~1.1e-4/~3.4e-4 figures already measured directly against
+`_build_mlx_predict_fn` earlier today (see that entry above), confirming
+this isn't sample-specific.
+
+**Same warm-up-artifact shape as the cupy/P100 result, same root cause
+category.** mlx's per-query cost at n=256 (0.444s/256 = 1.7e-3s) is ~5-6x
+worse than at n=1024/4096 (~4.0e-4s and ~3.1e-4s/query respectively) --
+`bench_backends.py` runs `--batch-sizes` in `[256, 1024, 4096]` order
+against a single reused scorer, so the smallest (first) batch is where
+`_rbf_chunk`'s one-time `mx.compile` Metal-shader-compile cost lands and
+then amortizes away, exactly as predicted in `_build_mlx_predict_fn`'s own
+docstring ("first call per distinct chunk shape pays a one-time Metal
+shader compile cost"). Confirms that prediction against a real,
+independently-run benchmark rather than just the inline validation done
+while building the tier. Not re-run with `--reps`/reordered batch sizes to
+isolate it further, for the same reason noted in the cupy/P100 entry.

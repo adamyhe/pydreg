@@ -145,6 +145,7 @@ def test_resolve_query_chunk_uses_backend_specific_default():
     assert pipeline._resolve_query_chunk("numpy") == 4096
     assert pipeline._resolve_query_chunk("sklearn") == 50_000
     assert pipeline._resolve_query_chunk("cupy") == 4096
+    assert pipeline._resolve_query_chunk("mlx") == 4096
     assert pipeline._resolve_query_chunk("cupy", query_chunk=123) == 123
     assert pipeline._resolve_query_chunk("numpy", query_chunk=123) == 123
 
