@@ -462,6 +462,18 @@ implemented — the current numbers don't justify the added complexity —
 but documented here specifically so this doesn't need re-deriving if the
 ratio ever tips further.
 
+**Update:** the gap-filled-positions row above — extraction-dominant on
+*both* cards, not just a fast one — is exactly the case a numba-jitted
+`features._binned_sums_batch` targets directly. That function turned out
+to be 60-80%+ of `_extract_features_cluster`'s own time at realistic
+informative-position densities, and a fused (single-pass, no gather-index
+arrays) numba kernel is a measured, bit-identical 2-4x faster than the
+prior NumPy fancy-indexing version — see `docs/PERF_LOG.md`'s 2026-08-10
+entry for the full investigation (including an initial, corrected
+assumption that this only mattered on very fast GPUs). Real before/after
+numbers on this table specifically (TITAN Xp/A100) haven't been re-run yet
+— the entry above predates this change.
+
 ## Peak calling: parallelism and per-worker BLAS pinning
 
 The final peak-calling stage runs as one independent unit of work per broad

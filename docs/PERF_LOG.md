@@ -2034,3 +2034,77 @@ shader compile cost"). Confirms that prediction against a real,
 independently-run benchmark rather than just the inline validation done
 while building the tier. Not re-run with `--reps`/reordered batch sizes to
 isolate it further, for the same reason noted in the cupy/P100 entry.
+
+## 2026-08-10 — numba-jitted `features._binned_sums_batch` (fused gather, 2-4x)
+
+Investigated whether `pydreg.features._binned_sums_batch` (the cumsum-
+difference binning step inside feature extraction) should be numba-jitted,
+prompted by the general question of whether `features.py` should get the
+same numba treatment `stats.py`/`rfsplit.py` already have. Went through
+three steps before writing any production code, since (unlike the RF
+peak-splitter case) this function's existing NumPy implementation is
+already fully vectorized, not an obviously pathological per-call-overhead
+situation -- so the win, if any, needed to be measured, not assumed.
+
+**1. Isolated microbenchmark: a real, bit-identical 2-4x speedup.** A
+numba prototype fusing the gather (`csum[edges[:, 1:]] - csum[edges[:,
+:-1]]`), the subtract, and `_logistic_scale_batch`'s per-row logistic
+transform into one pass -- avoiding the `(n, H+1)`-shaped `left_edges`/
+`right_edges` gather-index arrays the NumPy version builds per zoom --
+matched the existing implementation to `max_abs_diff=0.0` (not just
+close) across batch sizes 256-50,000, at 2.05x-4.16x faster.
+
+**2. Confirmed this is the dominant cost *within* feature extraction, at
+realistic densities.** Benchmarked `_extract_features_cluster`'s three
+components (bigWig fetch, cumsum, `_binned_sums_batch`) separately, with
+cluster positions spaced 10-50bp apart (matching `extract_features_batch`'s
+own docstring for real adjacent-informative-position spacing, not the
+much sparser uniform-random spacing tried first, which artificially
+inflated fetch/cumsum's share by maximizing shared-buffer span for a given
+n). At n=1024, `_binned_sums_batch` was 62% of cluster-extraction time; at
+n=4096 (the default query chunk), 82% -- fetch/cumsum scale with buffer
+span (roughly constant, since real informative positions cluster tightly),
+while `_binned_sums_batch` scales with n, so its share grows with batch
+size.
+
+**3. Checked whether feature extraction is actually the bottleneck
+end-to-end before committing to the change -- initially found it wasn't,
+on `mlx` specifically.** Ran the real pipeline on this session's Apple M4
+(`--backend mlx`, ~55k informative positions): `0.51s extracting features,
+16.23s in scorer.predict` at the bulk-scan step, `0.95s / 33.28s` at the
+10bp-densified step -- predict dominates by ~30-35x there, the opposite of
+the trend documented for `cupy` on datacenter GPUs (TITAN Xp -> A100
+closing 3.05x -> 1.46x). On `mlx`'s current per-call `mx.compile` cost,
+extraction speed genuinely doesn't matter yet.
+
+**Corrected by the user: this is already a real issue on `cupy`, including
+on older/non-A100 CUDA hardware -- the primary deployment target is CUDA,
+not Apple Silicon.** Re-reading the existing "Real measurements" table in
+`docs/OPTIMIZATION.md`: the gap-filled-positions step is *already*
+extraction-dominant on **both** cards tested, not just A100 -- TITAN Xp
+(69.33s extract / 14.46s predict) and A100 (58.15s / 6.65s) both show
+extraction exceeding predict there. So the "extraction becomes the
+bottleneck as GPUs get faster" framing in this log's earlier entries was
+correct in trend but wrong to frame as an A100-only/future concern --
+it's already true today, on real (including older) CUDA hardware, for at
+least one of the three scoring call sites.
+
+**Shipped the numba version**, replacing `_binned_sums_batch`'s NumPy
+fancy-indexing implementation outright (not kept as a fallback -- the
+jitted version is bit-identical and strictly faster, the same reasoning
+`_permuted_cholesky_numba` and the RF peak-splitter used to fully replace
+their NumPy/sklearn predecessors rather than keeping a second code path).
+`_logistic_scale_batch` was deleted as dead code once its logic was fused
+into the jitted kernel -- it had no other callers or direct tests.
+`numba>=0.64.0` was already a hard dependency (via the RF peak-splitter),
+so no new dependency was added. All 72 existing tests pass unchanged
+(`tests/test_features.py`'s existing `assert_array_equal` checks against
+the naive per-position reference already cover this at the
+`extract_features_batch` level -- no new test needed, since the jitted
+core is a drop-in, bit-identical replacement, not new behavior).
+
+Real end-to-end impact on `cupy` hardware not yet re-measured (no CUDA
+GPU available in this session) -- the isolated 2-4x win and the 60-82%
+share-of-extraction finding above are measured; translating that into a
+new predict:extract ratio on a real TITAN Xp/A100 is the natural
+follow-up once that hardware is available again.
