@@ -2,7 +2,7 @@ import numpy as np
 import pybigtools
 import pytest
 
-from pydreg import features, infp, io
+from pydreg import features, infp
 
 
 @pytest.fixture
@@ -11,13 +11,18 @@ def integer_bigwig_pair(tmp_path):
     dREG's actual input contract (unnormalized point-mode read counts --
     see CLAUDE.md). Unlike the continuous-Gaussian synthetic_bigwig_pair
     fixture used elsewhere, this is what extract_features_batch's
-    cumsum-based binning is bit-identical against: summing exact integers
-    in float64 has no rounding error regardless of summation order, but
-    summing arbitrary (non-integer) floats can differ in the last bit
-    between cumsum-then-subtract and reshape-then-sum -- a real but
-    practically irrelevant distinction, since real bigWig inputs to dREG
-    are always integer read counts (verified on real chr21 data, see
-    docs/PERF_LOG.md)."""
+    cumsum-based *summation* is bit-identical against: summing exact
+    integers in float64 has no rounding error regardless of summation
+    order, but summing arbitrary (non-integer) floats can differ in the
+    last bit between cumsum-then-subtract and reshape-then-sum -- a real
+    but practically irrelevant distinction, since real bigWig inputs to
+    dREG are always integer read counts (verified on real chr21 data, see
+    docs/PERF_LOG.md). That guarantee covers the summation step only, not
+    the logistic-scale step downstream of it -- _binned_sums_batch's numba
+    kernel can differ from the naive per-position path by ~1 ULP there
+    (numba's np.exp() lowering vs NumPy's own), which is why the
+    comparisons below use assert_allclose(atol=1e-12), not
+    assert_array_equal."""
     rng = np.random.default_rng(1)
     chrom_size = 100_000
     plus = rng.poisson(0.02, size=chrom_size).astype(float)
@@ -59,8 +64,8 @@ def _naive_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
 
 def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -70,13 +75,25 @@ def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
     batched = features.extract_features_batch(
         bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
     )
-    np.testing.assert_array_equal(naive, batched)
+    # atol, not assert_array_equal: the cumsum-difference summation itself
+    # is exact for integer input (see integer_bigwig_pair's docstring), but
+    # _binned_sums_batch's logistic-scale step now runs through numba's
+    # np.exp() lowering (LLVM-compiled), which isn't guaranteed bit-for-bit
+    # identical to NumPy's own np.exp() ufunc -- both are correctly rounded
+    # to within ~1 ULP, they just don't have to agree on which way a
+    # borderline case rounds. Confirmed on real CI: a real ~1-ULP
+    # (6.9e-18 absolute, 2.3e-16 relative) mismatch surfaced on the Python
+    # 3.11 runner specifically (not reproducible on this dev machine, nor
+    # on the 3.12/3.13 runners) -- exactly the signature of two distinct
+    # transcendental-function implementations, not a real algorithmic bug.
+    # See docs/PERF_LOG.md.
+    np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
 def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -87,13 +104,25 @@ def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
     batched = features.extract_features_batch(
         bw_plus, bw_minus, "chr1", shuffled, window_sizes, half_n_windows
     )
-    np.testing.assert_array_equal(naive, batched)
+    # atol, not assert_array_equal: the cumsum-difference summation itself
+    # is exact for integer input (see integer_bigwig_pair's docstring), but
+    # _binned_sums_batch's logistic-scale step now runs through numba's
+    # np.exp() lowering (LLVM-compiled), which isn't guaranteed bit-for-bit
+    # identical to NumPy's own np.exp() ufunc -- both are correctly rounded
+    # to within ~1 ULP, they just don't have to agree on which way a
+    # borderline case rounds. Confirmed on real CI: a real ~1-ULP
+    # (6.9e-18 absolute, 2.3e-16 relative) mismatch surfaced on the Python
+    # 3.11 runner specifically (not reproducible on this dev machine, nor
+    # on the 3.12/3.13 runners) -- exactly the signature of two distinct
+    # transcendental-function implementations, not a real algorithmic bug.
+    # See docs/PERF_LOG.md.
+    np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
 def test_extract_features_batch_handles_chromosome_edges(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -105,7 +134,19 @@ def test_extract_features_batch_handles_chromosome_edges(integer_bigwig_pair):
     batched = features.extract_features_batch(
         bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
     )
-    np.testing.assert_array_equal(naive, batched)
+    # atol, not assert_array_equal: the cumsum-difference summation itself
+    # is exact for integer input (see integer_bigwig_pair's docstring), but
+    # _binned_sums_batch's logistic-scale step now runs through numba's
+    # np.exp() lowering (LLVM-compiled), which isn't guaranteed bit-for-bit
+    # identical to NumPy's own np.exp() ufunc -- both are correctly rounded
+    # to within ~1 ULP, they just don't have to agree on which way a
+    # borderline case rounds. Confirmed on real CI: a real ~1-ULP
+    # (6.9e-18 absolute, 2.3e-16 relative) mismatch surfaced on the Python
+    # 3.11 runner specifically (not reproducible on this dev machine, nor
+    # on the 3.12/3.13 runners) -- exactly the signature of two distinct
+    # transcendental-function implementations, not a real algorithmic bug.
+    # See docs/PERF_LOG.md.
+    np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
 def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig_pair):
@@ -113,8 +154,8 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     spaced centers must fall into separate clusters, exercising the
     multi-cluster path on a tiny fixture."""
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -126,7 +167,19 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     batched = features.extract_features_batch(
         bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
     )
-    np.testing.assert_array_equal(naive, batched)
+    # atol, not assert_array_equal: the cumsum-difference summation itself
+    # is exact for integer input (see integer_bigwig_pair's docstring), but
+    # _binned_sums_batch's logistic-scale step now runs through numba's
+    # np.exp() lowering (LLVM-compiled), which isn't guaranteed bit-for-bit
+    # identical to NumPy's own np.exp() ufunc -- both are correctly rounded
+    # to within ~1 ULP, they just don't have to agree on which way a
+    # borderline case rounds. Confirmed on real CI: a real ~1-ULP
+    # (6.9e-18 absolute, 2.3e-16 relative) mismatch surfaced on the Python
+    # 3.11 runner specifically (not reproducible on this dev machine, nor
+    # on the 3.12/3.13 runners) -- exactly the signature of two distinct
+    # transcendental-function implementations, not a real algorithmic bug.
+    # See docs/PERF_LOG.md.
+    np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
 def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
@@ -141,8 +194,8 @@ def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
     bw = pybigtools.open(minus_path, "w")
     bw.write({"chr1": 5000}, [("chr1", 10, 11, -1.0)])
 
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
     positions = infp.get_informative_positions(bw_plus, bw_minus)
 
     assert set(positions["chrom"]) == {"chrUn_gl000233"}

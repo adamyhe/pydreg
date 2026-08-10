@@ -1567,8 +1567,8 @@ still unusable concurrently). The underlying reader types are generic
 over `CachedBBIFileRead<ReopenableFile>`, built specifically around a
 `Reopen` trait meant for independent handles onto the same file -- so the
 safe pattern, if ever implemented, is one independently-opened `BBIReader`
-per worker thread (`pydreg.io.open_bigwig()` is a thin wrapper around
-`pybigtools.open()`, trivial to call once per worker) rather than sharing
+per worker thread (a plain `pybigtools.open()` call, trivial to make once
+per worker) rather than sharing
 `pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
 
 Decision: document this (both the real numbers and the thread-safety
@@ -2034,3 +2034,279 @@ shader compile cost"). Confirms that prediction against a real,
 independently-run benchmark rather than just the inline validation done
 while building the tier. Not re-run with `--reps`/reordered batch sizes to
 isolate it further, for the same reason noted in the cupy/P100 entry.
+
+## 2026-08-10 — numba-jitted `features._binned_sums_batch` (fused gather, 2-4x)
+
+Investigated whether `pydreg.features._binned_sums_batch` (the cumsum-
+difference binning step inside feature extraction) should be numba-jitted,
+prompted by the general question of whether `features.py` should get the
+same numba treatment `stats.py`/`rfsplit.py` already have. Went through
+three steps before writing any production code, since (unlike the RF
+peak-splitter case) this function's existing NumPy implementation is
+already fully vectorized, not an obviously pathological per-call-overhead
+situation -- so the win, if any, needed to be measured, not assumed.
+
+**1. Isolated microbenchmark: a real, bit-identical 2-4x speedup.** A
+numba prototype fusing the gather (`csum[edges[:, 1:]] - csum[edges[:,
+:-1]]`), the subtract, and `_logistic_scale_batch`'s per-row logistic
+transform into one pass -- avoiding the `(n, H+1)`-shaped `left_edges`/
+`right_edges` gather-index arrays the NumPy version builds per zoom --
+matched the existing implementation to `max_abs_diff=0.0` (not just
+close) across batch sizes 256-50,000, at 2.05x-4.16x faster.
+
+**2. Confirmed this is the dominant cost *within* feature extraction, at
+realistic densities.** Benchmarked `_extract_features_cluster`'s three
+components (bigWig fetch, cumsum, `_binned_sums_batch`) separately, with
+cluster positions spaced 10-50bp apart (matching `extract_features_batch`'s
+own docstring for real adjacent-informative-position spacing, not the
+much sparser uniform-random spacing tried first, which artificially
+inflated fetch/cumsum's share by maximizing shared-buffer span for a given
+n). At n=1024, `_binned_sums_batch` was 62% of cluster-extraction time; at
+n=4096 (the default query chunk), 82% -- fetch/cumsum scale with buffer
+span (roughly constant, since real informative positions cluster tightly),
+while `_binned_sums_batch` scales with n, so its share grows with batch
+size.
+
+**3. Checked whether feature extraction is actually the bottleneck
+end-to-end before committing to the change -- initially found it wasn't,
+on `mlx` specifically.** Ran the real pipeline on this session's Apple M4
+(`--backend mlx`, ~55k informative positions): `0.51s extracting features,
+16.23s in scorer.predict` at the bulk-scan step, `0.95s / 33.28s` at the
+10bp-densified step -- predict dominates by ~30-35x there, the opposite of
+the trend documented for `cupy` on datacenter GPUs (TITAN Xp -> A100
+closing 3.05x -> 1.46x). On `mlx`'s current per-call `mx.compile` cost,
+extraction speed genuinely doesn't matter yet.
+
+**Corrected by the user: this is already a real issue on `cupy`, including
+on older/non-A100 CUDA hardware -- the primary deployment target is CUDA,
+not Apple Silicon.** Re-reading the existing "Real measurements" table in
+`docs/OPTIMIZATION.md`: the gap-filled-positions step is *already*
+extraction-dominant on **both** cards tested, not just A100 -- TITAN Xp
+(69.33s extract / 14.46s predict) and A100 (58.15s / 6.65s) both show
+extraction exceeding predict there. So the "extraction becomes the
+bottleneck as GPUs get faster" framing in this log's earlier entries was
+correct in trend but wrong to frame as an A100-only/future concern --
+it's already true today, on real (including older) CUDA hardware, for at
+least one of the three scoring call sites.
+
+**Shipped the numba version**, replacing `_binned_sums_batch`'s NumPy
+fancy-indexing implementation outright (not kept as a fallback -- the
+jitted version is bit-identical and strictly faster, the same reasoning
+`_permuted_cholesky_numba` and the RF peak-splitter used to fully replace
+their NumPy/sklearn predecessors rather than keeping a second code path).
+`_logistic_scale_batch` was deleted as dead code once its logic was fused
+into the jitted kernel -- it had no other callers or direct tests.
+`numba>=0.64.0` was already a hard dependency (via the RF peak-splitter),
+so no new dependency was added. All 72 existing tests pass unchanged
+(`tests/test_features.py`'s existing `assert_array_equal` checks against
+the naive per-position reference already cover this at the
+`extract_features_batch` level -- no new test needed, since the jitted
+core is a drop-in, bit-identical replacement, not new behavior).
+
+Real end-to-end impact on `cupy` hardware not yet re-measured (no CUDA
+GPU available in this session) -- the isolated 2-4x win and the 60-82%
+share-of-extraction finding above are measured; translating that into a
+new predict:extract ratio on a real TITAN Xp/A100 is the natural
+follow-up once that hardware is available again.
+
+## 2026-08-10 — parallelized `_binned_sums_batch_numba` across positions (`parallel=True`/`prange`, another ~3-4x)
+
+Follow-up to the same-day jitting entry above: even after the sequential
+numba jit, `_binned_sums_batch` was still re-measured as 44-81% of
+per-cluster extraction time across realistic batch sizes (256-16,384),
+using the same dense (10-50bp-spaced) synthetic clustering as before --
+still the dominant cost, just a faster version of it. Each output row
+(one genomic position) is computed entirely independently of every other
+-- no cross-position reduction, no shared mutable state beyond each row's
+own slice of the preallocated `out` array -- so parallelizing over
+positions via `numba.prange` is embarrassingly parallel and, unlike the
+`cupy`/`mlx` GPU tiers' float32 concerns, involves no precision tradeoff
+at all: confirmed bit-identical (`max_abs_diff=0.0`) against the
+sequential jitted version across randomized inputs.
+
+Measured on this session's 10-core Apple M4: a further **3.3x-4.2x**
+on top of the sequential jit (e.g. n=4096: 5.46ms sequential -> 1.63ms
+parallel). Checked for a small-n regression too, since numba's parallel
+dispatch has real per-call overhead and the gap-filled-positions call site
+(the one already shown to be extraction-dominant even on a TITAN Xp) often
+produces small, scattered per-cluster batches: n=1 through n=32 all stayed
+under ~70us/call, negligible next to a single GPU predict call or even a
+single bigWig fetch -- no regression found at the small end.
+
+Shipped as `@numba.njit(cache=True, parallel=True)` + `numba.prange(n)` in
+place of the sequential version's `range(n)`, no other code changes.
+`numba`'s parallel backend (workqueue/OpenMP, auto-selected) needs no new
+dependency -- confirmed working out of the box in this project's existing
+`uv` environment (no `tbb`/extra extras required). All 72 tests still
+pass.
+
+## 2026-08-10 — removed `io.open_bigwig`/`io.chrom_sizes` (pure pass-throughs, no behavior added)
+
+User-requested cleanup pass over trivial single-line functions, prompted
+specifically by `io.py`. Surveyed every function in `src/pydreg/` whose
+entire body (docstring aside) was a single statement, to separate genuine
+"bad" wrappers from short functions that happen to earn their keep:
+
+- **Kept**: `backend._cupy_installed`/`_mlx_installed`/
+  `_cuda_runtime_available`/`_mlx_gpu_available` (deliberately
+  `monkeypatch`-able seams -- `tests/test_backend.py` patches these
+  directly; collapsing them into `detect_backend()` would remove the thing
+  being tested), `backend.Scorer.predict` (the entire point of the
+  `Scorer` class is this uniform dispatch method), `features.
+  max_dist_from_center` (names a real formula reused at 2+ call sites,
+  not a pure rename), `stats.get_laplace_quantile`/
+  `get_pmv_laplace_cdf_options`/`get_pmv_laplace_profile` (semantic
+  naming / defensive-copy accessors over private module state, not raw
+  pass-throughs), `stats._ndtr` (pulled into its own function specifically
+  so `inline="always"` can hint numba's compiler -- a documented,
+  benchmarked ~4-5% win, not incidental structure).
+- **Removed**: `io.open_bigwig(path)` (`return pybigtools.open(path)`) and
+  `io.chrom_sizes(bw)` (`return dict(bw.chroms())`) -- genuinely zero
+  behavior added over calling `pybigtools.open()`/`bw.chroms()` directly
+  (confirmed `bw.chroms()` already returns a plain `dict`, so even the
+  `dict()` wrapping was a no-op copy), not used as a mock seam anywhere
+  (unlike the `backend.py` functions above), and already inconsistently
+  applied even before this change (`tests/test_io.py` already called
+  `pybigtools.open()` directly for writing bigWigs while going through
+  `io.open_bigwig()` for reading them, in the same file).
+
+Updated all real call sites: `pipeline.run` (now imports `pybigtools`
+directly for the two reader opens; `bw_plus.chroms()` inline for the
+sizes dict), `infp.get_informative_positions` (`bw_plus.chroms()`/
+`bw_minus.chroms()` inline), and every test that used either function
+(`tests/test_features.py`, `tests/test_io.py`) -- all mechanical
+substitutions, no test logic changed. `io.py`'s own module docstring
+updated (it previously described `open_bigwig` as the sanctioned way
+pydreg opens bigWigs; that's now a direct `pybigtools.open()` call at
+`pipeline.run`, with `pydreg.infp`/`pydreg.features` unaffected either way
+since they never opened handles themselves in the first place -- they only
+ever received already-open readers). All 72 tests pass; ran the CLI
+end-to-end once more afterward as an extra sanity check beyond the test
+suite.
+
+## 2026-08-10 — profiled and optimized `infp.get_informative_positions` (~2.1x, plus a real test-coverage gap closed)
+
+Asked directly whether `infp.py` had anything left to optimize, following
+the `features.py` work above. Unlike that investigation, this one started
+with a real profile instead of reading the code for suspicious patterns --
+built a realistic 2-chromosome (chr21/chr22-sized, 46M/50Mbp) synthetic
+bigWig pair and ran `cProfile` over `get_informative_positions`, since
+eyeballing the code (already collapsed from up to 27 `bw.values()` calls
+per chromosome down to 1 per strand, per an earlier optimization) didn't
+suggest an obvious next target the way `_binned_sums_batch`'s gather
+pattern did.
+
+**Baseline: 305ms wall time, 837K informative positions, for the two
+synthetic chromosomes.** cProfile breakdown: `_windowed_sums_from_fine`'s
+reshape+sum 35% (107ms), `np.unique(np.concatenate(centers))` 28% (87ms,
+`_unique_hash` + `sort`), the actual bigWig I/O (`windowed_sum`) only 27%
+(82ms) -- so *more* total time was going to two Python-side aggregation
+steps than to the I/O they were built around, on data at this scale.
+
+**Fix 1: `np.unique` -> a chromosome-sized boolean mask (~3x on that
+step).** Every candidate center is already bounded to `[0, chrom_size)` by
+construction, and `np.nonzero` on a 1D array returns indices in increasing
+order by definition -- so `mask = np.zeros(chrom_size+1, bool); mask[
+np.concatenate(centers)] = True; np.nonzero(mask)[0]` gives the exact same
+sorted, deduplicated result as `np.unique(np.concatenate(centers))`,
+without a comparison sort. Measured on the real candidate arrays (400K-436K
+unique out of 583K-638K raw candidates per chromosome -- heavy overlap
+across the 9 phases is exactly why the sort was expensive): 38ms -> 12-14ms
+per chromosome. Extracted into a new `_dedupe_centers(chrom_size, centers)`
+helper specifically so it could be unit-tested directly with small
+hand-built arrays rather than only indirectly through a full bigWig scan.
+
+**Fix 2: `_windowed_sums_from_fine`'s reshape+sum -> a numba kernel (~11x
+for the far more common case).** Benchmarked NumPy's `usable.reshape(
+n_bins, ratio).sum(axis=1)` against an equivalent numba loop at both real
+ratios: `WINDOW_OR`'s ratio (100/50=2, used every phase) was **11x**
+faster in numba (2.687ms -> 0.236ms for a 1M-element fine array);
+`WINDOW_AND`'s ratio (1000/50=20) was a more modest ~2x (0.320ms ->
+0.144ms). Root cause matches the theme from `features.py`'s numba
+investigation: NumPy's generic N-dimensional reduction machinery carries
+real fixed per-row overhead that dominates specifically when each
+reduction is very short (summing only 2 elements per output bin) --
+exactly the shape of dREG's own OR-window/step ratio, not a contrived
+worst case. `parallel=True`/`prange` over output bins added on top for the
+same reason as `_binned_sums_batch_numba` (independent per-bin work, no
+cross-bin reduction) -- confirmed bit-identical against the NumPy
+reference across randomized inputs at both ratios.
+
+**Combined, real-hardware result on this session's M4**: 305ms -> 146ms
+warm (post-JIT-compile) wall time for the same 837K-position synthetic
+scan, ~2.1x overall. (The very first call in a fresh process pays a
+one-time numba compilation cost for these two new jitted functions, same
+caveat as every other numba addition in this project -- irrelevant to a
+real `pydreg` run, which calls `get_informative_positions` once per
+process, but worth noting so a future benchmark doesn't mistake
+compilation time for steady-state cost.)
+
+**Closed a real test-coverage gap found along the way.** `infp.py` had no
+dedicated test file at all before this change -- `get_informative_positions`
+was only exercised indirectly (one edge-case test in `test_features.py`,
+plus the full pipeline's end-to-end test). Added `tests/test_infp.py`:
+direct unit tests for `_dedupe_centers` against the `np.unique` reference
+it replaced (including an empty-arrays edge case that caught a real, if
+narrow, test-construction bug of its own -- `np.array([])` defaults to
+`float64`, which breaks boolean-mask fancy indexing; real callers never
+hit this since `np.nonzero()` always returns `int64` even from an empty or
+float-dtype input), plus a handful of `get_informative_positions`-level
+tests (finds the known synthetic peak, sorted/deduplicated output, the
+plus-only-chromosome edge case, empty result for an all-too-small-chromosome
+input). All 78 tests pass (72 + 6 new).
+
+## 2026-08-10 — CI-only Python 3.11 failure: numba's np.exp() vs NumPy's, ~1 ULP
+
+PR #9 (the three entries above) passed locally and on GitHub's Python
+3.12/3.13 CI jobs, but failed specifically on Python 3.11:
+`test_extract_features_batch_matches_naive_per_position` and
+`test_extract_features_batch_handles_unsorted_input` (both comparing
+`extract_features_batch`'s batched/cumsum path against
+`extract_features`'s naive per-position path via `assert_array_equal`)
+mismatched at 2 of 840 elements, `max_abs_diff=6.9388939e-18`,
+`max_relative_diff=2.33951247e-16` -- almost exactly one float64 ULP
+(machine epsilon is `2.220446e-16`).
+
+**Root cause: numba's `np.exp()` lowering isn't guaranteed bit-identical
+to NumPy's own `np.exp()` ufunc.** `_binned_sums_batch`'s cumsum-difference
+*summation* is genuinely exact for integer input regardless of ordering
+(see `integer_bigwig_pair`'s docstring and the original jitting entry
+above) -- that part of the bit-identical claim still holds, and isn't what
+changed. What changed is *how* the logistic-scale step's `1/(1+exp(...))`
+gets computed: before this PR, both the "naive" and "batched" paths called
+the exact same `np.exp()` ufunc (identical inputs, identical
+implementation, so of course bit-identical); after jitting
+`_binned_sums_batch`, the batched path's `exp()` calls are lowered by
+numba/LLVM to its own math intrinsics, a *different* implementation that's
+only guaranteed correctly-rounded to within ~1 ULP, not bit-identical to
+NumPy's. This is a well-known, generic category of numba-vs-NumPy
+floating-point non-bit-exactness for transcendental functions, not a bug
+specific to this code -- it just happens to be newly exposed here because
+this PR is the first place in the codebase where a numba-computed value
+feeds into `assert_array_equal` against a NumPy-computed one through
+`exp()`.
+
+**Didn't reproduce locally** (this session's Apple Silicon dev machine),
+on either Python 3.12 (the default here) or Python 3.11 (`uv run --python
+3.11`) -- consistent with this being a platform/build-specific ULP
+difference (which CPU features numba's LLVM codegen targets, which libm
+NumPy's own `np.exp` dispatches to) rather than a Python-version-specific
+one; Python 3.11 just happens to be the one GitHub Actions runner
+combination where it surfaces. A quick direct check
+(`numba.njit`-wrapped `np.exp` vs `np.exp` over 2M random values in
+[-50, 50]) found zero mismatches on this machine, confirming the
+divergence is real but platform-dependent, not something reproducible via
+a simple standalone repro here.
+
+**Fix: loosen the 4 `assert_array_equal(naive, batched)` calls in
+`tests/test_features.py` to `assert_allclose(naive, batched,
+atol=1e-12)`** -- 4 orders of magnitude looser than the observed ~1e-16 to
+1e-18 ULP-level noise (generous headroom for other platforms/CPUs) while
+still tight enough to catch any real algorithmic regression (which would
+be far larger than 1e-12 for these 0-1-range logistic-scaled values). Only
+2 of the 4 call sites actually failed in CI; fixed all 4 for consistency,
+since all four share the identical theoretical exposure and the other two
+simply didn't happen to hit a borderline-rounding case with their
+particular fixture data. Updated `integer_bigwig_pair`'s docstring to
+clarify its bit-identical guarantee covers the summation step only, not
+the logistic-scale step downstream of it.

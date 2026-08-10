@@ -1,7 +1,9 @@
-"""bigWig I/O via pybigtools, and BED/tabix/bigWig output writers.
-
-All disk I/O and no algorithmic content -- pydreg.infp and pydreg.features
-call the read helpers here but never open file handles themselves.
+"""bigWig read helpers (operating on an already-open pybigtools reader) plus
+BED/tabix/bigWig output writers. Opening a bigWig reader is a direct
+`pybigtools.open(path)` call at its one real call site (pipeline.run) --
+not wrapped here, since a bare pass-through added no behavior over calling
+pybigtools directly. pydreg.infp and pydreg.features never open file
+handles themselves either way; they only ever receive already-open readers.
 
 Windowed-sum and raw-fetch semantics were verified directly against the
 installed pybigtools package (not just its docs): `values(bins=n, summary=
@@ -16,14 +18,6 @@ bigWig may not contain every contig present in the other.
 
 import numpy as np
 import pybigtools
-
-
-def open_bigwig(path):
-    return pybigtools.open(path)
-
-
-def chrom_sizes(bw):
-    return dict(bw.chroms())
 
 
 def _is_missing_chrom_error(exc):

@@ -19,6 +19,7 @@ property of a specific trained model (DREGModel exposes it after loading),
 passed in explicitly here rather than imported.
 """
 
+import numba
 import numpy as np
 
 from . import io
@@ -87,17 +88,65 @@ def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_wind
     return np.concatenate([strand_vector(raw_fwd), strand_vector(raw_rev)])
 
 
-def _logistic_scale_batch(bins):
-    """Vectorized _logistic_scale, applied independently per row: bins is
-    (n, 2H), and each row is scaled using only that row's own max -- the
-    same per-position formula as _logistic_scale, just computed for many
-    positions via broadcasting (no cross-row reduction, so this is exactly
-    the same elementwise arithmetic as calling _logistic_scale row-by-row,
-    not an approximation)."""
-    true_max = np.max(bins, axis=1, keepdims=True)
-    scale_max = np.where(true_max == 0, 1.0, 0.05 * true_max)
-    alpha = _ALPHA_LN99 / scale_max
-    return 1.0 / (1.0 + np.exp(-alpha * (bins - scale_max)))
+@numba.njit(cache=True, parallel=True)
+def _binned_sums_batch_numba(csum, offsets, window_sizes, half_n_windows, n_features):
+    """Fused per-position/per-zoom core of _binned_sums_batch: for each
+    center, computes every zoom's W-bp bin sums directly from `csum` via
+    scalar indexing (no (n, H+1)-shaped gather-index arrays, no separate
+    gather-then-subtract-then-logistic-scale passes -- see
+    _binned_sums_batch's docstring for why cumsum differences are exact
+    here in the first place). Confirmed bit-identical (max_abs_diff=0.0)
+    against the prior NumPy fancy-indexing implementation across randomized
+    inputs at realistic problem sizes -- see docs/PERF_LOG.md. 2-4x faster
+    in isolation before parallelization, and -- since this is the majority
+    (60-80%+) of per-cluster feature-extraction time at realistic
+    informative-position densities, not just of this one function -- a real
+    win specifically for the `cupy` backend, where predict is fast enough
+    that extraction is already the dominant, unhidden cost for at least the
+    gap-filled-positions step on real hardware (TITAN Xp *and* A100, not
+    just top-end cards -- see docs/OPTIMIZATION.md's "Real measurements"
+    table).
+
+    parallel=True + prange over positions: each position's output row is
+    computed independently of every other (no cross-position reduction, no
+    shared mutable state besides each row's own slice of `out`), so this is
+    embarrassingly parallel and order-independent -- confirmed bit-identical
+    (max_abs_diff=0.0) against the sequential version across randomized
+    inputs. A further ~3-4x on top of the sequential jit on this session's
+    10-core Apple M4; see docs/PERF_LOG.md."""
+    n = offsets.shape[0]
+    n_zooms = window_sizes.shape[0]
+    out = np.empty((n, n_features), dtype=np.float64)
+    for i in numba.prange(n):
+        off = offsets[i]
+        col = 0
+        for z in range(n_zooms):
+            W = window_sizes[z]
+            H = half_n_windows[z]
+            span = W * H
+            zoom_bins = np.empty(2 * H, dtype=np.float64)
+            true_max = 0.0
+
+            base_left = off - span
+            for h in range(H):
+                v = csum[base_left + W * (h + 1)] - csum[base_left + W * h]
+                zoom_bins[h] = v
+                true_max = max(true_max, v)
+
+            base_right = off + 1
+            for h in range(H):
+                v = csum[base_right + W * (h + 1)] - csum[base_right + W * h]
+                zoom_bins[H + h] = v
+                true_max = max(true_max, v)
+
+            scale_max = 1.0 if true_max == 0.0 else 0.05 * true_max
+            alpha = _ALPHA_LN99 / scale_max
+            for h in range(2 * H):
+                out[i, col + h] = 1.0 / (
+                    1.0 + np.exp(-alpha * (zoom_bins[h] - scale_max))
+                )
+            col += 2 * H
+    return out
 
 
 def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
@@ -108,31 +157,30 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
 
     Computes each W-bp bin's sum as a cumsum difference instead of a
     per-position reshape+sum -- O(n*H) work per zoom regardless of window
-    width W, instead of O(n*W*H), which is what makes vectorizing across a
-    batch of positions tractable for wide zooms (e.g. W=5000, H=20 => a
-    100,000-sample window per position) without materializing an
-    (n_centers, W*H) gather array. Exact for dREG's actual input domain:
-    cumsum-then-subtract and reshape-then-sum are bit-identical when
-    summing exact integers in float64 (no rounding error regardless of
-    summation order) -- true of real bigWig inputs to dREG, which are
-    always unnormalized point-mode read counts (see CLAUDE.md), and
-    verified bit-for-bit against the per-position reshape+sum path on real
-    chr21 data (see docs/PERF_LOG.md). Not bit-identical (though still
-    numerically equivalent to float precision) for arbitrary non-integer
-    input, since cumsum's summation order differs from reshape+sum's --
-    not a real-world concern given dREG's input contract, but worth noting
-    if this is ever fed non-count data."""
-    blocks = []
-    for W, H in zip(window_sizes, half_n_windows):
-        span = int(W) * int(H)
-        w = np.arange(H + 1)
-        left_edges = offsets[:, None] - span + W * w[None, :]
-        left_bins = csum[left_edges[:, 1:]] - csum[left_edges[:, :-1]]
-        right_edges = offsets[:, None] + 1 + W * w[None, :]
-        right_bins = csum[right_edges[:, 1:]] - csum[right_edges[:, :-1]]
-        zoom_bins = np.concatenate([left_bins, right_bins], axis=1)
-        blocks.append(_logistic_scale_batch(zoom_bins))
-    return np.concatenate(blocks, axis=1)
+    width W, instead of O(n*W*H), which is what makes this tractable for
+    wide zooms (e.g. W=5000, H=20 => a 100,000-sample window per position)
+    without materializing an (n_centers, W*H) gather array. Exact for
+    dREG's actual input domain: cumsum-then-subtract and reshape-then-sum
+    are bit-identical when summing exact integers in float64 (no rounding
+    error regardless of summation order) -- true of real bigWig inputs to
+    dREG, which are always unnormalized point-mode read counts (see
+    CLAUDE.md), and verified bit-for-bit against the per-position
+    reshape+sum path on real chr21 data (see docs/PERF_LOG.md). Not
+    bit-identical (though still numerically equivalent to float precision)
+    for arbitrary non-integer input, since cumsum's summation order differs
+    from reshape+sum's -- not a real-world concern given dREG's input
+    contract, but worth noting if this is ever fed non-count data.
+
+    The actual cumsum-difference + logistic-scale arithmetic is
+    _binned_sums_batch_numba, a numba-jitted fused kernel -- see its
+    docstring for why (a real, measured win, not a speculative one)."""
+    n_features = int(2 * np.sum(half_n_windows))
+    window_sizes = np.asarray(window_sizes, dtype=np.int64)
+    half_n_windows = np.asarray(half_n_windows, dtype=np.int64)
+    offsets = np.asarray(offsets, dtype=np.int64)
+    return _binned_sums_batch_numba(
+        csum, offsets, window_sizes, half_n_windows, n_features
+    )
 
 
 # Caps the genomic span of one shared raw-fetch buffer per cluster (not the

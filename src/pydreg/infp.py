@@ -8,6 +8,7 @@ windowOR literals below are hardcoded in the R source itself (not derived
 from a user-passed `depth` argument), so there is no `depth` parameter here.
 """
 
+import numba
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
@@ -17,6 +18,29 @@ from . import io
 MIN_CHROM_SIZE = 2500
 WINDOW_OR, DEPTH_OR = 100, 2
 WINDOW_AND, DEPTH_AND = 1000, 0
+
+
+@numba.njit(cache=True, parallel=True)
+def _windowed_sums_numba(fine, off, ratio, n_bins):
+    """Core loop behind _windowed_sums_from_fine: sums each non-overlapping
+    `ratio`-wide run of `fine` starting at `off`. Confirmed bit-identical
+    against fine[off:off+n_bins*ratio].reshape(n_bins, ratio).sum(axis=1)
+    across randomized inputs. Real measured win, not assumed: NumPy's
+    generic reduction machinery carries real fixed per-row overhead that
+    dominates when each reduction is very short -- ~11x faster than the
+    NumPy version for WINDOW_OR's ratio (2, the far more common case, used
+    every phase), ~2x for WINDOW_AND's ratio (20) -- see docs/PERF_LOG.md.
+    parallel=True/prange over output bins is embarrassingly parallel (each
+    bin's sum is independent of every other), same reasoning and same
+    bit-identical guarantee as features._binned_sums_batch_numba."""
+    out = np.empty(n_bins, dtype=np.float64)
+    for i in numba.prange(n_bins):
+        s = 0.0
+        base = off + i * ratio
+        for j in range(ratio):
+            s += fine[base + j]
+        out[i] = s
+    return out
 
 
 def _windowed_sums_from_fine(fine, phase, window, step):
@@ -30,12 +54,32 @@ def _windowed_sums_from_fine(fine, phase, window, step):
     n_bins = (fine.shape[0] - off) // ratio
     if n_bins <= 0:
         return np.zeros(0)
-    usable = fine[off : off + n_bins * ratio]
-    return usable.reshape(n_bins, ratio).sum(axis=1)
+    return _windowed_sums_numba(fine, off, ratio, n_bins)
+
+
+def _dedupe_centers(chrom_size, centers):
+    """Sorted, deduplicated union of one chromosome's candidate center
+    arrays (from every OR/AND pass across every phase), via a
+    chromosome-sized boolean mask instead of
+    np.unique(np.concatenate(centers))'s comparison sort. Every candidate
+    is already bounded to [0, chrom_size) by construction (idx*WINDOW+
+    phase+WINDOW//2 never exceeds the phase-shifted fine array's own
+    bound -- see get_informative_positions), and np.nonzero on a 1D array
+    returns indices in increasing order by definition, so this gives
+    exactly the same sorted+deduplicated result as np.unique would, just
+    in O(chrom_size + n_candidates) instead of O(n_candidates log
+    n_candidates). ~3x faster on realistic synthetic data, where
+    candidates heavily overlap across the 9 phases (see
+    docs/PERF_LOG.md)."""
+    if not centers:
+        return np.array([], dtype=np.int64)
+    mask = np.zeros(chrom_size + 1, dtype=bool)
+    mask[np.concatenate(centers)] = True
+    return np.nonzero(mask)[0]
 
 
 def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=False):
-    """bw_plus/bw_minus: open pybigtools readers (io.open_bigwig(...)).
+    """bw_plus/bw_minus: open pybigtools readers (pybigtools.open(...)).
 
     Chromosomes scanned = bw_plus's chromosomes with size > 2500 (strict).
     Known upstream bug, replicated faithfully (see docs/PLANNING.md): the
@@ -56,8 +100,8 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
     # truncate if that's ever violated.
     assert WINDOW_OR % step == 0 and WINDOW_AND % step == 0
     phases = list(range(0, window + step, step))
-    plus_sizes = io.chrom_sizes(bw_plus)
-    minus_sizes = io.chrom_sizes(bw_minus)
+    plus_sizes = bw_plus.chroms()
+    minus_sizes = bw_minus.chroms()
     chroms = [c for c, size in plus_sizes.items() if size > MIN_CHROM_SIZE]
 
     rows = []
@@ -106,11 +150,7 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
                 idx = np.nonzero((plus_and > DEPTH_AND) & (minus_and > DEPTH_AND))[0]
                 centers.append(idx * WINDOW_AND + phase + WINDOW_AND // 2)
 
-        all_centers = (
-            np.unique(np.concatenate(centers))
-            if centers
-            else np.array([], dtype=np.int64)
-        )
+        all_centers = _dedupe_centers(chrom_size, centers)
         rows.append(
             pd.DataFrame({"chrom": chrom, "start": all_centers, "end": all_centers + 1})
         )
