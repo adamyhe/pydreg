@@ -455,8 +455,8 @@ reader types are generic over `CachedBBIFileRead<ReopenableFile>`,
 though — built specifically around a `Reopen` trait meant for independent
 handles onto the same file. So the safe pattern, if this is ever
 implemented, is **one independently-opened `BBIReader` per worker
-thread** (`pydreg.io.open_bigwig()` is a thin wrapper around
-`pybigtools.open()`, trivial to call once per worker) rather than sharing
+thread** (a plain `pybigtools.open()` call, trivial to make once per
+worker) rather than sharing
 `pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads. Not
 implemented — the current numbers don't justify the added complexity —
 but documented here specifically so this doesn't need re-deriving if the

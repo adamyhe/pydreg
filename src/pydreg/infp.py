@@ -35,7 +35,7 @@ def _windowed_sums_from_fine(fine, phase, window, step):
 
 
 def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=False):
-    """bw_plus/bw_minus: open pybigtools readers (io.open_bigwig(...)).
+    """bw_plus/bw_minus: open pybigtools readers (pybigtools.open(...)).
 
     Chromosomes scanned = bw_plus's chromosomes with size > 2500 (strict).
     Known upstream bug, replicated faithfully (see docs/PLANNING.md): the
@@ -56,8 +56,8 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
     # truncate if that's ever violated.
     assert WINDOW_OR % step == 0 and WINDOW_AND % step == 0
     phases = list(range(0, window + step, step))
-    plus_sizes = io.chrom_sizes(bw_plus)
-    minus_sizes = io.chrom_sizes(bw_minus)
+    plus_sizes = bw_plus.chroms()
+    minus_sizes = bw_minus.chroms()
     chroms = [c for c, size in plus_sizes.items() if size > MIN_CHROM_SIZE]
 
     rows = []

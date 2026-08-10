@@ -2,7 +2,7 @@ import numpy as np
 import pybigtools
 import pytest
 
-from pydreg import features, infp, io
+from pydreg import features, infp
 
 
 @pytest.fixture
@@ -59,8 +59,8 @@ def _naive_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
 
 def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -75,8 +75,8 @@ def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
 
 def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -92,8 +92,8 @@ def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
 
 def test_extract_features_batch_handles_chromosome_edges(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -113,8 +113,8 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     spaced centers must fall into separate clusters, exercising the
     multi-cluster path on a tiny fixture."""
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -141,8 +141,8 @@ def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
     bw = pybigtools.open(minus_path, "w")
     bw.write({"chr1": 5000}, [("chr1", 10, 11, -1.0)])
 
-    bw_plus = io.open_bigwig(plus_path)
-    bw_minus = io.open_bigwig(minus_path)
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
     positions = infp.get_informative_positions(bw_plus, bw_minus)
 
     assert set(positions["chrom"]) == {"chrUn_gl000233"}

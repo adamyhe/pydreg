@@ -1567,8 +1567,8 @@ still unusable concurrently). The underlying reader types are generic
 over `CachedBBIFileRead<ReopenableFile>`, built specifically around a
 `Reopen` trait meant for independent handles onto the same file -- so the
 safe pattern, if ever implemented, is one independently-opened `BBIReader`
-per worker thread (`pydreg.io.open_bigwig()` is a thin wrapper around
-`pybigtools.open()`, trivial to call once per worker) rather than sharing
+per worker thread (a plain `pybigtools.open()` call, trivial to make once
+per worker) rather than sharing
 `pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
 
 Decision: document this (both the real numbers and the thread-safety
@@ -2108,3 +2108,78 @@ GPU available in this session) -- the isolated 2-4x win and the 60-82%
 share-of-extraction finding above are measured; translating that into a
 new predict:extract ratio on a real TITAN Xp/A100 is the natural
 follow-up once that hardware is available again.
+
+## 2026-08-10 — parallelized `_binned_sums_batch_numba` across positions (`parallel=True`/`prange`, another ~3-4x)
+
+Follow-up to the same-day jitting entry above: even after the sequential
+numba jit, `_binned_sums_batch` was still re-measured as 44-81% of
+per-cluster extraction time across realistic batch sizes (256-16,384),
+using the same dense (10-50bp-spaced) synthetic clustering as before --
+still the dominant cost, just a faster version of it. Each output row
+(one genomic position) is computed entirely independently of every other
+-- no cross-position reduction, no shared mutable state beyond each row's
+own slice of the preallocated `out` array -- so parallelizing over
+positions via `numba.prange` is embarrassingly parallel and, unlike the
+`cupy`/`mlx` GPU tiers' float32 concerns, involves no precision tradeoff
+at all: confirmed bit-identical (`max_abs_diff=0.0`) against the
+sequential jitted version across randomized inputs.
+
+Measured on this session's 10-core Apple M4: a further **3.3x-4.2x**
+on top of the sequential jit (e.g. n=4096: 5.46ms sequential -> 1.63ms
+parallel). Checked for a small-n regression too, since numba's parallel
+dispatch has real per-call overhead and the gap-filled-positions call site
+(the one already shown to be extraction-dominant even on a TITAN Xp) often
+produces small, scattered per-cluster batches: n=1 through n=32 all stayed
+under ~70us/call, negligible next to a single GPU predict call or even a
+single bigWig fetch -- no regression found at the small end.
+
+Shipped as `@numba.njit(cache=True, parallel=True)` + `numba.prange(n)` in
+place of the sequential version's `range(n)`, no other code changes.
+`numba`'s parallel backend (workqueue/OpenMP, auto-selected) needs no new
+dependency -- confirmed working out of the box in this project's existing
+`uv` environment (no `tbb`/extra extras required). All 72 tests still
+pass.
+
+## 2026-08-10 — removed `io.open_bigwig`/`io.chrom_sizes` (pure pass-throughs, no behavior added)
+
+User-requested cleanup pass over trivial single-line functions, prompted
+specifically by `io.py`. Surveyed every function in `src/pydreg/` whose
+entire body (docstring aside) was a single statement, to separate genuine
+"bad" wrappers from short functions that happen to earn their keep:
+
+- **Kept**: `backend._cupy_installed`/`_mlx_installed`/
+  `_cuda_runtime_available`/`_mlx_gpu_available` (deliberately
+  `monkeypatch`-able seams -- `tests/test_backend.py` patches these
+  directly; collapsing them into `detect_backend()` would remove the thing
+  being tested), `backend.Scorer.predict` (the entire point of the
+  `Scorer` class is this uniform dispatch method), `features.
+  max_dist_from_center` (names a real formula reused at 2+ call sites,
+  not a pure rename), `stats.get_laplace_quantile`/
+  `get_pmv_laplace_cdf_options`/`get_pmv_laplace_profile` (semantic
+  naming / defensive-copy accessors over private module state, not raw
+  pass-throughs), `stats._ndtr` (pulled into its own function specifically
+  so `inline="always"` can hint numba's compiler -- a documented,
+  benchmarked ~4-5% win, not incidental structure).
+- **Removed**: `io.open_bigwig(path)` (`return pybigtools.open(path)`) and
+  `io.chrom_sizes(bw)` (`return dict(bw.chroms())`) -- genuinely zero
+  behavior added over calling `pybigtools.open()`/`bw.chroms()` directly
+  (confirmed `bw.chroms()` already returns a plain `dict`, so even the
+  `dict()` wrapping was a no-op copy), not used as a mock seam anywhere
+  (unlike the `backend.py` functions above), and already inconsistently
+  applied even before this change (`tests/test_io.py` already called
+  `pybigtools.open()` directly for writing bigWigs while going through
+  `io.open_bigwig()` for reading them, in the same file).
+
+Updated all real call sites: `pipeline.run` (now imports `pybigtools`
+directly for the two reader opens; `bw_plus.chroms()` inline for the
+sizes dict), `infp.get_informative_positions` (`bw_plus.chroms()`/
+`bw_minus.chroms()` inline), and every test that used either function
+(`tests/test_features.py`, `tests/test_io.py`) -- all mechanical
+substitutions, no test logic changed. `io.py`'s own module docstring
+updated (it previously described `open_bigwig` as the sanctioned way
+pydreg opens bigWigs; that's now a direct `pybigtools.open()` call at
+`pipeline.run`, with `pydreg.infp`/`pydreg.features` unaffected either way
+since they never opened handles themselves in the first place -- they only
+ever received already-open readers). All 72 tests pass; ran the CLI
+end-to-end once more afterward as an extra sanity check beyond the test
+suite.

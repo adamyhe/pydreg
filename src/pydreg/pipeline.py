@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import numpy as np
+import pybigtools
 from tqdm.auto import tqdm
 
 from . import backend, features, infp, io, peaks
@@ -174,8 +175,8 @@ def run(
     library use; pydreg.cli enables it; auto-hidden if stdout isn't a terminal
     regardless). Returns a dict with dense_infp/raw_peak/peak_bed/min_score
     for programmatic use regardless of write_outputs."""
-    bw_plus = io.open_bigwig(plus_bw_path)
-    bw_minus = io.open_bigwig(minus_bw_path)
+    bw_plus = pybigtools.open(plus_bw_path)
+    bw_minus = pybigtools.open(minus_bw_path)
 
     model, rf_model = _load_models(svr_model_path, rf_model_path)
     scorer = backend.build_scorer(
@@ -256,7 +257,7 @@ def run(
 
 
 def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed):
-    sizes = io.chrom_sizes(bw_plus)
+    sizes = bw_plus.chroms()
     chrom_col, start_col, end_col = dense_infp.columns[:3]
 
     infp_out = dense_infp[[chrom_col, start_col, end_col, "score", "infp"]]
