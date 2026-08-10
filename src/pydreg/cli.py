@@ -15,11 +15,12 @@ def main(argv=None):
     parser.add_argument("out_prefix", help="output file prefix")
     parser.add_argument(
         "--backend",
-        choices=["auto", "cupy", "sklearn", "numpy"],
+        choices=["auto", "cupy", "mlx", "sklearn", "numpy"],
         default="auto",
         help="scoring backend; 'auto' uses cupy when CuPy sees a usable CUDA "
-        "device, otherwise numpy. An explicit choice raises if that backend "
-        "isn't usable, rather than silently falling back.",
+        "device, mlx when MLX sees a usable Apple Silicon GPU, otherwise "
+        "numpy. An explicit choice raises if that backend isn't usable, "
+        "rather than silently falling back.",
     )
     parser.add_argument(
         "--svr-model",
@@ -52,6 +53,13 @@ def main(argv=None):
         "_build_cupy_predict_fn's own default. The main lever for trading GPU "
         "memory for fewer, larger (better-amortized) kernel launches -- real "
         "headroom varies by card, so this is left tunable rather than hardcoded",
+    )
+    parser.add_argument(
+        "--mlx-sv-chunk",
+        type=int,
+        default=None,
+        help="the same lever as --cupy-sv-chunk, but for the mlx backend "
+        "specifically; defaults to _build_mlx_predict_fn's own default",
     )
     parser.add_argument(
         "-p",
@@ -115,6 +123,7 @@ def main(argv=None):
         pv_threshold=args.pv_threshold,
         query_chunk=args.query_chunk,
         cupy_sv_chunk=args.cupy_sv_chunk,
+        mlx_sv_chunk=args.mlx_sv_chunk,
         peak_calling_cores=args.peak_calling_cores,
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,

@@ -57,7 +57,7 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["numpy", "sklearn", "cuml"],
+        default=["numpy", "sklearn", "cupy", "mlx"],
         help="backend tiers to attempt (unavailable ones are skipped)",
     )
     parser.add_argument(
@@ -76,7 +76,7 @@ def main():
     for name in args.backends:
         try:
             scorers[name] = backend.build_scorer(model, name)
-        except backend.BackendUnavailable as e:
+        except (backend.BackendUnavailable, ValueError) as e:
             print(f"skipping {name!r}: {e}")
 
     rng = np.random.default_rng(args.seed)

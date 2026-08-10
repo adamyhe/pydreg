@@ -24,6 +24,15 @@ A100. See docs/OPTIMIZATION.md and docs/PERF_LOG.md for the full
 investigation and the decision to drop cuml entirely rather than keep
 maintaining two GPU tiers.
 
+There is also "mlx", an Apple Silicon GPU tier for machines with neither
+NVIDIA hardware nor cupy applicable at all -- see _build_mlx_predict_fn for
+the same near-verbatim RBF dual-sum formula run through Apple's MLX array
+framework instead of CuPy. Confirmed on real Apple M4 hardware during
+development: ~22x faster than the NumPy tier at a realistic query/support-
+vector batch size, agreeing with the NumPy reference to ~1e-5 on synthetic
+data of realistic shape (605,187 SVs x 360 features) -- see
+docs/OPTIMIZATION.md and docs/PERF_LOG.md.
+
 "cupy" evaluates DREGModel.predict's exact RBF dual-sum formula directly
 on a CuPy device array (see _build_cupy_predict_fn) -- being the same
 formula as the already-validated NumPy tier, it carries none of the
@@ -52,8 +61,9 @@ logger = logging.getLogger(__name__)
 # docs/PLANNING.md "Batching" for the memory-bound reasoning behind each.
 # "cupy": _build_cupy_predict_fn materializes a (query_chunk, sv_chunk)
 # -shaped intermediate directly on the GPU, same as the NumPy tier does on
-# the CPU, so it gets the same kind of conservative sizing.
-DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cupy": 4096}
+# the CPU, so it gets the same kind of conservative sizing. "mlx" does the
+# same thing (see _build_mlx_predict_fn), so it reuses the same default.
+DEFAULT_QUERY_CHUNK = {"numpy": 4096, "sklearn": 50_000, "cupy": 4096, "mlx": 4096}
 
 
 class BackendUnavailable(RuntimeError):
@@ -76,6 +86,28 @@ def _cuda_runtime_available():
         return False
 
 
+def _mlx_installed():
+    return importlib.util.find_spec("mlx") is not None
+
+
+def _mlx_gpu_available():
+    """Return whether MLX sees a usable Metal GPU device. mlx's PyPI wheels
+    only target macOS on Apple Silicon at all (see pyproject.toml's `mlx`
+    extra), so unlike cupy there's no separate "installed but no runtime"
+    split to speak of in practice -- this still probes for real rather than
+    assuming, the same defensive shape as _cuda_runtime_available, in case a
+    future build ever ships for a device without a working GPU (e.g. a
+    software-rendering fallback, or running inside a VM without GPU
+    passthrough)."""
+    try:
+        import mlx.core as mx
+
+        return mx.metal.is_available()
+    except Exception:
+        logger.debug("MLX Metal availability probe failed", exc_info=True)
+        return False
+
+
 # _wrap_sklearn_like's default smoke-test atol (1e-4) assumes
 # near-double-precision agreement; the "cupy" tier's GEMMs/kernel are
 # deliberately float32 (see _build_cupy_predict_fn), so it gets this looser
@@ -88,11 +120,27 @@ def _cuda_runtime_available():
 # bug. See docs/PERF_LOG.md's 2026-07-15 entry.
 CUPY_SMOKE_TEST_ATOL = 1e-3
 
+# Same float32 catastrophic-cancellation story as CUPY_SMOKE_TEST_ATOL above
+# (the expanded-form squared-distance formula, see _build_cupy_predict_fn's
+# docstring) -- MLX's Metal GPU backend hits the identical precision ceiling
+# for the identical reason (it's the same formula), not a separately
+# re-measured number. Unlike cupy, float32 isn't even a choice for this
+# tier: Metal has no float64 support at all (confirmed on real Apple M4
+# hardware -- a plain float64 matmul on the GPU device raises
+# `ValueError: float64 is not supported on the GPU`), so _build_mlx_predict_fn
+# couldn't run this computation in float64 even if that were desired.
+MLX_SMOKE_TEST_ATOL = CUPY_SMOKE_TEST_ATOL
+
 
 @functools.lru_cache(maxsize=1)
 def detect_backend():
-    """Probes once per process and returns "cupy" or "numpy" -- the best
-    backend actually usable right now.
+    """Probes once per process and returns "cupy", "mlx", or "numpy" -- the
+    best backend actually usable right now. cupy (NVIDIA/CUDA) is checked
+    first, then mlx (Apple Silicon/Metal) -- in practice at most one of the
+    two is ever actually installable on a given machine (see each's
+    pyproject.toml platform marker), so this ordering is mostly about which
+    diagnostic message a mixed/unusual environment sees first, not a real
+    preference between them.
 
     "sklearn" is CPU-only and is never auto-selected: benchmarked at ~15x
     slower than the "numpy" tier despite computing the same math (agrees to
@@ -109,15 +157,23 @@ def detect_backend():
     cupy-smoke-test diagnostic."""
     if not _cupy_installed():
         logger.info("cupy not installed -- install pydreg[gpu] for GPU scoring")
-        return "numpy"
-
-    if not _cuda_runtime_available():
+    elif not _cuda_runtime_available():
         logger.info(
             "cupy installed but no usable CUDA GPU detected at runtime -- falling back to CPU"
         )
-        return "numpy"
+    else:
+        return "cupy"
 
-    return "cupy"
+    if not _mlx_installed():
+        logger.info("mlx not installed -- install pydreg[mlx] for Apple Silicon GPU scoring")
+    elif not _mlx_gpu_available():
+        logger.info(
+            "mlx installed but no usable Metal GPU detected at runtime -- falling back to CPU"
+        )
+    else:
+        return "mlx"
+
+    return "numpy"
 
 
 class Scorer:
@@ -324,7 +380,89 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
     return predict
 
 
-def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None):
+def _build_mlx_predict_fn(dreg_model, sv_chunk=32_768):
+    """Apple Silicon counterpart to _build_cupy_predict_fn -- same near-
+    verbatim port of DREGModel.predict's chunked RBF dual-sum formula (same
+    expanded squared-distance trick, same chunking over support vectors),
+    evaluated on an MLX device array (Apple's own array framework, running
+    on the machine's Metal GPU) instead of a CuPy one. Same rationale for
+    being a from-scratch port of the *formula* rather than a routed-through
+    third-party SVM library applies here too -- see that function's and
+    this module's docstrings.
+
+    The two matmuls (X @ SV.T and K @ coefs) are plain MLX ops, dispatched
+    to Metal Performance Shaders GEMMs. The elementwise glue between them
+    (sq_x + sq_sv - 2*cross, then exp(-gamma*...)) is wrapped in
+    `mx.compile`, MLX's own supported graph-fusion mechanism -- the direct
+    counterpart to the cupy tier's cupy.ElementwiseKernel, and chosen for
+    the same reason that tier didn't stick with cp.fuse(): both are "the
+    library's own mature, documented fusion path" rather than a hand-written
+    kernel, and mx.compile is exactly that (unlike cp.fuse, mx.compile
+    handles this function's actual call pattern correctly out of the box --
+    confirmed on real Apple M4 hardware with n_sv=605,187 and the default
+    sv_chunk below, where the last chunk is a smaller, different shape than
+    the rest, the same shape-mismatch case that broke cp.fuse()). gamma is
+    closed over as a plain Python float rather than passed as a traced
+    mx.compile argument, for the same reason cupy's ElementwiseKernel bakes
+    it in as a literal rather than a runtime argument -- avoiding any
+    dtype-promotion ambiguity between a Python scalar and the float32
+    arrays it's multiplied against (confirmed on real hardware: if this
+    silently promoted to float64 anywhere, the whole expression would raise
+    outright, since Metal has no float64 support at all -- see
+    MLX_SMOKE_TEST_ATOL's comment -- so getting a clean float32 result here
+    is itself evidence the promotion behaved as intended, not just an
+    assumption).
+
+    Unlike cupy, float32 for the GEMMs/kernel isn't a deliberate speed/
+    precision tradeoff here -- it's the only option MLX's GPU backend
+    supports at all (float64 arrays raise outright on the Metal device, see
+    MLX_SMOKE_TEST_ATOL's comment). That also means, unlike cupy's
+    `y_scaled` (a float64 *device* array accumulated entirely on-GPU),
+    there is no float64 accumulator MLX can hold on-device here -- so this
+    function pulls each chunk's small (query_chunk,)-sized MLX result back
+    to a host NumPy float64 array and accumulates there instead. This is a
+    small, cheap transfer (one (query_chunk,) vector per iteration, not the
+    full (query_chunk, sv_chunk) kernel matrix), and gives the same
+    cross-chunk summation insurance cupy's float64 accumulator does, just
+    on the host instead of the device.
+
+    Confirmed on real Apple M4 hardware at a realistic problem size
+    (605,187 SVs x 360 features, 4096-query batches): agrees with the
+    NumPy float64 reference to ~1e-5 max-abs-diff on synthetic data of that
+    shape, comfortably inside MLX_SMOKE_TEST_ATOL, and ~22x faster
+    wall-clock than the NumPy tier at that same size once mx.compile has
+    warmed up (first call per distinct chunk shape pays a one-time Metal
+    shader compile cost). See docs/OPTIMIZATION.md and docs/PERF_LOG.md."""
+    import mlx.core as mx
+
+    SV = mx.array(dreg_model.SV, dtype=mx.float32)
+    coefs = mx.array(dreg_model.coefs, dtype=mx.float32)
+    sq_sv = mx.sum(SV**2, axis=1)
+    gamma = dreg_model.gamma
+    rho = dreg_model.rho
+    n_sv = dreg_model.n_sv
+
+    @mx.compile
+    def _rbf_chunk(X, sq_x, sv_block, sq_sv_block, coefs_block):
+        cross = X @ sv_block.T
+        K = mx.exp(-gamma * (sq_x + sq_sv_block[None, :] - 2 * cross))
+        return K @ coefs_block
+
+    def predict(X_scaled):
+        X = mx.array(X_scaled, dtype=mx.float32)
+        sq_x = mx.sum(X**2, axis=1)[:, None]
+        y_scaled = np.zeros(X_scaled.shape[0], dtype=np.float64)
+        for start in range(0, n_sv, sv_chunk):
+            end = min(start + sv_chunk, n_sv)
+            chunk = _rbf_chunk(X, sq_x, SV[start:end], sq_sv[start:end], coefs[start:end])
+            y_scaled += np.array(chunk, dtype=np.float64)
+        y_scaled -= rho
+        return y_scaled
+
+    return predict
+
+
+def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None):
     """Builds (and caches, on `dreg_model._scorer_cache`) a Scorer for the
     requested backend. backend=None ("auto") picks the best available tier
     via detect_backend(). An explicit backend name that isn't usable raises
@@ -337,7 +475,11 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None):
     _build_cupy_predict_fn's own default. This is the main lever for
     trading GPU memory for fewer, larger (better-amortized) kernel launches
     -- see that function's docstring. Real GPU memory headroom varies by
-    card, so this is deliberately left tunable rather than hardcoded."""
+    card, so this is deliberately left tunable rather than hardcoded.
+
+    mlx_sv_chunk: the same lever as cupy_sv_chunk, but for the "mlx" tier
+    -- how many support vectors to evaluate per Metal kernel/GEMM call;
+    None uses _build_mlx_predict_fn's own default."""
     resolved = backend or detect_backend()
     if resolved not in DEFAULT_QUERY_CHUNK:
         raise ValueError(
@@ -362,6 +504,22 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None):
                 f"cupy is installed but could not build a GPU predict function: {e}"
             ) from e
         predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy", atol=CUPY_SMOKE_TEST_ATOL)
+
+    elif resolved == "mlx":
+        try:
+            import mlx.core  # noqa: F401
+        except ModuleNotFoundError as e:
+            raise BackendUnavailable(
+                "mlx is not installed (pip install 'pydreg[mlx]')"
+            ) from e
+        try:
+            mlx_kwargs = {} if mlx_sv_chunk is None else {"sv_chunk": mlx_sv_chunk}
+            mlx_predict = _build_mlx_predict_fn(dreg_model, **mlx_kwargs)
+        except Exception as e:
+            raise BackendUnavailable(
+                f"mlx is installed but could not build a GPU predict function: {e}"
+            ) from e
+        predict_fn = _wrap_sklearn_like(dreg_model, mlx_predict, "mlx", atol=MLX_SMOKE_TEST_ATOL)
 
     elif resolved == "sklearn":
         try:

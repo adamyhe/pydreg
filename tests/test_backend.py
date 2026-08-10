@@ -12,6 +12,9 @@ from pydreg.models import DREGModel
 def test_detect_backend_reports_missing_cupy(monkeypatch, caplog):
     backend.detect_backend.cache_clear()
     monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
+    # Isolates the cupy-fallback path from whatever mlx actually is on the
+    # machine running this test (e.g. a real Apple Silicon dev box).
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
 
     with caplog.at_level(logging.INFO, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
@@ -43,11 +46,56 @@ def test_detect_backend_reports_no_cuda_without_probe_details(monkeypatch, caplo
     backend.detect_backend.cache_clear()
     monkeypatch.setattr(backend, "_cupy_installed", lambda: True)
     monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: False)
+    # Isolates the cupy-fallback path from whatever mlx actually is on the
+    # machine running this test (e.g. a real Apple Silicon dev box).
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
 
     with caplog.at_level(logging.INFO, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
     assert "cupy installed but no usable CUDA GPU detected at runtime -- falling back to CPU" in caplog.text
+
+
+def test_detect_backend_reports_missing_mlx(monkeypatch, caplog):
+    backend.detect_backend.cache_clear()
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
+
+    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+        assert backend.detect_backend() == "numpy"
+
+    assert "mlx not installed" in caplog.text
+
+
+def test_detect_backend_reports_no_metal_gpu_without_probe_details(monkeypatch, caplog):
+    backend.detect_backend.cache_clear()
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: True)
+    monkeypatch.setattr(backend, "_mlx_gpu_available", lambda: False)
+
+    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+        assert backend.detect_backend() == "numpy"
+
+    assert "mlx installed but no usable Metal GPU detected at runtime -- falling back to CPU" in caplog.text
+
+
+def test_detect_backend_uses_mlx_when_metal_gpu_available(monkeypatch):
+    backend.detect_backend.cache_clear()
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: True)
+    monkeypatch.setattr(backend, "_mlx_gpu_available", lambda: True)
+
+    assert backend.detect_backend() == "mlx"
+
+
+def test_detect_backend_prefers_cupy_over_mlx_when_both_available(monkeypatch):
+    backend.detect_backend.cache_clear()
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: True)
+    monkeypatch.setattr(backend, "_cuda_runtime_available", lambda: True)
+    monkeypatch.setattr(backend, "_mlx_installed", lambda: True)
+    monkeypatch.setattr(backend, "_mlx_gpu_available", lambda: True)
+
+    assert backend.detect_backend() == "cupy"
 
 
 def _tiny_svr_model():
@@ -235,6 +283,172 @@ def test_explicit_cupy_build_scorer_raises_when_not_installed():
         backend.build_scorer(model, "cupy")
     except backend.BackendUnavailable as e:
         assert "cupy is not installed" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def test_mlx_gpu_available_uses_mlx(monkeypatch):
+    fake_core = types.SimpleNamespace(metal=types.SimpleNamespace(is_available=lambda: True))
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_core))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+
+    assert backend._mlx_gpu_available()
+
+
+def _fake_mlx_module():
+    # Unlike cupy's kernel-source-string ElementwiseKernel, mx.compile just
+    # wraps a plain Python function operating on mx arrays -- so, since
+    # MLX's array API is (like CuPy's) a deliberate drop-in match for
+    # NumPy's, this fake can reuse real NumPy functions directly and treat
+    # mx.compile as a no-op decorator, with no GPU-specific behavior left
+    # to stand in for.
+    return types.SimpleNamespace(
+        array=lambda data, dtype=None: np.asarray(data, dtype=dtype),
+        sum=np.sum,
+        exp=np.exp,
+        compile=lambda f: f,
+        float32=np.float32,
+        float64=np.float64,
+    )
+
+
+def _install_fake_mlx(monkeypatch):
+    fake_core = _fake_mlx_module()
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_core))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    return fake_core
+
+
+def test_build_mlx_predict_fn_matches_dreg_model_predict(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+
+    predict = backend._build_mlx_predict_fn(model)
+    X_raw = np.random.default_rng(1).normal(size=(4, model.n_features))
+    X_scaled = (X_raw - model.x_center) / model.x_scale
+
+    y_scaled = predict(X_scaled)
+    reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
+    # atol loosened from 1e-10: the GEMMs/kernel are deliberately float32
+    # (Metal has no float64 support at all -- see
+    # _build_mlx_predict_fn's docstring), so some genuine ~1e-7-relative
+    # rounding is expected here, not just formula agreement.
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
+
+
+def test_build_mlx_predict_fn_chunks_over_support_vectors(monkeypatch):
+    # sv_chunk smaller than n_sv exercises the multi-iteration accumulation
+    # loop, not just the single-chunk fast path.
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+
+    predict = backend._build_mlx_predict_fn(model, sv_chunk=2)
+    X_raw = np.random.default_rng(2).normal(size=(3, model.n_features))
+    X_scaled = (X_raw - model.x_center) / model.x_scale
+
+    y_scaled = predict(X_scaled)
+    reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
+    np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
+
+
+def test_explicit_mlx_build_scorer_builds_a_working_scorer(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+
+    scorer = backend.build_scorer(model, "mlx")
+    X_raw = np.random.default_rng(3).normal(size=(4, model.n_features))
+
+    assert scorer.backend == "mlx"
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
+
+
+def _mlx_build_with_offset(offset):
+    """Wraps the real _build_mlx_predict_fn so its predict_fn returns a
+    fixed y_scaled offset -- used to place a smoke-test divergence at a
+    precise, known distance from the reference, rather than relying on
+    real float32 rounding (which the NumPy-standin fake doesn't actually
+    reproduce)."""
+    real_build = backend._build_mlx_predict_fn
+
+    def build(dreg_model, **kwargs):
+        real_predict = real_build(dreg_model, **kwargs)
+
+        def offset_predict(X_scaled):
+            return real_predict(X_scaled) + offset
+
+        return offset_predict
+
+    return build
+
+
+def test_explicit_mlx_build_scorer_tolerates_a_divergence_between_the_two_tolerances(
+    monkeypatch,
+):
+    # mlx's GEMMs/kernel are float32 (Metal has no float64 support at all)
+    # -- MLX_SMOKE_TEST_ATOL (1e-3) exists specifically so a real divergence
+    # in this band (bigger than the default 1e-4, but expected for float32)
+    # doesn't raise.
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+    # y_scale=2.0 on this fixture, so a 3e-4 offset in y_scaled space is
+    # 6e-4 in the final (unscaled) space the smoke test actually compares.
+    monkeypatch.setattr(backend, "_build_mlx_predict_fn", _mlx_build_with_offset(3e-4))
+
+    scorer = backend.build_scorer(model, "mlx")
+    X_raw = np.random.default_rng(5).normal(size=(4, model.n_features))
+    scorer.predict(X_raw)  # should not raise
+
+
+def test_explicit_mlx_build_scorer_still_rejects_a_divergence_past_its_looser_tolerance(
+    monkeypatch,
+):
+    # Confirms MLX_SMOKE_TEST_ATOL loosens the check, it doesn't disable it.
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+    monkeypatch.setattr(backend, "_build_mlx_predict_fn", _mlx_build_with_offset(1.0))
+
+    try:
+        backend.build_scorer(model, "mlx").predict(
+            np.random.default_rng(6).normal(size=(4, model.n_features))
+        )
+    except backend.BackendUnavailable as e:
+        assert "do not match the NumPy reference" in str(e)
+    else:
+        raise AssertionError("expected BackendUnavailable")
+
+
+def test_explicit_mlx_build_scorer_threads_mlx_sv_chunk_through(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+    seen_kwargs = {}
+    real_build = backend._build_mlx_predict_fn
+
+    def spying_build(dreg_model, **kwargs):
+        seen_kwargs.update(kwargs)
+        return real_build(dreg_model, **kwargs)
+
+    monkeypatch.setattr(backend, "_build_mlx_predict_fn", spying_build)
+
+    scorer = backend.build_scorer(model, "mlx", mlx_sv_chunk=2)
+    X_raw = np.random.default_rng(4).normal(size=(3, model.n_features))
+
+    assert seen_kwargs == {"sv_chunk": 2}
+    np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
+
+
+def test_explicit_mlx_build_scorer_raises_when_not_installed(monkeypatch):
+    # Simulates mlx being absent regardless of whether it's actually
+    # installed in the environment running this test (e.g. a real Apple
+    # Silicon dev machine with the `mlx` extra installed) -- assigning None
+    # in sys.modules is the standard way to force the next `import` of that
+    # name to raise ModuleNotFoundError.
+    monkeypatch.setitem(sys.modules, "mlx.core", None)
+    model = _tiny_svr_model()
+
+    try:
+        backend.build_scorer(model, "mlx")
+    except backend.BackendUnavailable as e:
+        assert "mlx is not installed" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
 
