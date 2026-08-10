@@ -2310,3 +2310,45 @@ simply didn't happen to hit a borderline-rounding case with their
 particular fixture data. Updated `integer_bigwig_pair`'s docstring to
 clarify its bit-identical guarantee covers the summation step only, not
 the logistic-scale step downstream of it.
+
+## 2026-08-10 — unified `--peak-calling-cores` and numba's thread count into one `--cores` knob
+
+Once `features._binned_sums_batch_numba`/`infp._windowed_sums_numba`
+started using `parallel=True` (this session's earlier entries), the
+pipeline had two independent, uncoordinated parallelism controls: `-p`/
+`--peak-calling-cores` (user-set, governing only `peaks.call_peaks`'s
+`ProcessPoolExecutor`) and numba's own thread count (never user-set,
+silently defaulting to every detected core for the feature-extraction/
+informative-position-scanning kernels). First pass renamed the flag to
+`--peak-calling-processes` to make its narrow scope explicit, on the
+reasoning that a name change alone would resolve the ambiguity -- correctly
+called out as the wrong fix: two differently-scoped knobs, however clearly
+labeled, still let a run end up restricted in one stage and unrestricted
+in another. A machine with `--cores 4` set (thinking that capped pydreg's
+footprint) would still see numba's kernels spin up threads across every
+core on the box.
+
+**Fix: one `cores` parameter, threaded through consistently.**
+`pipeline.run(cores=1, ...)` now calls `numba.set_num_threads(cores)` once,
+early (before any numba-parallelized kernel runs), and passes the same
+value through to `peaks.call_peaks`'s `ProcessPoolExecutor(max_workers=
+cores)` -- previously two names (`peak_calling_cores` in `pipeline.run`/
+`peaks.call_peaks`, an unnamed numba default elsewhere), now one name and
+one value everywhere in the call chain. The CLI flag is `-p`/`--cores`
+(was `-p`/`--peak-calling-cores`) -- `-p` kept as-is since the short flag
+itself was never the confusing part.
+
+Renamed throughout: `cli.py` (flag + dest), `pipeline.py` (`run`'s
+parameter + docstring), `peaks.py` (`call_peaks`'s parameter, its
+docstring, and the `_init_peak_worker` BLAS-pinning comment that
+referenced the old name), `tests/test_peaks.py`. `README.md` and
+`docs/OPTIMIZATION.md` updated to describe the unified knob;
+`docs/timing_scripts.sh` (a runnable script, not just documentation)
+updated so it keeps working. Historical entries above that mention
+`--peak-calling-cores` (e.g. the 2026-07-14 BLAS-oversubscription
+investigation) are left as-is per this log's own rule against editing past
+entries except to fix factual errors -- they accurately describe what was
+run, under the name that flag had at the time. All 78 tests pass; reran
+the CLI end-to-end with `--cores 2` as a real sanity check beyond the test
+suite, since `numba.set_num_threads` is a runtime call this project hadn't
+exercised before.

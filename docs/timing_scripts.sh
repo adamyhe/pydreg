@@ -3,11 +3,11 @@ GM12878_groseq G1 G2 G5 G7 G3 G6 Jurkat_ChROseq_2 Jurkat_leChROseq K562_groseq J
 for f in GM12878_groseq G1 G2 G5 G7 G3 G6 Jurkat_ChROseq_2 Jurkat_leChROseq K562_groseq Jurkat_ChROseq_1 Jurkat_ChROseq Jurkat_PROseq K562_mnetseq K562_mnetseq_1 K562_mnetseq_2;
 do
   /usr/bin/time -v -o pydreg/${f}.time.log \
-    pydreg ${f}.pl.bw ${f}.mn.bw pydreg/${f} -v --peak-calling-cores 16
+    pydreg ${f}.pl.bw ${f}.mn.bw pydreg/${f} -v --cores 16
 done
 
 f="PROseq_merged_QC_end"; /usr/bin/time -v -o pydreg/${f}.time.log \
-    pydreg ${f}_plus.bw ${f}_minus.bw pydreg/${f} -v --peak-calling-cores 16
+    pydreg ${f}_plus.bw ${f}_minus.bw pydreg/${f} -v --cores 16
 
 f="Sample_K562UNT_121109_proseq_1_QC"; /usr/bin/time -v -o pydreg/${f}.time.log \
     pydreg ${f}_plus.bw ${f}_minus.bw pydreg/${f} -v -p 16

@@ -117,11 +117,11 @@ def test_call_peaks_parallel_matches_serial(monkeypatch, rf_model):
     monkeypatch.setattr(peaks.stats, "build_cormat", lambda starts, scores: np.eye(5) * 0.01)
     serial_raw, serial_bed = call_peaks(
         dense_infp, peak_broad, 0.05, rf_model,
-        pv_adjust="none", pv_threshold=1.0, peak_calling_cores=1,
+        pv_adjust="none", pv_threshold=1.0, cores=1,
     )
     parallel_raw, parallel_bed = call_peaks(
         dense_infp, peak_broad, 0.05, rf_model,
-        pv_adjust="none", pv_threshold=1.0, peak_calling_cores=2,
+        pv_adjust="none", pv_threshold=1.0, cores=2,
     )
 
     assert serial_raw is not None
