@@ -506,10 +506,26 @@ synthetic scan on this session's hardware. See `docs/PERF_LOG.md`'s
 2026-08-10 entry for the full profile breakdown and both fixes' individual
 numbers.
 
+## One `--cores` knob, not several: peak calling's worker processes and numba's thread count
+
+`pipeline.run`'s `cores` parameter (`--cores`/`-p` on the CLI) is applied
+consistently across every parallel stage in the pipeline, rather than
+being a peak-calling-specific setting: `numba.set_num_threads(cores)` is
+called once, early, governing the thread count for the numba-parallelized
+feature-extraction/informative-position-scanning kernels
+(`features._binned_sums_batch_numba`, `infp._windowed_sums_numba`), and
+the same value is threaded through to `peaks.call_peaks`'s
+`ProcessPoolExecutor(max_workers=cores)` for the final peak-calling stage.
+Deliberately one number, not two independently-tunable ones — a pipeline
+that restricted peak calling to, say, 4 processes while numba's kernels
+defaulted to using every detected core elsewhere would both undersell
+available hardware in one stage and oversubscribe it in another, depending
+on which stage you happened to be looking at.
+
 ## Peak calling: parallelism and per-worker BLAS pinning
 
 The final peak-calling stage runs as one independent unit of work per broad
-candidate peak, so it parallelizes trivially across `--peak-calling-cores`
+candidate peak, so it parallelizes trivially across `--cores`
 worker processes (each handling `--peak-calling-block-width` broad peaks at
 a time, tuned for load balancing across uneven peak sizes). Each worker is
 pinned to a single BLAS thread on startup — the linear algebra inside the

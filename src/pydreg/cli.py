@@ -63,13 +63,18 @@ def main(argv=None):
     )
     parser.add_argument(
         "-p",
-        "--peak-calling-cores",
+        "--cores",
         type=int,
         default=1,
-        help="worker processes for the final CPU peak-calling stage; legacy "
-        "dREG parallelized this stage in 500-peak blocks. Set this to the max "
-        "number of cores you can spare -- the default of 1 is just a safe "
-        "starting point, not a recommendation",
+        help="cores pydreg is allowed to use, applied consistently across "
+        "the pipeline: worker processes for the final CPU peak-calling "
+        "stage (legacy dREG parallelized this stage in 500-peak blocks), "
+        "and numba's thread count for the parallelized feature-extraction/"
+        "informative-position-scanning kernels -- one number instead of "
+        "two independently-tunable ones, so the pipeline can't end up "
+        "restricted in one stage and unrestricted in another. Set this to "
+        "the max number of cores you can spare -- the default of 1 is just "
+        "a safe, non-surprising starting point, not a recommendation",
     )
     parser.add_argument(
         "--peak-calling-block-width",
@@ -124,7 +129,7 @@ def main(argv=None):
         query_chunk=args.query_chunk,
         cupy_sv_chunk=args.cupy_sv_chunk,
         mlx_sv_chunk=args.mlx_sv_chunk,
-        peak_calling_cores=args.peak_calling_cores,
+        cores=args.cores,
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,

@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
+import numba
 import numpy as np
 import pybigtools
 from tqdm.auto import tqdm
@@ -158,7 +159,7 @@ def run(
     query_chunk=None,
     cupy_sv_chunk=None,
     mlx_sv_chunk=None,
-    peak_calling_cores=1,
+    cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
@@ -174,7 +175,19 @@ def run(
     position scan, position scoring, and peak calling (off by default for
     library use; pydreg.cli enables it; auto-hidden if stdout isn't a terminal
     regardless). Returns a dict with dense_infp/raw_peak/peak_bed/min_score
-    for programmatic use regardless of write_outputs."""
+    for programmatic use regardless of write_outputs.
+
+    cores: one number applied consistently across every parallel stage in
+    the pipeline -- both peaks.call_peaks's ProcessPoolExecutor (worker
+    processes for the final peak-calling stage) and numba's thread count
+    for the parallelized feature-extraction/informative-position-scanning
+    kernels (features._binned_sums_batch_numba, infp._windowed_sums_numba).
+    Deliberately one knob, not two independently-tunable ones -- a run
+    restricted to N cores in one stage but left unrestricted (numba
+    defaults to every detected core) in another would both undersell
+    available hardware and oversubscribe it, depending on which stage you
+    looked at."""
+    numba.set_num_threads(cores)
     bw_plus = pybigtools.open(plus_bw_path)
     bw_minus = pybigtools.open(minus_bw_path)
 
@@ -236,7 +249,7 @@ def run(
             pv_adjust=pv_adjust,
             pv_threshold=pv_threshold,
             progress=progress,
-            peak_calling_cores=peak_calling_cores,
+            cores=cores,
             peak_calling_block_width=peak_calling_block_width,
             pmv_laplace_cdf_maxpts=pmv_laplace_cdf_maxpts,
             pmv_laplace_cdf_eps=pmv_laplace_cdf_eps,

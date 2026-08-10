@@ -322,14 +322,14 @@ def _init_peak_worker(
 ):
     # Each pmv_laplace call does a handful of tiny (order-5) Cholesky
     # decompositions inside SciPy's Genz-Bretz CDF integration -- far too
-    # small to benefit from BLAS multithreading, but with peak_calling_cores
-    # worker processes each independently defaulting to a full-machine-sized
-    # BLAS thread pool, this oversubscribes real cores by a large factor
-    # (e.g. 16 workers x 48-thread default on a 48-core box) for zero
-    # benefit. Pin every worker (and the main process, for the
-    # peak_calling_cores<=1 serial fallback -- this is called there too) to
-    # a single BLAS thread; persists process-wide since this isn't used as a
-    # context manager (see threadpoolctl.threadpool_limits's own docs).
+    # small to benefit from BLAS multithreading, but with `cores` worker
+    # processes each independently defaulting to a full-machine-sized BLAS
+    # thread pool, this oversubscribes real cores by a large factor (e.g.
+    # 16 workers x 48-thread default on a 48-core box) for zero benefit.
+    # Pin every worker (and the main process, for the cores<=1 serial
+    # fallback -- this is called there too) to a single BLAS thread;
+    # persists process-wide since this isn't used as a context manager
+    # (see threadpoolctl.threadpool_limits's own docs).
     threadpoolctl.threadpool_limits(limits=1)
     _WORKER_STATE["rf_model"] = rf_model
     _WORKER_STATE["min_score"] = min_score
@@ -425,7 +425,7 @@ def call_peaks(
     pv_adjust="fdr",
     pv_threshold=0.05,
     progress=False,
-    peak_calling_cores=1,
+    cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
@@ -433,10 +433,14 @@ def call_peaks(
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
     rfsplit.find_rf_peaks() per broad peak whose max score clears
-    min_score. When peak_calling_cores > 1, candidate broad peaks are split
+    min_score. When cores > 1, candidate broad peaks are split
     into blocks and processed in worker processes, matching legacy dREG's
     BLOCKWIDTH/snowfall execution model but allowing smaller blocks for
-    better load balancing.
+    better load balancing. `cores` is the same value pipeline.run() passes
+    to numba.set_num_threads() for the feature-extraction/informative-
+    position-scanning kernels -- one pipeline-wide core budget, not a
+    peak-calling-specific one; this function just spends its share on
+    processes rather than numba threads.
 
     dense_infp: DataFrame with columns chrom, start, end, score (+ infp
     flag, unused here). peak_broad: DataFrame from get_broadpeak_summary
@@ -477,12 +481,12 @@ def call_peaks(
         )
     )
     logger.info(
-        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling core(s) "
+        "calling %d broad peaks in %d blocks of up to %d with %d peak-calling process(es) "
         "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g)",
         len(candidates),
         len(tasks),
         block_width,
-        peak_calling_cores,
+        cores,
         pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps,
     )
@@ -559,10 +563,10 @@ def call_peaks(
             other_block,
         )
 
-    if peak_calling_cores and peak_calling_cores > 1 and len(tasks) > 1:
+    if cores and cores > 1 and len(tasks) > 1:
         try:
             with ProcessPoolExecutor(
-                max_workers=peak_calling_cores,
+                max_workers=cores,
                 initializer=_init_peak_worker,
                 initargs=(
                     rf_model,
