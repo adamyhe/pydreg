@@ -472,7 +472,39 @@ prior NumPy fancy-indexing version — see `docs/PERF_LOG.md`'s 2026-08-10
 entry for the full investigation (including an initial, corrected
 assumption that this only mattered on very fast GPUs). Real before/after
 numbers on this table specifically (TITAN Xp/A100) haven't been re-run yet
-— the entry above predates this change.
+— the entry above predates this change. `_binned_sums_batch_numba` was
+later parallelized across positions too (`numba.prange`, embarrassingly
+parallel, no cross-position reduction) for another ~3-4x on top of the
+sequential jit, still bit-identical — see docs/PERF_LOG.md.
+
+## Informative-position scanning: NumPy's per-call overhead, not the bigWig I/O, was the bottleneck
+
+`infp.get_informative_positions` scans each chromosome for candidate
+positions passing an OR/AND read-depth filter (see `docs/METHODS.md` for
+what this step is for). A profile on a realistic 2-chromosome synthetic
+bigWig (chr21/chr22-sized, ~837K informative positions found) turned up
+two Python-side steps costing *more* combined than the actual bigWig I/O
+they were built around:
+
+- **`np.unique(np.concatenate(centers))`** (deduplicating candidate
+  positions found across 9 phases, which overlap heavily) was 28% of total
+  time — replaced with a chromosome-sized boolean mask
+  (`mask[centers] = True; np.nonzero(mask)`), which gives the exact same
+  sorted+deduplicated result without a comparison sort (every candidate is
+  already bounded to `[0, chrom_size)` by construction). ~3x faster on
+  this step.
+- **`_windowed_sums_from_fine`'s `reshape(...).sum(axis=1)`** was 35% of
+  total time — replaced with a numba kernel. NumPy's generic
+  N-dimensional reduction carries real fixed per-row overhead that
+  dominates when each reduction is very short, and dREG's own most common
+  case (the OR-window/step ratio) sums only 2 elements per output bin —
+  measured **11x faster** in numba for that ratio specifically (a smaller
+  ~2x for the AND-window's wider ratio).
+
+Combined: **305ms → 146ms (~2.1x)** warm wall-clock time for the same
+synthetic scan on this session's hardware. See `docs/PERF_LOG.md`'s
+2026-08-10 entry for the full profile breakdown and both fixes' individual
+numbers.
 
 ## Peak calling: parallelism and per-worker BLAS pinning
 

@@ -2183,3 +2183,74 @@ since they never opened handles themselves in the first place -- they only
 ever received already-open readers). All 72 tests pass; ran the CLI
 end-to-end once more afterward as an extra sanity check beyond the test
 suite.
+
+## 2026-08-10 — profiled and optimized `infp.get_informative_positions` (~2.1x, plus a real test-coverage gap closed)
+
+Asked directly whether `infp.py` had anything left to optimize, following
+the `features.py` work above. Unlike that investigation, this one started
+with a real profile instead of reading the code for suspicious patterns --
+built a realistic 2-chromosome (chr21/chr22-sized, 46M/50Mbp) synthetic
+bigWig pair and ran `cProfile` over `get_informative_positions`, since
+eyeballing the code (already collapsed from up to 27 `bw.values()` calls
+per chromosome down to 1 per strand, per an earlier optimization) didn't
+suggest an obvious next target the way `_binned_sums_batch`'s gather
+pattern did.
+
+**Baseline: 305ms wall time, 837K informative positions, for the two
+synthetic chromosomes.** cProfile breakdown: `_windowed_sums_from_fine`'s
+reshape+sum 35% (107ms), `np.unique(np.concatenate(centers))` 28% (87ms,
+`_unique_hash` + `sort`), the actual bigWig I/O (`windowed_sum`) only 27%
+(82ms) -- so *more* total time was going to two Python-side aggregation
+steps than to the I/O they were built around, on data at this scale.
+
+**Fix 1: `np.unique` -> a chromosome-sized boolean mask (~3x on that
+step).** Every candidate center is already bounded to `[0, chrom_size)` by
+construction, and `np.nonzero` on a 1D array returns indices in increasing
+order by definition -- so `mask = np.zeros(chrom_size+1, bool); mask[
+np.concatenate(centers)] = True; np.nonzero(mask)[0]` gives the exact same
+sorted, deduplicated result as `np.unique(np.concatenate(centers))`,
+without a comparison sort. Measured on the real candidate arrays (400K-436K
+unique out of 583K-638K raw candidates per chromosome -- heavy overlap
+across the 9 phases is exactly why the sort was expensive): 38ms -> 12-14ms
+per chromosome. Extracted into a new `_dedupe_centers(chrom_size, centers)`
+helper specifically so it could be unit-tested directly with small
+hand-built arrays rather than only indirectly through a full bigWig scan.
+
+**Fix 2: `_windowed_sums_from_fine`'s reshape+sum -> a numba kernel (~11x
+for the far more common case).** Benchmarked NumPy's `usable.reshape(
+n_bins, ratio).sum(axis=1)` against an equivalent numba loop at both real
+ratios: `WINDOW_OR`'s ratio (100/50=2, used every phase) was **11x**
+faster in numba (2.687ms -> 0.236ms for a 1M-element fine array);
+`WINDOW_AND`'s ratio (1000/50=20) was a more modest ~2x (0.320ms ->
+0.144ms). Root cause matches the theme from `features.py`'s numba
+investigation: NumPy's generic N-dimensional reduction machinery carries
+real fixed per-row overhead that dominates specifically when each
+reduction is very short (summing only 2 elements per output bin) --
+exactly the shape of dREG's own OR-window/step ratio, not a contrived
+worst case. `parallel=True`/`prange` over output bins added on top for the
+same reason as `_binned_sums_batch_numba` (independent per-bin work, no
+cross-bin reduction) -- confirmed bit-identical against the NumPy
+reference across randomized inputs at both ratios.
+
+**Combined, real-hardware result on this session's M4**: 305ms -> 146ms
+warm (post-JIT-compile) wall time for the same 837K-position synthetic
+scan, ~2.1x overall. (The very first call in a fresh process pays a
+one-time numba compilation cost for these two new jitted functions, same
+caveat as every other numba addition in this project -- irrelevant to a
+real `pydreg` run, which calls `get_informative_positions` once per
+process, but worth noting so a future benchmark doesn't mistake
+compilation time for steady-state cost.)
+
+**Closed a real test-coverage gap found along the way.** `infp.py` had no
+dedicated test file at all before this change -- `get_informative_positions`
+was only exercised indirectly (one edge-case test in `test_features.py`,
+plus the full pipeline's end-to-end test). Added `tests/test_infp.py`:
+direct unit tests for `_dedupe_centers` against the `np.unique` reference
+it replaced (including an empty-arrays edge case that caught a real, if
+narrow, test-construction bug of its own -- `np.array([])` defaults to
+`float64`, which breaks boolean-mask fancy indexing; real callers never
+hit this since `np.nonzero()` always returns `int64` even from an empty or
+float-dtype input), plus a handful of `get_informative_positions`-level
+tests (finds the known synthetic peak, sorted/deduplicated output, the
+plus-only-chromosome edge case, empty result for an all-too-small-chromosome
+input). All 78 tests pass (72 + 6 new).
