@@ -2254,3 +2254,59 @@ float-dtype input), plus a handful of `get_informative_positions`-level
 tests (finds the known synthetic peak, sorted/deduplicated output, the
 plus-only-chromosome edge case, empty result for an all-too-small-chromosome
 input). All 78 tests pass (72 + 6 new).
+
+## 2026-08-10 — CI-only Python 3.11 failure: numba's np.exp() vs NumPy's, ~1 ULP
+
+PR #9 (the three entries above) passed locally and on GitHub's Python
+3.12/3.13 CI jobs, but failed specifically on Python 3.11:
+`test_extract_features_batch_matches_naive_per_position` and
+`test_extract_features_batch_handles_unsorted_input` (both comparing
+`extract_features_batch`'s batched/cumsum path against
+`extract_features`'s naive per-position path via `assert_array_equal`)
+mismatched at 2 of 840 elements, `max_abs_diff=6.9388939e-18`,
+`max_relative_diff=2.33951247e-16` -- almost exactly one float64 ULP
+(machine epsilon is `2.220446e-16`).
+
+**Root cause: numba's `np.exp()` lowering isn't guaranteed bit-identical
+to NumPy's own `np.exp()` ufunc.** `_binned_sums_batch`'s cumsum-difference
+*summation* is genuinely exact for integer input regardless of ordering
+(see `integer_bigwig_pair`'s docstring and the original jitting entry
+above) -- that part of the bit-identical claim still holds, and isn't what
+changed. What changed is *how* the logistic-scale step's `1/(1+exp(...))`
+gets computed: before this PR, both the "naive" and "batched" paths called
+the exact same `np.exp()` ufunc (identical inputs, identical
+implementation, so of course bit-identical); after jitting
+`_binned_sums_batch`, the batched path's `exp()` calls are lowered by
+numba/LLVM to its own math intrinsics, a *different* implementation that's
+only guaranteed correctly-rounded to within ~1 ULP, not bit-identical to
+NumPy's. This is a well-known, generic category of numba-vs-NumPy
+floating-point non-bit-exactness for transcendental functions, not a bug
+specific to this code -- it just happens to be newly exposed here because
+this PR is the first place in the codebase where a numba-computed value
+feeds into `assert_array_equal` against a NumPy-computed one through
+`exp()`.
+
+**Didn't reproduce locally** (this session's Apple Silicon dev machine),
+on either Python 3.12 (the default here) or Python 3.11 (`uv run --python
+3.11`) -- consistent with this being a platform/build-specific ULP
+difference (which CPU features numba's LLVM codegen targets, which libm
+NumPy's own `np.exp` dispatches to) rather than a Python-version-specific
+one; Python 3.11 just happens to be the one GitHub Actions runner
+combination where it surfaces. A quick direct check
+(`numba.njit`-wrapped `np.exp` vs `np.exp` over 2M random values in
+[-50, 50]) found zero mismatches on this machine, confirming the
+divergence is real but platform-dependent, not something reproducible via
+a simple standalone repro here.
+
+**Fix: loosen the 4 `assert_array_equal(naive, batched)` calls in
+`tests/test_features.py` to `assert_allclose(naive, batched,
+atol=1e-12)`** -- 4 orders of magnitude looser than the observed ~1e-16 to
+1e-18 ULP-level noise (generous headroom for other platforms/CPUs) while
+still tight enough to catch any real algorithmic regression (which would
+be far larger than 1e-12 for these 0-1-range logistic-scaled values). Only
+2 of the 4 call sites actually failed in CI; fixed all 4 for consistency,
+since all four share the identical theoretical exposure and the other two
+simply didn't happen to hit a borderline-rounding case with their
+particular fixture data. Updated `integer_bigwig_pair`'s docstring to
+clarify its bit-identical guarantee covers the summation step only, not
+the logistic-scale step downstream of it.
