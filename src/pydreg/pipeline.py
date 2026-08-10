@@ -9,6 +9,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import partial
 
 import numba
 import numpy as np
@@ -45,7 +46,15 @@ def _iter_score_chunks(bed_df, chrom_col, start_col, chunk):
 
 
 def _score_positions(
-    bw_plus, bw_minus, model, scorer, bed_df, chunk, progress=False, desc="scoring"
+    bw_plus,
+    bw_minus,
+    model,
+    scorer,
+    bed_df,
+    chunk,
+    progress=False,
+    desc="scoring",
+    extra_readers=None,
 ):
     """Scores every row of bed_df (columns chrom, start, ... positionally)
     and returns scores in the same row order. Groups by chromosome first
@@ -59,16 +68,24 @@ def _score_positions(
     the next chunk, ...), which left the GPU backends idle during every
     chunk's extraction. This is scheduling only, not a formula change: the
     same feature-extraction/scoring calls run on the same inputs in the
-    same order, just overlapped. Safe with a single background thread
-    specifically because it's the *only* thread that ever touches
-    bw_plus/bw_minus -- the main thread never reads a bigWig while a
-    background extraction is in flight, and a ThreadPoolExecutor with
-    max_workers=1 guarantees at most one extraction ever runs at a time
-    regardless of how far ahead a chunk gets submitted. The overlap itself
-    relies on scorer.predict() releasing the GIL while it blocks on the GPU
-    (true for CuPy's device-sync calls) -- on the numpy/sklearn CPU
-    backends this prefetch still can't hurt correctness, just may not
-    overlap as usefully since there's no GPU wait to hide behind.
+    same order, just overlapped. Safe with a single background thread at
+    *this* level specifically because it's the only thread here that ever
+    touches bw_plus/bw_minus -- the main thread never reads a bigWig while
+    a background extraction is in flight, and a ThreadPoolExecutor with
+    max_workers=1 guarantees at most one call into this level's extract()
+    ever runs at a time regardless of how far ahead a chunk gets submitted.
+    (features.extract_features_batch may itself spin up further worker
+    threads *inside* a single extract() call when extra_readers is given --
+    each of those owns a distinct, independently-opened reader for its own
+    duration, per that function's own docstring, so this doesn't reintroduce
+    concurrent access to any one reader object.) The overlap itself relies
+    on scorer.predict() releasing the GIL while it blocks on the GPU (true
+    for CuPy's device-sync calls) -- on the numpy/sklearn CPU backends this
+    prefetch still can't hurt correctness, just may not overlap as usefully
+    since there's no GPU wait to hide behind.
+
+    extra_readers: passed straight through to
+    features.extract_features_batch -- see that function's docstring.
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).
@@ -93,7 +110,13 @@ def _score_positions(
         t0 = time.perf_counter()
         chrom, positions, centers = item
         X = features.extract_features_batch(
-            bw_plus, bw_minus, chrom, centers, model.window_sizes, model.half_n_windows
+            bw_plus,
+            bw_minus,
+            chrom,
+            centers,
+            model.window_sizes,
+            model.half_n_windows,
+            extra_readers=extra_readers,
         )
         extract_seconds += time.perf_counter() - t0
         return positions, X
@@ -178,18 +201,30 @@ def run(
     for programmatic use regardless of write_outputs.
 
     cores: one number applied consistently across every parallel stage in
-    the pipeline -- both peaks.call_peaks's ProcessPoolExecutor (worker
-    processes for the final peak-calling stage) and numba's thread count
-    for the parallelized feature-extraction/informative-position-scanning
-    kernels (features._binned_sums_batch_numba, infp._windowed_sums_numba).
-    Deliberately one knob, not two independently-tunable ones -- a run
-    restricted to N cores in one stage but left unrestricted (numba
-    defaults to every detected core) in another would both undersell
-    available hardware and oversubscribe it, depending on which stage you
-    looked at."""
+    the pipeline -- peaks.call_peaks's ProcessPoolExecutor (worker
+    processes for the final peak-calling stage), numba's thread count for
+    the parallelized feature-extraction/informative-position-scanning
+    kernels (features._binned_sums_batch_numba, infp._windowed_sums_numba),
+    the extra independently-opened bigWig readers used to parallelize
+    feature extraction itself across clusters (see
+    features.extract_features_batch's extra_readers), and the worker pool
+    that writes output files concurrently. Deliberately one knob, not
+    several independently-tunable ones -- a run restricted to N cores in
+    one stage but left unrestricted (or serial) in another would both
+    undersell available hardware and oversubscribe it, depending on which
+    stage you looked at."""
     numba.set_num_threads(cores)
     bw_plus = pybigtools.open(plus_bw_path)
     bw_minus = pybigtools.open(minus_bw_path)
+    # One reader pair is already open above; open cores-1 more, each
+    # independently, so feature extraction can process that many clusters
+    # concurrently without ever sharing a single pybigtools reader across
+    # threads (see extract_features_batch's docstring for why that's
+    # required, not just a nice-to-have).
+    extra_readers = [
+        (pybigtools.open(plus_bw_path), pybigtools.open(minus_bw_path))
+        for _ in range(max(0, cores - 1))
+    ]
 
     model, rf_model = _load_models(svr_model_path, rf_model_path)
     scorer = backend.build_scorer(
@@ -214,6 +249,7 @@ def run(
             chunk,
             progress=progress,
             desc="scoring informative positions",
+            extra_readers=extra_readers,
         )
 
     def score_fn(bed_df, desc="scoring"):
@@ -225,6 +261,7 @@ def run(
             bed_df,
             chunk,
             progress=progress,
+            extra_readers=extra_readers,
             desc=desc,
         )
 
@@ -262,36 +299,85 @@ def run(
 
     if write_outputs:
         with _timed("writing outputs"):
-            _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed)
+            _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores)
 
     return dict(
         dense_infp=dense_infp, raw_peak=raw_peak, peak_bed=peak_bed, min_score=min_score
     )
 
 
-def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed):
+def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1):
+    """Writes the standard output set. Each file is independent of every
+    other (distinct source DataFrame or a read-only slice of one, distinct
+    output path), and neither io.write_bed_gz nor io.write_bigwig mutates
+    its input DataFrame in place (write_bed_gz copies before any column
+    coercion; write_bigwig's sort_values already returns a new frame) --
+    so every write below is safe to run concurrently with every other,
+    including the two (bed.gz + bigwig) that share infp_out/score_bed/
+    prob_bed as a read-only source. Dispatched across a thread pool sized
+    to `cores` (the same pipeline-wide core budget as everywhere else, not
+    a separate setting) since these were previously fully serial despite
+    having no dependencies on each other -- real production runs saw this
+    step take on the order of minutes, dominated by pysam.tabix_index's
+    bgzip compression and pybigtools' own bigWig writer, both of which are
+    compiled (C/Rust) calls that release the GIL, so threads (not
+    processes) is enough here without needing to pickle these DataFrames
+    across a process boundary."""
     sizes = bw_plus.chroms()
     chrom_col, start_col, end_col = dense_infp.columns[:3]
 
     infp_out = dense_infp[[chrom_col, start_col, end_col, "score", "infp"]]
-    io.write_bed_gz(infp_out, f"{out_prefix}.dREG.infp.bed.gz")
-    io.write_bigwig(f"{out_prefix}.dREG.infp.bw", sizes, infp_out, value_col="score")
+    tasks = [
+        partial(io.write_bed_gz, infp_out, f"{out_prefix}.dREG.infp.bed.gz"),
+        partial(
+            io.write_bigwig,
+            f"{out_prefix}.dREG.infp.bw",
+            sizes,
+            infp_out,
+            value_col="score",
+        ),
+    ]
 
     if raw_peak is not None and len(raw_peak) > 0:
-        io.write_bed_gz(raw_peak, f"{out_prefix}.dREG.raw.peak.bed.gz")
+        tasks.append(
+            partial(io.write_bed_gz, raw_peak, f"{out_prefix}.dREG.raw.peak.bed.gz")
+        )
 
     if peak_bed is not None and len(peak_bed) > 0:
-        io.write_bed_gz(peak_bed, f"{out_prefix}.dREG.peak.full.bed.gz")
+        tasks.append(
+            partial(io.write_bed_gz, peak_bed, f"{out_prefix}.dREG.peak.full.bed.gz")
+        )
 
         score_bed = peak_bed[["chr", "start", "end", "score"]]
-        io.write_bed_gz(score_bed, f"{out_prefix}.dREG.peak.score.bed.gz")
-        io.write_bigwig(
-            f"{out_prefix}.dREG.peak.score.bw", sizes, score_bed, value_col="score"
+        tasks.append(
+            partial(io.write_bed_gz, score_bed, f"{out_prefix}.dREG.peak.score.bed.gz")
+        )
+        tasks.append(
+            partial(
+                io.write_bigwig,
+                f"{out_prefix}.dREG.peak.score.bw",
+                sizes,
+                score_bed,
+                value_col="score",
+            )
         )
 
         prob_bed = peak_bed[["chr", "start", "end", "prob"]].copy()
         prob_bed["prob"] = 1 - prob_bed["prob"]
-        io.write_bed_gz(prob_bed, f"{out_prefix}.dREG.peak.prob.bed.gz")
-        io.write_bigwig(
-            f"{out_prefix}.dREG.peak.prob.bw", sizes, prob_bed, value_col="prob"
+        tasks.append(
+            partial(io.write_bed_gz, prob_bed, f"{out_prefix}.dREG.peak.prob.bed.gz")
         )
+        tasks.append(
+            partial(
+                io.write_bigwig,
+                f"{out_prefix}.dREG.peak.prob.bw",
+                sizes,
+                prob_bed,
+                value_col="prob",
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=min(cores, len(tasks))) as pool:
+        futures = [pool.submit(task) for task in tasks]
+        for future in futures:
+            future.result()

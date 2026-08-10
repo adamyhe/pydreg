@@ -2352,3 +2352,126 @@ run, under the name that flag had at the time. All 78 tests pass; reran
 the CLI end-to-end with `--cores 2` as a real sanity check beyond the test
 suite, since `numba.set_num_threads` is a runtime call this project hadn't
 exercised before.
+
+## 2026-08-10 — density-aware feature-extraction clustering, multi-threaded extraction, and parallel output writing
+
+Prompted by real production numbers on a TITAN Xp and a P100 (both 16
+cores): the gap-filled-positions scoring step was extraction-bound by
+6-7x (51-64s extracting vs 8s predicting, ~1,600-2,000 pos/s vs ~75,000
+pos/s for the bulk scan), and CPU usage never approached saturating 16
+cores on any scoring step. Root-caused via a synthetic repro rather than
+guessed: `extract_features_batch`'s clustering only ever capped on
+absolute span (`_MAX_SHARED_FETCH_WIDTH`, 5,000,000bp), so sparse point
+sets -- gap-filled points exist specifically to fill sparse gaps between
+dense informative regions -- got merged into a handful of multi-megabyte
+clusters regardless of how few actual query points fell inside them. A
+50Mbp synthetic chromosome with 4,522 sparse points collapsed into just 10
+clusters averaging 5.08Mbp each; once numba's warm, `_binned_sums_batch`
+was negligible (1% of time) -- the cost was `fetch_raw` (37%) and
+`np.cumsum` (62%), both O(span), both genuinely single-threaded (no BLAS,
+no numba, nothing for extra cores to do). That's exactly why CPU never
+saturated: for this step, the work wasn't parallelizable in its existing
+form at all.
+
+**Fix 1: density-aware clustering (`features._build_clusters`).** A
+cluster now only extends to include the next point when doing so adds no
+wasted fetch span -- i.e. only when that point's own
+`[center-max_dist, center+max_dist+1)` window would already overlap (or
+touch) the previous point's, which happens exactly when consecutive
+centers are within `2*max_dist+1` of each other.
+`_MAX_SHARED_FETCH_WIDTH` remains as a backstop against a pathological
+chain of points each exactly at that threshold apart, not the primary
+splitting rule anymore. Dense position sets (the bulk scan, 10bp-densified
+positions -- consecutive gaps far under `2*max_dist+1`) cluster exactly as
+before; only genuinely sparse sets change behavior. Verified via three new
+unit tests (`tests/test_features.py`): splits on density even well under
+the absolute-span cap, still merges within the density threshold, and the
+absolute-span backstop still fires for a pathological equally-spaced
+chain.
+
+**Fix 2: multi-threaded cluster extraction
+(`extract_features_batch(..., extra_readers=...)`).** pybigtools readers
+aren't safe for concurrent use from multiple threads (confirmed in an
+earlier entry's investigation, via `pybigtools`'s Rust source), so
+parallelizing across clusters needs a genuinely independent reader per
+worker, not just more threads sharing the existing one. `pipeline.run`
+now opens `cores-1` extra `(bw_plus, bw_minus)` pairs up front (one
+reader pair was already open for the primary use), and
+`extract_features_batch` statically partitions clusters round-robin
+across `min(cores, n_clusters)` worker threads, each owning exactly one
+reader pair for its entire lifetime -- never handed to another
+concurrently-running task, so there's no risk of two threads touching the
+same reader at once (a lock-free-by-construction design, not
+lock-protected). Falls back to the original single-threaded loop whenever
+`extra_readers` is omitted or there are fewer clusters than reader pairs,
+so this is fully backward compatible for every existing caller (all prior
+tests pass unchanged) and a no-op at the default `cores=1`.
+
+**Avoided oversubscription between the two parallelism axes.** With
+`cores` extraction worker threads each also capable of running a
+`parallel=True` numba kernel internally, naively leaving numba at its
+global `cores`-thread setting would let `cores` workers x `cores` numba
+threads compete for `cores` physical cores. Confirmed directly (not
+assumed) that `numba.set_num_threads()`/`get_num_threads()` are
+thread-local -- two threads setting different values concurrently keep
+their own independent settings, confirmed with a small threading repro
+before relying on it. Each extraction worker thread now calls
+`numba.set_num_threads(max(1, numba.get_num_threads() // n_workers))`
+before processing its clusters: when there are many small clusters
+(sparse case, post-fix-1), `n_workers` maxes out at `cores` and each
+worker gets 1 numba thread, relying purely on cluster-level parallelism;
+when there are few large clusters (dense case), `n_workers` stays small
+and each worker retains a meaningful numba thread share, preserving the
+per-cluster `parallel=True` win from the earlier entry. Both axes degrade
+gracefully into each other depending on how the actual position set
+clusters, rather than one being tuned at the expense of the other.
+
+**Measured, not just reasoned about.** A synthetic sparse benchmark
+(50Mbp chromosome, ~900 gap-like point groups, matching the shape of the
+real gap-filled-positions problem) on this session's 10-core Apple M4:
+density-aware clustering + multi-threading combined gave a **2.2x**
+speedup over the original span-only/single-threaded behavior (9,773 ->
+21,459 pos/s), with `extract_features_batch`'s own reader-count sweep
+showing diminishing returns past ~8 readers on this 10-core machine (9,500
+-> 16,320 -> 19,797 -> 18,881 pos/s at 1/4/8/16 readers). This
+single-50Mbp-chromosome test almost certainly *understates* the real
+production win: the earlier investigation into why this session's own
+50Mbp repro (~18k pos/s) fell short of matching the real ~2k pos/s
+reported in production pointed at scale -- production scans 69
+chromosomes/contigs, so the total wasted span the old span-only rule
+would have fetched genome-wide was likely 50-100x larger than what a
+single 50Mbp chromosome could ever demonstrate. Real before/after numbers
+on the actual TITAN Xp/P100 hardware that motivated this haven't been
+re-measured yet (no such hardware available in this session) -- that's
+the natural follow-up once available.
+
+**Correctness, verified two ways.** All 84 tests pass, including 5 new
+ones covering `_build_clusters`'s density-vs-span behavior and
+`extra_readers`' parallel-vs-single-threaded equivalence
+(`np.array_equal`, not just close). Beyond the unit tests, ran the actual
+CLI end-to-end on a 20Mbp synthetic genome with real gaps between 15
+scattered signal regions, `--backend mlx`, once with `--cores 1` and once
+with `--cores 8`: informative-position count, dense-position count, and
+broad/candidate/significant peak counts matched exactly, and every output
+column except `prob` (peaks.py's `pmv_laplace` p-value, already
+documented as inheriting ordinary QMC run-to-run noise, unrelated to
+feature extraction) was byte-identical between the two runs.
+
+**Fix 3: parallel output writing (`pipeline._write_outputs`).** Real
+production runs saw this step take on the order of minutes. The up-to-8
+output files it writes (infp bed.gz+bigwig, raw/full/score/prob peak
+bed.gz, score/prob peak bigwig) are each independent -- distinct output
+path, and neither `io.write_bed_gz` nor `io.write_bigwig` mutates its
+input DataFrame in place (write_bed_gz copies before any column coercion;
+write_bigwig's `sort_values` already returns a new frame), so even the
+pairs that share a source DataFrame (`infp_out`, `score_bed`, `prob_bed`)
+are safe to write concurrently. Dispatched across a
+`ThreadPoolExecutor(max_workers=min(cores, len(tasks)))` -- the same
+`cores` budget as everywhere else, not a separate setting. Threads, not
+processes: `pysam.tabix_index`'s bgzip compression and pybigtools' own
+bigWig writer are both compiled (C/Rust) calls expected to release the
+GIL, avoiding both the complexity and the DataFrame-pickling cost a
+process pool would add. New test
+(`test_write_outputs_parallel_matches_serial`) confirms byte-identical
+`.bed.gz` contents and identical `.bw` values between `cores=1` and
+`cores=4`.

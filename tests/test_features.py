@@ -182,6 +182,110 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
+def test_build_clusters_splits_on_density_not_just_absolute_span():
+    # max_dist=500 => 2*max_dist+1=1001 is the density threshold. Two dense
+    # groups (50bp apart internally) separated by a ~40,000bp gap -- far
+    # more than 1001 apart, but nowhere near _MAX_SHARED_FETCH_WIDTH
+    # (5,000,000) -- must now split into 2 clusters instead of 1, since
+    # merging them would fetch ~40,000bp that no query point needs.
+    max_dist = 500
+    sorted_centers = np.array([10_000, 10_050, 10_100, 50_000, 50_050])
+    clusters = features._build_clusters(sorted_centers, max_dist)
+    assert clusters == [(0, 3), (3, 5)]
+
+
+def test_build_clusters_still_merges_within_density_threshold():
+    max_dist = 500
+    # consecutive gaps here (50, 1000) are both <= 2*500+1=1001 -- one
+    # cluster, same as the old span-only rule would have given.
+    sorted_centers = np.array([10_000, 10_050, 11_050])
+    clusters = features._build_clusters(sorted_centers, max_dist)
+    assert clusters == [(0, 3)]
+
+
+def test_build_clusters_respects_max_shared_fetch_width_backstop(monkeypatch):
+    # A long chain of points each exactly at the density threshold apart
+    # (so the density rule alone would keep merging them forever) must
+    # still split once accumulated span exceeds _MAX_SHARED_FETCH_WIDTH.
+    max_dist = 500
+    step = 2 * max_dist + 1
+    monkeypatch.setattr(features, "_MAX_SHARED_FETCH_WIDTH", step * 3)
+    sorted_centers = np.arange(0, step * 10, step)
+    clusters = features._build_clusters(sorted_centers, max_dist)
+    assert len(clusters) > 1
+    for start_i, end_i in clusters:
+        span = sorted_centers[end_i - 1] - sorted_centers[start_i]
+        assert span <= step * 3
+
+
+def test_extract_features_batch_with_extra_readers_matches_single_threaded(
+    integer_bigwig_pair,
+):
+    plus_path, minus_path = integer_bigwig_pair
+    window_sizes = [10, 25, 50]
+    half_n_windows = [10, 10, 10]
+    # max_dist=500 (density threshold 1001) -- 4 groups spaced 20,000bp
+    # apart form 4 independent clusters, more than the 2 reader pairs
+    # below, exercising the round-robin multi-cluster-per-worker path.
+    # Kept within integer_bigwig_pair's 100,000bp chromosome.
+    centers = np.concatenate(
+        [base + np.arange(3) * 50 for base in [5_000, 25_000, 45_000, 65_000]]
+    )
+
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
+    single_threaded = features.extract_features_batch(
+        bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
+    )
+
+    bw_plus2 = pybigtools.open(plus_path)
+    bw_minus2 = pybigtools.open(minus_path)
+    extra_readers = [(pybigtools.open(plus_path), pybigtools.open(minus_path))]
+    parallel = features.extract_features_batch(
+        bw_plus2,
+        bw_minus2,
+        "chr1",
+        centers,
+        window_sizes,
+        half_n_windows,
+        extra_readers=extra_readers,
+    )
+    np.testing.assert_array_equal(single_threaded, parallel)
+
+
+def test_extract_features_batch_extra_readers_exceeding_cluster_count(
+    integer_bigwig_pair,
+):
+    # More reader pairs than clusters must not error -- n_workers is
+    # capped at len(clusters), excess reader pairs simply go unused.
+    plus_path, minus_path = integer_bigwig_pair
+    window_sizes = [10, 25, 50]
+    half_n_windows = [10, 10, 10]
+    centers = np.array([49800, 49850, 49900])  # one dense cluster
+
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
+    reference = features.extract_features_batch(
+        bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
+    )
+
+    bw_plus2 = pybigtools.open(plus_path)
+    bw_minus2 = pybigtools.open(minus_path)
+    extra_readers = [
+        (pybigtools.open(plus_path), pybigtools.open(minus_path)) for _ in range(4)
+    ]
+    result = features.extract_features_batch(
+        bw_plus2,
+        bw_minus2,
+        "chr1",
+        centers,
+        window_sizes,
+        half_n_windows,
+        extra_readers=extra_readers,
+    )
+    np.testing.assert_array_equal(reference, result)
+
+
 def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
     plus_path = str(tmp_path / "plus.bw")
     minus_path = str(tmp_path / "minus.bw")

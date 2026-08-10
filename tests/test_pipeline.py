@@ -24,7 +24,9 @@ class _RecordingScorer:
         return X.sum(axis=1)
 
 
-def _fake_extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+def _fake_extract_features_batch(
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+):
     return np.asarray(centers, dtype=float)[:, None]
 
 
@@ -60,7 +62,9 @@ def test_score_positions_matches_naive_sequential_result_across_chunks_and_chrom
 
 
 def test_score_positions_logs_accumulated_extract_and_predict_seconds(monkeypatch, caplog):
-    def slow_extract(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+    def slow_extract(
+        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+    ):
         time.sleep(0.05)
         return np.asarray(centers, dtype=float)[:, None]
 
@@ -97,7 +101,9 @@ def test_score_positions_prefetches_next_chunk_while_scoring_current(monkeypatch
     predict_started = threading.Event()
     unblock_predict = threading.Event()
 
-    def fake_extract(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+    def fake_extract(
+        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+    ):
         extract_started.append(tuple(int(c) for c in centers))
         if len(extract_started) == 2:
             second_extract_started.set()
@@ -238,3 +244,81 @@ def test_pipeline_runs_end_to_end_on_synthetic_signal(synthetic_bigwig_pair, tmp
     assert os.path.exists(f"{out_prefix}.dREG.infp.bed.gz")
     assert os.path.exists(f"{out_prefix}.dREG.infp.bw")
     assert os.path.exists(f"{out_prefix}.dREG.peak.full.bed.gz")
+
+
+class _FakeChromReader:
+    def __init__(self, sizes):
+        self._sizes = sizes
+
+    def chroms(self):
+        return dict(self._sizes)
+
+
+def _write_outputs_files(tmp_path, out_prefix, cores):
+    dense_infp = pd.DataFrame(
+        {
+            "chrom": ["chr1"] * 4,
+            "start": [0, 10, 20, 30],
+            "end": [1, 11, 21, 31],
+            "score": [0.1, 0.9, 0.2, 0.8],
+            "infp": [1, 1, 1, 1],
+        }
+    )
+    raw_peak = pd.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "start": [0, 20],
+            "end": [11, 31],
+            "score": [0.9, 0.8],
+            "prob": [0.01, 0.02],
+        }
+    )
+    peak_bed = pd.DataFrame(
+        {
+            "chr": ["chr1", "chr1"],
+            "start": [0, 20],
+            "end": [11, 31],
+            "score": [0.9, 0.8],
+            "prob": [0.01, 0.02],
+        }
+    )
+    bw_plus = _FakeChromReader({"chr1": 1000})
+    pipeline._write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores)
+
+    suffixes = [
+        ".dREG.infp.bed.gz",
+        ".dREG.infp.bw",
+        ".dREG.raw.peak.bed.gz",
+        ".dREG.peak.full.bed.gz",
+        ".dREG.peak.score.bed.gz",
+        ".dREG.peak.score.bw",
+        ".dREG.peak.prob.bed.gz",
+        ".dREG.peak.prob.bw",
+    ]
+    return {suffix: f"{out_prefix}{suffix}" for suffix in suffixes}
+
+
+def test_write_outputs_parallel_matches_serial(tmp_path):
+    import gzip
+    import os
+
+    import pybigtools
+
+    serial_paths = _write_outputs_files(tmp_path, str(tmp_path / "serial"), cores=1)
+    parallel_paths = _write_outputs_files(tmp_path, str(tmp_path / "parallel"), cores=4)
+
+    for suffix, serial_path in serial_paths.items():
+        parallel_path = parallel_paths[suffix]
+        assert os.path.exists(parallel_path)
+        if suffix.endswith(".bw"):
+            sr = pybigtools.open(serial_path)
+            pr = pybigtools.open(parallel_path)
+            np.testing.assert_array_equal(
+                sr.values("chr1", 0, 40, fillna=0.0), pr.values("chr1", 0, 40, fillna=0.0)
+            )
+        else:
+            with gzip.open(serial_path, "rt") as f:
+                serial_content = f.read()
+            with gzip.open(parallel_path, "rt") as f:
+                parallel_content = f.read()
+            assert serial_content == parallel_content
