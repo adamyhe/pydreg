@@ -647,6 +647,50 @@ that fixed overhead amortizes away and scikit-learn's own parallelism
 across trees actually wins — just not at the batch sizes this pipeline
 ever actually uses.)
 
+## The CPU ("numpy") scoring backend: fusing the RBF kernel's elementwise step into numba
+
+`DREGModel.predict()` (used directly as the "numpy" backend, and as the
+ground-truth reference every other backend's smoke test is validated
+against) computes, per support-vector chunk: a GEMM (`X_scaled @
+sv_block.T`), an elementwise squared-distance-and-`exp` step, then a
+second GEMM/GEMV (`K @ coefs_block`). Measured directly (not assumed)
+that the elementwise step — not either GEMM — was the actual bottleneck:
+on a real 605,187 SV x 360 feature model, it was ~70% of `predict()`'s
+wall time and ran at ~1.1x CPU/wall ratio on a 10-core machine, i.e.
+effectively one core, since plain NumPy ufuncs don't parallelize across
+cores on their own.
+
+`models._rbf_accumulate`, a `numba.njit(parallel=True)` kernel
+`prange`'d over queries, now fuses that elementwise step with the
+`K @ coefs_block` reduction into one pass — the CPU-tier counterpart to
+`_build_cupy_predict_fn`/`_build_mlx_predict_fn`, which already fuse this
+same glue on their respective GPU frameworks. Both GEMMs stay plain
+NumPy/BLAS calls. Verified against the real pretrained model: max abs
+diff ~1.65e-13 vs. the old separate-NumPy-calls formula (the same
+numba-`exp`-vs-NumPy-`exp` ULP-level difference already documented and
+accepted for the `infp`/`features` kernels), all existing tests pass
+unchanged.
+
+**Net effect on a 10-core Apple Silicon dev machine: `predict()` dropped
+from 21.1s to 7.0s (~3x)** — but this undersells the fused kernel itself,
+which scales to ~5.7x in isolation. The gap is that the first GEMM's own
+parallelism (via Apple's Accelerate BLAS) caps out around 1.6x on this
+machine regardless of requested thread count, and is now the dominant
+remaining cost. Whether that ceiling is specific to Accelerate's opaque
+heuristics for this GEMM's shape (a "thin" 360-wide reduction dimension
+relative to the 4096x20,000 query/support-vector dimensions), or a more
+fundamental limit, isn't answerable from one machine — `scripts/
+bench_numpy_backend_threading.py` exists to test this on real x86/Linux
+hardware (where OpenBLAS/MKL are far more common and behave differently),
+including checking for the opposite risk: numba and BLAS both using
+OpenMP threading there could contend for the same cores rather than add
+capacity, the same oversubscription failure mode `peaks._init_peak_worker`
+already guards against for its own worker processes. See
+`docs/PERF_LOG.md`'s 2026-08-13 entry for the full profiling breakdown and
+the open x86 question. Deliberately not pursued further on macOS
+specifically — CPU-only scoring there is a narrow use case now that the
+`mlx` GPU tier covers real Apple Silicon hardware.
+
 ## Loading the pretrained SVR: in-memory, not through a temp file
 
 `DREGModel.from_pretrained()` used to take 7-9s per call, even on a warm
@@ -713,6 +757,12 @@ score/prob bed.gz + bigWig pairs): neither `io.write_bed_gz` nor
 ## Reproducing these results
 
 `scripts/bench_backends.py` benchmarks the SVR backends against each other
-directly on your own hardware. `docs/PERF_LOG.md` has the full history for
-every change summarized above, including the exact numbers, the dead ends
-that didn't pan out, and the source-level evidence behind each root cause.
+directly on your own hardware. `scripts/bench_numpy_backend_threading.py`
+diagnoses the CPU backend's GEMM-vs-numba-kernel threading behavior
+specifically (BLAS thread sweeps, numba thread sweeps, and every
+combination of the two against full `predict()`) — see "The CPU
+('numpy') scoring backend" above for why that combination, not just each
+piece alone, is the real question on any given machine. `docs/PERF_LOG.md`
+has the full history for every change summarized above, including the
+exact numbers, the dead ends that didn't pan out, and the source-level
+evidence behind each root cause.
