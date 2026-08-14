@@ -241,7 +241,7 @@ def test_pipeline_runs_end_to_end_on_synthetic_signal(synthetic_bigwig_pair, tmp
 
     import os
 
-    assert os.path.exists(f"{out_prefix}.dREG.infp.bed.gz")
+    assert not os.path.exists(f"{out_prefix}.dREG.infp.bed.gz")
     assert os.path.exists(f"{out_prefix}.dREG.infp.bw")
     assert os.path.exists(f"{out_prefix}.dREG.peak.full.bed.gz")
 
@@ -286,7 +286,6 @@ def _write_outputs_files(tmp_path, out_prefix, cores):
     pipeline._write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores)
 
     suffixes = [
-        ".dREG.infp.bed.gz",
         ".dREG.infp.bw",
         ".dREG.raw.peak.bed.gz",
         ".dREG.peak.full.bed.gz",
@@ -306,6 +305,9 @@ def test_write_outputs_parallel_matches_serial(tmp_path):
 
     serial_paths = _write_outputs_files(tmp_path, str(tmp_path / "serial"), cores=1)
     parallel_paths = _write_outputs_files(tmp_path, str(tmp_path / "parallel"), cores=4)
+
+    assert not os.path.exists(f"{tmp_path / 'serial'}.dREG.infp.bed.gz")
+    assert not os.path.exists(f"{tmp_path / 'parallel'}.dREG.infp.bed.gz")
 
     for suffix, serial_path in serial_paths.items():
         parallel_path = parallel_paths[suffix]

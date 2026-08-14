@@ -153,7 +153,7 @@ Call order:
    - `select_sig_peak` (`peaks.py`): drop `prob==-1` sentinel rows (peak <100bp, no p-value computed), BH-FDR-adjust (`statsmodels.stats.multitest.multipletests(method="fdr_bh")`) across **all** candidate peaks genome-wide, keep `adj_p <= 0.05`.
 4. Output writing (`io.py`, pure glue): sort + `pysam.tabix_index(preset="bed")` for `.bed.gz`+`.tbi`; `pybigtools.open(path,"w")` write mode for `.bw` tracks. No subprocess calls.
 
-Full output set: `infp.bed.gz` (chr,start,end,score,infp-flag), `peak.full.bed.gz` (chr,start,end,score,prob,center=original.mode), `peak.score.bed.gz` (cols 1-4 of full), `peak.prob.bed.gz` (chr,start,end,1-prob), `raw.peak.bed.gz` (pre-FDR, 8 cols), plus `.bw` versions of infp/peak.score/peak.prob. `.bw` outputs are never read back in anywhere — pure visualization artifacts.
+Full output set: `peak.full.bed.gz` (chr,start,end,score,prob,center=original.mode), `peak.score.bed.gz` (cols 1-4 of full), `peak.prob.bed.gz` (chr,start,end,1-prob), `raw.peak.bed.gz` (pre-FDR, 8 cols), plus `.bw` versions of infp/peak.score/peak.prob. `infp` (chr,start,end,score,infp-flag) is written only as `.bw`, not `.bed.gz` — the bed.gz version was dropped (2026-08-13) as a debug-only duplicate that, being one row per informative/gap-filled/densified position genome-wide, was by far the largest and slowest output to write for a file most runs never read. `.bw` outputs are never read back in anywhere — pure visualization artifacts.
 
 ## Backend dispatch (`backend.py`)
 

@@ -647,22 +647,68 @@ that fixed overhead amortizes away and scikit-learn's own parallelism
 across trees actually wins — just not at the batch sizes this pipeline
 ever actually uses.)
 
+## Loading the pretrained SVR: in-memory, not through a temp file
+
+`DREGModel.from_pretrained()` used to take 7-9s per call, even on a warm
+Hugging Face cache with no network involved — comparable to or larger
+than the entire informative-position scan on a modern multi-core machine.
+Profiled component-by-component rather than guessed: reading the
+compressed file and zstd-decompressing it were both fast (well under
+1.5s combined), and so was writing the ~1.7GB decompressed result to a
+temp file (0.46s). The actual cost was `safe_open(tmp_path).get_tensor(
+"support_vectors")` — **3.65s** for that one 605,187 x 360 float64
+tensor, against `safetensors.numpy.load()` materializing *all four* of
+the model's tensors from the same bytes already in memory in **0.52s
+total**. `safe_open`'s mmap-based per-tensor access path turns out to be
+dramatically slower than a plain in-memory `load()` once a tensor gets
+large, and `pydreg.models` never needed `safe_open`'s one real advantage
+(lazy, selective tensor access) in the first place — every call site
+reads every tensor in the file anyway.
+
+`pydreg._safetensors_io.open_safetensors` now decompresses straight to
+bytes (skipping the temp file entirely) and calls
+`safetensors.numpy.load(bytes)` for tensors; the file's `__metadata__`
+header field, which that API doesn't expose, is parsed by hand instead —
+a couple of stdlib calls against safetensors' documented, stable header
+format (an 8-byte length prefix followed by that many bytes of JSON).
+Net effect: **~7-9s -> ~2-2.7s** per SVR load, verified bit-identical
+against the old path on the real pretrained model (every tensor plus the
+full metadata dict). The RF peak-splitter model is unaffected in
+practice — its tensors are tiny, so its load time was always negligible
+regardless of which safetensors API was used.
+
 ## Writing outputs in parallel
 
-`pipeline._write_outputs` writes up to 8 files (informative-position
-bed.gz + bigWig, raw/full/score/prob peak bed.gz, score/prob peak bigWig)
-that were previously written fully sequentially despite having no
+`pipeline._write_outputs` writes up to 7 files (informative-position
+bigWig, raw/full/score/prob peak bed.gz, score/prob peak bigWig) that
+were previously written fully sequentially despite having no
 dependencies on each other — real production runs saw this take on the
-order of minutes. Every write is now dispatched across a
-`ThreadPoolExecutor(max_workers=min(cores, n_files))`, the same `cores`
-budget as every other parallel stage. Safe even for the file pairs that
-share a source DataFrame (the info/score/prob bed.gz + bigWig pairs):
-neither `io.write_bed_gz` nor `io.write_bigwig` mutates its input
-DataFrame in place, so concurrent reads of the same source frame from
-multiple threads never race. Threads rather than processes, since
-`pysam.tabix_index`'s bgzip compression and pybigtools' own bigWig writer
-are both compiled calls expected to release the GIL — avoiding the cost
-of pickling potentially-large DataFrames across a process boundary.
+order of minutes. The informative-position `.bed.gz` that used to be
+output alongside its `.bw` was dropped entirely: it duplicated the same
+data purely for debugging, was never read back in anywhere, and (one row
+per informative/gap-filled/densified position genome-wide) was by far
+the largest and slowest file this step wrote.
+
+The remaining writes are dispatched across *two* pools, not one, because
+the two writers behave oppositely under threading — measured directly,
+not assumed. `pysam.tabix_index`'s bgzip compression does release the
+GIL (~5.6x speedup threading 8 concurrent calls on a 10-core machine),
+so `.bed.gz` writes go on a `ThreadPoolExecutor(max_workers=min(cores,
+n_bedgz_files))`. `pybigtools`' bigWig writer does **not** release the
+GIL safely for concurrent use: threading 4 concurrent `write_bigwig`
+calls measured **4x slower** than calling them serially (20.7s vs 5.2s
+for the same 4 files) — real lock contention inside its Rust binding,
+not just "no speedup". BigWig writes instead go on a
+`ProcessPoolExecutor(max_workers=min(cores, n_bigwig_files))`, which
+correctly parallelizes (2.5s for the same 4 files). This costs pickling
+each write's DataFrame across a process boundary, but that's cheap here
+— `pydreg.io` itself only imports numpy/pybigtools, so pool startup is
+~0.2s, not the multi-second cost a fresh numba/sklearn/scipy import
+would add — and bigWig outputs are all small now that the large infp
+`.bed.gz` is gone. Both file types are still safe to write concurrently
+with each other even when they share a source DataFrame (e.g. the
+score/prob bed.gz + bigWig pairs): neither `io.write_bed_gz` nor
+`io.write_bigwig` mutates its input DataFrame in place.
 
 ## Reproducing these results
 
