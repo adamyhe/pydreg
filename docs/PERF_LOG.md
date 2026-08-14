@@ -2715,3 +2715,65 @@ Apple/Accelerate specifically: CPU-only scoring on macOS is a narrow use
 case (the `mlx` GPU tier covers the real Apple Silicon path), so the
 fusion shipped as-is here and any further work should be driven by the
 x86 numbers, not by chasing Accelerate's opaque heuristics further.
+
+## 2026-08-13 (cont.) — real x86/Linux numbers: no BLAS/numba contention, and `--cores` now also governs BLAS
+
+Ran `scripts/bench_numpy_backend_threading.py` on real production hardware
+(32-core Haswell, OpenBLAS via `threadpoolctl` -- `libscipy_openblas64`,
+`threading_layer: pthreads`), resolving the open question from the entry
+above.
+
+**Both halves of `predict()` scale far better here than on the Apple
+Silicon dev machine.** GEMM alone: 2248ms -> 302ms, 1 -> 32 BLAS threads
+(**7.4x**, vs. Accelerate's ~1.6x ceiling regardless of thread count).
+Fused kernel alone: 988ms -> 56ms, 1 -> 32 numba threads (**17.6x**).
+Confirms the GEMM ceiling found on macOS was an Accelerate-specific
+heuristic for that GEMM's shape, not a property of the computation
+itself -- OpenBLAS tiles this GEMM over the query/support-vector
+dimensions rather than being sensitive to the thin (360) feature
+dimension the way Accelerate seemed to be.
+
+**Full `predict()`, every (BLAS threads, numba threads) combination --
+directly answers the oversubscription question this entry's predecessor
+left open:**
+
+| | numba=1 | numba=16 | numba=32 |
+|---|---|---|---|
+| blas=1 | 94.6s | 69.7s | 69.9s |
+| blas=16 | 37.2s | 15.4s | 14.5s |
+| blas=32 | 38.2s | 13.6s | **11.8s** |
+
+Every increase in either axis helps monotonically (one likely-noise blip:
+blas=16->32 at numba=1 is very slightly *slower*, 37.2s->38.2s, within
+ordinary run-to-run variance on a shared machine, not a pattern -- every
+other cell moves the expected direction). `blas=32,numba=32` is the
+fastest cell on the whole grid, not a regression from oversubscription --
+if the two were contending for cores, `blas=1,numba=32` (69.9s) would
+have beaten `blas=32,numba=32` (11.8s); it's over 5x slower instead. The
+milder risk flagged in the prior entry (two independent threading
+runtimes -- numba's `omp`, OpenBLAS's own `pthreads` here -- costing
+overhead on the 31-times-per-call handoff between them) doesn't show up
+either. Conclusion: **on this hardware, just run both at full `cores`,
+no BLAS-pinning workaround needed** -- the opposite of what
+peak-calling's workers need, and confirmed by data rather than assumed
+by analogy.
+
+**Real gap found along the way, unrelated to contention: BLAS never
+consulted `cores` at all.** `pipeline.run()` already called
+`numba.set_num_threads(cores)`, but nothing told BLAS about `cores` --
+it defaults to auto-detecting the machine's full core count regardless.
+On a shared box where a run deliberately requests fewer cores than the
+machine has (leaving headroom for other jobs), every `DREGModel.predict()`
+GEMM would have silently used every core anyway, undermining the whole
+point of `pipeline.run`'s own documented "one knob, applied consistently,
+so no stage undersells or oversubscribes independently of the others"
+design. Fixed: `pipeline.run()` now also calls
+`threadpoolctl.threadpool_limits(limits=cores)` right after
+`numba.set_num_threads(cores)`, process-wide (not a context manager,
+matching `peaks._init_peak_worker`'s own use of threadpoolctl) --
+confirmed harmless on machines with no threadpoolctl-visible BLAS (e.g.
+Apple Accelerate): `threadpool_limits()` is a documented no-op when
+`threadpool_info()` finds nothing to limit. Peak-calling's own worker
+processes are unaffected -- each still independently pins itself to a
+single BLAS thread via its own initializer, regardless of what the main
+process's limit is set to. All 87 tests pass.

@@ -14,6 +14,7 @@ from functools import partial
 import numba
 import numpy as np
 import pybigtools
+import threadpoolctl
 from tqdm.auto import tqdm
 
 from . import backend, features, infp, io, peaks
@@ -203,17 +204,38 @@ def run(
     cores: one number applied consistently across every parallel stage in
     the pipeline -- peaks.call_peaks's ProcessPoolExecutor (worker
     processes for the final peak-calling stage), numba's thread count for
-    the parallelized feature-extraction/informative-position-scanning
-    kernels (features._binned_sums_batch_numba, infp._windowed_sums_numba),
-    the extra independently-opened bigWig readers used to parallelize
-    feature extraction itself across clusters (see
+    the parallelized feature-extraction/informative-position-scanning/
+    scoring kernels (features._binned_sums_batch_numba,
+    infp._windowed_sums_numba, models._rbf_accumulate), the BLAS thread
+    count for the CPU scoring backend's GEMMs (via threadpoolctl -- see
+    below), the extra independently-opened bigWig readers used to
+    parallelize feature extraction itself across clusters (see
     features.extract_features_batch's extra_readers), and the worker pool
     that writes output files concurrently. Deliberately one knob, not
     several independently-tunable ones -- a run restricted to N cores in
     one stage but left unrestricted (or serial) in another would both
     undersell available hardware and oversubscribe it, depending on which
-    stage you looked at."""
+    stage you looked at.
+
+    The threadpoolctl call matters on its own: without it, BLAS defaults
+    to auto-detecting the machine's core count and ignores `cores`
+    entirely, so a run on a shared box that deliberately requests fewer
+    cores than the machine has would still have every DREGModel.predict()
+    GEMM silently grab every core anyway. Confirmed on real x86/Linux
+    hardware (32-core, OpenBLAS via threadpoolctl) that BLAS and numba
+    threads genuinely add capacity together here rather than contend for
+    it -- max/max was the fastest of every (BLAS threads, numba threads)
+    combination tested, not a regression -- so this is a correctness/
+    consistency fix for what `cores` means, not a performance workaround;
+    see docs/PERF_LOG.md's 2026-08-13 entries for the full sweep. Applied
+    process-wide (not as a context manager, matching
+    peaks._init_peak_worker's own use of threadpoolctl for the same
+    reason) since it should hold for this whole run, not just one call --
+    peak-calling's worker processes still independently pin themselves to
+    a single BLAS thread each via their own initializer, unaffected by
+    this main-process-wide setting."""
     numba.set_num_threads(cores)
+    threadpoolctl.threadpool_limits(limits=cores)
     bw_plus = pybigtools.open(plus_bw_path)
     bw_minus = pybigtools.open(minus_bw_path)
     # One reader pair is already open above; open cores-1 more, each

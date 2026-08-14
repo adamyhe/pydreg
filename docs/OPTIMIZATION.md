@@ -513,12 +513,18 @@ numbers.
 consistently across every parallel stage in the pipeline, rather than
 being a peak-calling-specific setting: `numba.set_num_threads(cores)` is
 called once, early, governing the thread count for the numba-parallelized
-feature-extraction/informative-position-scanning kernels
-(`features._binned_sums_batch_numba`, `infp._windowed_sums_numba`), and
-the same value is threaded through to `peaks.call_peaks`'s
-`ProcessPoolExecutor(max_workers=cores)` for the final peak-calling stage.
-Deliberately one number, not two independently-tunable ones — a pipeline
-that restricted peak calling to, say, 4 processes while numba's kernels
+feature-extraction/informative-position-scanning/scoring kernels
+(`features._binned_sums_batch_numba`, `infp._windowed_sums_numba`,
+`models._rbf_accumulate`), and the same value is threaded through to
+`peaks.call_peaks`'s `ProcessPoolExecutor(max_workers=cores)` for the
+final peak-calling stage. `threadpoolctl.threadpool_limits(limits=cores)`
+is called right alongside `numba.set_num_threads(cores)` for the same
+reason: BLAS otherwise never learns about `cores` at all and defaults to
+auto-detecting the whole machine's core count regardless of what was
+requested — confirmed harmless on machines with no threadpoolctl-visible
+BLAS (`threadpool_limits()` is a documented no-op there). Deliberately one
+number, not several independently-tunable ones — a pipeline that
+restricted peak calling to, say, 4 processes while numba's kernels or BLAS
 defaulted to using every detected core elsewhere would both undersell
 available hardware in one stage and oversubscribe it in another, depending
 on which stage you happened to be looking at.
@@ -673,21 +679,21 @@ unchanged.
 
 **Net effect on a 10-core Apple Silicon dev machine: `predict()` dropped
 from 21.1s to 7.0s (~3x)** — but this undersells the fused kernel itself,
-which scales to ~5.7x in isolation. The gap is that the first GEMM's own
-parallelism (via Apple's Accelerate BLAS) caps out around 1.6x on this
-machine regardless of requested thread count, and is now the dominant
-remaining cost. Whether that ceiling is specific to Accelerate's opaque
-heuristics for this GEMM's shape (a "thin" 360-wide reduction dimension
-relative to the 4096x20,000 query/support-vector dimensions), or a more
-fundamental limit, isn't answerable from one machine — `scripts/
-bench_numpy_backend_threading.py` exists to test this on real x86/Linux
-hardware (where OpenBLAS/MKL are far more common and behave differently),
-including checking for the opposite risk: numba and BLAS both using
-OpenMP threading there could contend for the same cores rather than add
-capacity, the same oversubscription failure mode `peaks._init_peak_worker`
-already guards against for its own worker processes. See
-`docs/PERF_LOG.md`'s 2026-08-13 entry for the full profiling breakdown and
-the open x86 question. Deliberately not pursued further on macOS
+which scales to ~5.7x in isolation. The gap there is that the first GEMM's
+own parallelism (via Apple's Accelerate BLAS) caps out around 1.6x on
+that machine regardless of requested thread count. **Confirmed on real
+x86/Linux hardware (32-core, OpenBLAS) that this ceiling is
+Accelerate-specific, not fundamental**: the same GEMM there scales 7.4x
+(1->32 BLAS threads) and the fused kernel scales 17.6x, with **no
+evidence of BLAS/numba contention** across every (BLAS threads, numba
+threads) combination tested — running both at full thread count was the
+fastest configuration on the grid, not a regression. See
+`docs/PERF_LOG.md`'s 2026-08-13 entries for the full profiling breakdown,
+including the real x86 numbers. One genuine gap did surface along the
+way: `pipeline.run()` never told BLAS about `--cores` at all, so it
+defaulted to the whole machine regardless of what was requested — fixed
+via `threadpoolctl.threadpool_limits(limits=cores)` (see "One `--cores`
+knob" above). Deliberately not pursued further on macOS
 specifically — CPU-only scoring there is a narrow use case now that the
 `mlx` GPU tier covers real Apple Silicon hardware.
 
