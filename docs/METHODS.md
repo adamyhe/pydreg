@@ -62,10 +62,12 @@ an active regulatory element. This is a large, fixed, non-retrainable model:
 
 Because evaluating an RBF kernel against 605K support vectors for every
 informative position is the single most expensive step in the pipeline,
-`pydreg` supports three interchangeable scoring backends (GPU via cuML, CPU
-via scikit-learn, and a dependency-free NumPy implementation) — see
+`pydreg` supports four interchangeable scoring backends: GPU via `cupy`
+(NVIDIA) or `mlx` (Apple Silicon), and CPU via scikit-learn or a
+dependency-free NumPy implementation (numba-accelerated internally) — see
 `docs/OPTIMIZATION.md` for why the NumPy tier, not scikit-learn, is the
-default CPU choice.
+default CPU choice, and why the GPU tiers are `cupy`/`mlx` rather than the
+`cuML` this pipeline originally used.
 
 ## 4. Peak calling
 

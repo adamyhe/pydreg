@@ -41,18 +41,25 @@ backends for this (`--backend {auto,cupy,mlx,sklearn,numpy}`):
   below.
 
 scikit-learn is available (`--backend sklearn`) but is **never
-auto-selected on CPU** — it's measured at ~14-15x slower than the NumPy tier
-for this workload, despite computing identical math (both agree to ~1e-10).
-This isn't a threading gap (forcing single-threaded BLAS doesn't change the
-NumPy tier's wall-clock time at all) — it's that libsvm's prediction path
-evaluates the kernel one query-support-vector pair at a time (with a
-heap allocation per pair), while `DREGModel.predict`'s chunked matmul
-computes the entire kernel matrix in one BLAS call. Different computational
-shape, not a tuning difference — so it isn't fixable by parallelizing
-libsvm's loop, and there's no reason to expect Intel's oneDAL-accelerated
-scikit-learn fork (`scikit-learn-intelex`) to help either, beyond the fact
-that it doesn't ship any macOS/ARM wheels at all and would need real
-engineering to even engage on a model that was never `.fit()` through it (see
+auto-selected on CPU** — originally measured at ~14-15x slower than the
+NumPy tier for this workload (despite computing identical math, both agree
+to ~1e-10), and that gap has only grown since: libsvm's own prediction
+path is unchanged, while the NumPy tier got substantially faster from the
+numba-fusion work below (see "The CPU ('numpy') scoring backend"). Re-measured
+on the same Apple M4 at a 4096-query batch (`scripts/bench_backends.py
+--backends numpy sklearn --batch-sizes 4096`): sklearn now takes 269.3s
+against the fused NumPy tier's 6.8s, **~39.6x** slower, not ~14-15x. The
+underlying reason is a genuinely different computational shape, not a
+tuning gap that closed or could close with more threads: libsvm's
+prediction path evaluates the kernel one query-support-vector pair at a
+time (with a heap allocation per pair), while `DREGModel.predict`'s
+chunked matmul computes the entire kernel matrix in one BLAS call (and,
+as of the fusion below, one fused numba kernel for the elementwise/reduce
+step in between). Not fixable by parallelizing libsvm's loop, and there's
+no reason to expect Intel's oneDAL-accelerated scikit-learn fork
+(`scikit-learn-intelex`) to help either, beyond the fact that it doesn't
+ship any macOS/ARM wheels at all and would need real engineering to even
+engage on a model that was never `.fit()` through it (see
 `docs/PERF_LOG.md` for the full investigation of both).
 
 ### Why `cupy`, not `cuML`
@@ -341,9 +348,12 @@ inside `MLX_SMOKE_TEST_ATOL` (`1e-3`, reusing `CUPY_SMOKE_TEST_ATOL`'s
 value, since both tiers hit the identical float32 catastrophic-cancellation
 limitation in the identical expanded-form squared-distance formula — see
 above), and the same order of magnitude as `cupy`'s own measured
-2.3e-4–5.4e-4 range on real NVIDIA hardware. Speed: ~19x faster than the
-NumPy tier at that same 4096-query batch size on an Apple M4 (1.19s vs
-23.1s per call, warm/post-compile). See `docs/PERF_LOG.md`'s 2026-08-10
+2.3e-4–5.4e-4 range on real NVIDIA hardware. Speed: **~6.1x** faster than
+the NumPy tier at that same 4096-query batch size on an Apple M4 (1.16s
+vs 7.06s per call, warm/post-compile, re-measured via `scripts/
+bench_backends.py` after the NumPy tier's own numba-fusion speedup below
+— originally ~19x, back when the NumPy tier's elementwise RBF step ran
+single-threaded; `mlx` itself hasn't changed). See `docs/PERF_LOG.md`'s 2026-08-10
 entry for the full numbers.
 
 Not yet investigated: real `--mlx-sv-chunk` memory-headroom tuning. MLX's

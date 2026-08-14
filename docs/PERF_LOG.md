@@ -2777,3 +2777,38 @@ Apple Accelerate): `threadpool_limits()` is a documented no-op when
 processes are unaffected -- each still independently pins itself to a
 single BLAS thread via its own initializer, regardless of what the main
 process's limit is set to. All 87 tests pass.
+
+## 2026-08-13 (cont.) — note: the sklearn/mlx/cupy-vs-numpy speedup ratios logged earlier this session predate the NumPy-tier fusion
+
+Flagging, not editing (per this log's own rule against changing past
+entries except to fix factual errors -- these were accurate when
+measured): the 2026-07-09/2026-07-14 sklearn-vs-numpy entries and the
+2026-08-10 "mlx-vs-numpy head-to-head on a real Apple M4"/"cupy-vs-numpy
+head-to-head on a real P100" entries above all used the *pre-fusion*
+NumPy tier as their baseline.
+
+Re-measured both CPU-side comparisons directly on this same Apple M4
+after the fusion (`scripts/bench_backends.py`, 4096-query batch):
+
+- **sklearn vs. numpy**: 269.3s vs. 6.8s -- **~39.6x slower, not ~14-15x**.
+  The gap *widened*, as expected: libsvm's prediction path is completely
+  unchanged, while the NumPy tier got substantially faster.
+  `docs/OPTIMIZATION.md`'s scikit-learn paragraph updated to this number.
+- **mlx vs. numpy**: NumPy dropped from 23.1s to 7.06s at the same batch,
+  so mlx's real advantage *narrowed* to **~6.1x, not ~19x**.
+  `docs/OPTIMIZATION.md`'s "Apple Silicon: the `mlx` tier" section updated
+  to the current number.
+
+Did not re-run the P100 cupy comparison (no such hardware available in
+this session) -- expect the same direction of change as mlx (a real
+narrowing of the ratio, since cupy itself hasn't changed and NumPy's
+fusion win was measured independently of GPU vendor), just unconfirmed by
+a direct number on that hardware.
+
+None of this changes which backend to pick: GPU tiers remain the right
+choice whenever available regardless of the exact multiple, NumPy remains
+the correct CPU default, and sklearn remains not worth auto-selecting
+regardless of the exact multiple either (39.6x or 14-15x, the conclusion
+is the same). It only means these specific historical ratios should not
+be quoted as pydreg's *current* backend-to-backend gaps without this
+caveat.
