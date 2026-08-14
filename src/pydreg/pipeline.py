@@ -226,7 +226,9 @@ def run(
         for _ in range(max(0, cores - 1))
     ]
 
-    model, rf_model = _load_models(svr_model_path, rf_model_path)
+    logger.info("loading models...")
+    with _timed("loading models"):
+        model, rf_model = _load_models(svr_model_path, rf_model_path)
     scorer = backend.build_scorer(
         model, backend_name, cupy_sv_chunk=cupy_sv_chunk, mlx_sv_chunk=mlx_sv_chunk
     )
