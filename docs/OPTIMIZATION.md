@@ -453,14 +453,15 @@ the GIL — concurrently calling a read method from two threads on the
 not silent corruption, but still not usable concurrently). The underlying
 reader types are generic over `CachedBBIFileRead<ReopenableFile>`,
 though — built specifically around a `Reopen` trait meant for independent
-handles onto the same file. So the safe pattern, if this is ever
-implemented, is **one independently-opened `BBIReader` per worker
-thread** (a plain `pybigtools.open()` call, trivial to make once per
-worker) rather than sharing
-`pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads. Not
-implemented — the current numbers don't justify the added complexity —
-but documented here specifically so this doesn't need re-deriving if the
-ratio ever tips further.
+handles onto the same file. So the safe pattern is **one
+independently-opened `BBIReader` per worker thread** rather than sharing
+`pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
+
+**Update: implemented, once real numbers justified it.** See "Density-
+aware clustering and multi-threaded feature extraction" below —
+`pipeline.run()` now opens `cores-1` extra reader pairs and
+`features.extract_features_batch` uses them to process clusters
+concurrently, exactly the pattern scoped out above.
 
 **Update:** the gap-filled-positions row above — extraction-dominant on
 *both* cards, not just a fast one — is exactly the case a numba-jitted
@@ -521,6 +522,62 @@ that restricted peak calling to, say, 4 processes while numba's kernels
 defaulted to using every detected core elsewhere would both undersell
 available hardware in one stage and oversubscribe it in another, depending
 on which stage you happened to be looking at.
+
+## Density-aware clustering and multi-threaded feature extraction
+
+Real production runs (TITAN Xp and P100, both 16 cores) showed the
+gap-filled-positions scoring step extraction-bound by 6-7x, at ~1,600-2,000
+pos/s versus ~75,000 pos/s for the bulk informative-position scan — and
+CPU usage never approaching 16 cores on any scoring step. Root cause:
+`extract_features_batch`'s clustering only ever capped a shared-fetch
+cluster's *absolute span* (5,000,000bp). Gap-filled points exist
+specifically to fill sparse gaps between dense informative regions, so
+this cap kept getting hit by genuinely isolated points, merging them into
+a handful of multi-megabase clusters that fetched vastly more genomic
+span than any actual query point needed — and that wasted fetch +
+`np.cumsum` work is single-threaded (no BLAS, no numba), which is exactly
+why extra cores didn't help.
+
+Two changes, addressing the two distinct problems this uncovered:
+
+- **Density-aware clustering** (`features._build_clusters`): a cluster
+  now only extends to the next point when doing so adds no wasted span —
+  i.e. only when that point's own `max_dist`-wide window would already
+  overlap the previous point's, which is exactly when consecutive points
+  are within `2*max_dist+1` of each other. The absolute-span cap remains
+  as a backstop for a pathological equally-spaced chain, not the primary
+  rule. Dense position sets (10-50bp apart) are unaffected; only genuinely
+  sparse ones change behavior.
+- **Multi-threaded cluster extraction** (`extract_features_batch(...,
+  extra_readers=...)`): `pipeline.run()` opens `cores-1` extra,
+  independently-opened `(bw_plus, bw_minus)` reader pairs (pybigtools
+  readers aren't safe for concurrent use from multiple threads — see the
+  "Overlapping feature extraction with scoring" section above), and
+  clusters are statically partitioned round-robin across worker threads,
+  each owning exactly one reader pair for its whole lifetime. Falls back
+  to the original single-threaded loop whenever there are fewer clusters
+  than reader pairs, so this is a no-op at the default `cores=1` and for
+  any dense position set that naturally forms few clusters.
+
+Combining both against the two parallelism axes needed care: each
+extraction worker thread reduces numba's own thread count to
+`numba.get_num_threads() // n_workers` (confirmed `numba.set_num_threads`
+is thread-local first, rather than assumed) — otherwise `cores` worker
+threads each running a `cores`-thread numba kernel would oversubscribe
+real cores by up to `cores²`, the same class of problem `peaks.py`'s
+per-worker BLAS pinning already solves for peak calling.
+
+Measured on this session's 10-core Apple M4 (synthetic sparse benchmark,
+not the real TITAN Xp/P100 hardware that motivated this): both changes
+combined gave a 2.2x speedup over the original span-only/single-threaded
+behavior. This single-chromosome test likely understates the real
+production win, since production scans 69 chromosomes/contigs — the total
+wasted span the old rule fetched genome-wide was almost certainly far
+larger than one chromosome can demonstrate. See `docs/PERF_LOG.md`'s
+2026-08-10 entry for the full investigation and numbers, including the
+correctness verification (a real CLI run at `--cores 1` vs `--cores 8`
+producing byte-identical output except the pre-existing stochastic
+peak-calling p-value column).
 
 ## Peak calling: parallelism and per-worker BLAS pinning
 
@@ -589,6 +646,23 @@ same tiny inputs. (At much larger batch sizes, in the thousands of rows,
 that fixed overhead amortizes away and scikit-learn's own parallelism
 across trees actually wins — just not at the batch sizes this pipeline
 ever actually uses.)
+
+## Writing outputs in parallel
+
+`pipeline._write_outputs` writes up to 8 files (informative-position
+bed.gz + bigWig, raw/full/score/prob peak bed.gz, score/prob peak bigWig)
+that were previously written fully sequentially despite having no
+dependencies on each other — real production runs saw this take on the
+order of minutes. Every write is now dispatched across a
+`ThreadPoolExecutor(max_workers=min(cores, n_files))`, the same `cores`
+budget as every other parallel stage. Safe even for the file pairs that
+share a source DataFrame (the info/score/prob bed.gz + bigWig pairs):
+neither `io.write_bed_gz` nor `io.write_bigwig` mutates its input
+DataFrame in place, so concurrent reads of the same source frame from
+multiple threads never race. Threads rather than processes, since
+`pysam.tabix_index`'s bgzip compression and pybigtools' own bigWig writer
+are both compiled calls expected to release the GIL — avoiding the cost
+of pickling potentially-large DataFrames across a process boundary.
 
 ## Reproducing these results
 

@@ -19,6 +19,8 @@ property of a specific trained model (DREGModel exposes it after loading),
 passed in explicitly here rather than imported.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numba
 import numpy as np
 
@@ -183,11 +185,11 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
     )
 
 
-# Caps the genomic span of one shared raw-fetch buffer per cluster (not the
-# number of positions in it -- see extract_features_batch); keeps a single
-# fetch from ballooning to chromosome width if a batch's positions are
-# spread out, at the cost of falling back to a second shared fetch for the
-# remainder.
+# Safety cap on one shared raw-fetch buffer's genomic span, in case a run of
+# points each exactly 2*max_dist+1 apart (the density threshold below) ever
+# produces a pathologically long chain -- not the primary clustering driver
+# (see extract_features_batch's density-aware splitting), just a backstop
+# against unbounded memory for that edge case.
 _MAX_SHARED_FETCH_WIDTH = 5_000_000
 
 
@@ -210,21 +212,84 @@ def _extract_features_cluster(
     return np.concatenate([fwd, rev], axis=1)
 
 
+def _build_clusters(sorted_centers, max_dist):
+    """Groups sorted_centers into shared-fetch clusters: extends the
+    current cluster to include the next point only when doing so adds no
+    wasted fetch span -- i.e. only when that point's own
+    [center-max_dist, center+max_dist+1) window would already overlap (or
+    touch) the previous point's, which happens exactly when consecutive
+    centers are within 2*max_dist+1 of each other. Every byte a resulting
+    cluster's shared buffer covers is therefore needed by at least one
+    point's own window; nothing is fetched "just because it was on the way"
+    to a distant next point. _MAX_SHARED_FETCH_WIDTH remains a backstop cap
+    on total cluster span, not the primary splitting rule.
+
+    This matters most for sparse position sets (e.g. peaks.find_gap_infp's
+    gap-filled points, which exist specifically to fill sparse gaps between
+    dense informative regions): previously, capping only on
+    _MAX_SHARED_FETCH_WIDTH (5,000,000bp) meant a handful of genuinely
+    isolated points scattered across a chromosome would still get merged
+    into a few multi-megabase clusters, most of whose span no query point
+    actually needed -- turning a handful of tiny per-position fetches into
+    a few enormous ones. Dense position sets (adjacent points 10-50bp
+    apart, e.g. the bulk informative-position scan) are unaffected: their
+    consecutive gaps are already far under 2*max_dist+1, so they cluster
+    exactly as before. See docs/PERF_LOG.md for the real-hardware numbers
+    that motivated this.
+
+    Returns a list of (start_i, end_i) index ranges into sorted_centers."""
+    n = sorted_centers.shape[0]
+    clusters = []
+    start_i = 0
+    while start_i < n:
+        end_i = start_i + 1
+        while (
+            end_i < n
+            and (sorted_centers[end_i] - sorted_centers[end_i - 1])
+            <= 2 * max_dist + 1
+            and (sorted_centers[end_i] - sorted_centers[start_i])
+            <= _MAX_SHARED_FETCH_WIDTH
+        ):
+            end_i += 1
+        clusters.append((start_i, end_i))
+        start_i = end_i
+    return clusters
+
+
 def extract_features_batch(
-    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
 ):
     """Same as extract_features(), for an array of centers on one
     chromosome. Returns (n_centers, n_features).
 
     Unlike calling extract_features() once per center, this fetches one
     shared raw buffer per strand for a whole cluster of nearby centers
-    (clustered by sorted position, capped at _MAX_SHARED_FETCH_WIDTH bp
-    span) instead of re-fetching an overlapping ~2*max_dist-wide window per
-    position -- adjacent informative positions are frequently 10-50bp apart
-    while max_dist can be ~100,000bp, so this is the batching this module's
-    docstring flagged as still missing relative to the C original's
-    merge_adjacent_range. Input order need not be sorted; this sorts
-    internally and restores the original order before returning."""
+    (see _build_clusters) instead of re-fetching an overlapping
+    ~2*max_dist-wide window per position -- adjacent informative positions
+    are frequently 10-50bp apart while max_dist can be ~100,000bp, so this
+    is the batching this module's docstring flagged as still missing
+    relative to the C original's merge_adjacent_range. Input order need not
+    be sorted; this sorts internally and restores the original order
+    before returning.
+
+    extra_readers: optional list of additional (bw_plus, bw_minus) reader
+    pairs, each independently opened from the same underlying bigWig files
+    (pybigtools readers aren't safe for concurrent use from multiple
+    threads -- see docs/PERF_LOG.md -- so a shared pool of *distinct*
+    reader objects is required, not just more threads). When given,
+    clusters are statically partitioned round-robin across
+    1+len(extra_readers) worker threads, each thread owning exactly one
+    reader pair for the threads's entire lifetime (never handed to another
+    concurrently-running task, so there's no risk of two threads touching
+    the same reader at once). Falls back to the original single-threaded
+    loop when omitted or when there are fewer clusters than reader pairs
+    (no point spinning up threads that would sit idle). Each worker's own
+    numba thread count is reduced to numba.get_num_threads() // n_workers
+    -- numba.set_num_threads() is thread-local (confirmed directly, not
+    assumed), so this only affects that worker's own calls -- to avoid
+    n_workers x numba's own thread count oversubscribing real cores, the
+    same class of problem peaks.py's BLAS thread-pinning already solves
+    for peak-calling workers."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -236,19 +301,47 @@ def extract_features_batch(
     n_features = 2 * int(np.sum(2 * half_n_windows))
     out = np.empty((n, n_features), dtype=np.float64)
 
-    start_i = 0
-    while start_i < n:
-        end_i = start_i + 1
-        while (
-            end_i < n
-            and (sorted_centers[end_i] - sorted_centers[start_i])
-            <= _MAX_SHARED_FETCH_WIDTH
-        ):
-            end_i += 1
-        cluster = sorted_centers[start_i:end_i]
-        out[order[start_i:end_i]] = _extract_features_cluster(
-            bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
-        )
-        start_i = end_i
+    clusters = _build_clusters(sorted_centers, max_dist)
+    reader_pairs = [(bw_plus, bw_minus)] + list(extra_readers or [])
+    n_workers = min(len(reader_pairs), len(clusters))
+
+    if n_workers <= 1:
+        for start_i, end_i in clusters:
+            cluster = sorted_centers[start_i:end_i]
+            out[order[start_i:end_i]] = _extract_features_cluster(
+                bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
+            )
+        return out
+
+    numba_threads_per_worker = max(1, numba.get_num_threads() // n_workers)
+
+    def _run_worker(reader_pair, owned_clusters):
+        bwp, bwm = reader_pair
+        numba.set_num_threads(numba_threads_per_worker)
+        computed = []
+        for start_i, end_i in owned_clusters:
+            cluster = sorted_centers[start_i:end_i]
+            computed.append(
+                (
+                    start_i,
+                    end_i,
+                    _extract_features_cluster(
+                        bwp, bwm, chrom, cluster, max_dist, window_sizes, half_n_windows
+                    ),
+                )
+            )
+        return computed
+
+    owned = [[] for _ in range(n_workers)]
+    for i, cluster_range in enumerate(clusters):
+        owned[i % n_workers].append(cluster_range)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [
+            pool.submit(_run_worker, reader_pairs[w], owned[w]) for w in range(n_workers)
+        ]
+        for future in futures:
+            for start_i, end_i, result in future.result():
+                out[order[start_i:end_i]] = result
 
     return out
