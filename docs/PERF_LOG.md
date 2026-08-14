@@ -2888,3 +2888,53 @@ reasoned, conservative starting point, not swept against real workloads.
 Worth watching whether 0.2.7's real RSS numbers (once re-measured on the
 x86 machine) actually land back near the pre-regression baseline, or
 whether the budget needs tuning.
+
+## 2026-08-14 (cont.) — real production re-test shows the memory cap isn't engaging at all; added logging instead of guessing why
+
+Two real production re-runs on the exact commit containing the previous
+entry's fix (`28c7a0a`, G2 and K562_groseq, both `--cores 16`) came back
+with peak RSS **within ~0.1% of the pre-fix numbers** -- 6.246 GiB vs.
+6.246 GiB for G2 (156KB difference, noise), 6.232 GiB vs. 6.238 GiB for
+K562_groseq. Not a partial improvement -- functionally zero effect on
+either real dataset, despite the fix working as designed on the synthetic
+repro that motivated it (900 sparse point groups forcing ~5Mbp clusters on
+a 50Mbp chromosome, `+0MB` after the fix vs. `+716MB` before).
+
+**Most likely explanation, not yet confirmed: the synthetic repro's
+cluster sizes don't represent these real datasets' actual gap-filled/
+densified cluster sizes.** `_cap_workers_for_memory` only reduces worker
+count when the `n_workers` largest clusters' combined span would exceed
+512MB -- if real clusters here are much smaller than the synthetic
+repro's (which deliberately pushed toward `_MAX_SHARED_FETCH_WIDTH`'s 5Mbp
+backstop), the cap is correctly a no-op, and unchanged RSS is the
+*expected*, not failing, outcome. But this can't be distinguished from
+"the cap has a bug and never fires" or "something else offsets the
+savings" from the numbers alone -- nothing in the existing code reported
+what worker count was actually chosen.
+
+**Fixed the actual gap: added logging instead of continuing to guess.**
+`extract_features_batch` now logs (INFO, so visible under `-v`) whenever
+the memory cap actually reduces worker count below what `--cores`/cluster
+count alone would give, including the triggering cluster's span and
+estimated size. Deliberately only logs when capping *changes* something
+(not every call) -- this function runs once per scoring chunk, easily
+hundreds of times per real run, so logging unconditionally would flood
+`-v` output for no benefit. Its absence in a real `-v` log is now itself
+informative: no such line anywhere in a run means the cap never bound for
+that run's actual data, directly confirming (rather than inferring from a
+before/after RSS delta) that extraction's clustering isn't the memory
+driver for that specific dataset.
+
+New tests confirm both directions: the log line fires with the expected
+worker-count values when the cap binds
+(`test_extract_features_batch_logs_when_memory_cap_reduces_workers`), and
+is silent when it doesn't
+(`test_extract_features_batch_does_not_log_when_cap_does_not_bind`). All
+94 tests pass.
+
+**Not yet resolved**: whether extraction clustering is actually part of
+G2/K562_groseq's real RSS regression at all, or whether the true cause
+(for these specific datasets, at least) is something else entirely that
+the earlier elimination process didn't catch. The next real `-v` run's
+logs (or absence of the new log line) should settle this directly rather
+than requiring another round of RSS-delta inference.

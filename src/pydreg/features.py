@@ -19,12 +19,15 @@ property of a specific trained model (DREGModel exposes it after loading),
 passed in explicitly here rather than imported.
 """
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import numba
 import numpy as np
 
 from . import io
+
+logger = logging.getLogger(__name__)
 
 VAL_AT_MIN = 0.01
 _ALPHA_LN99 = np.log(1 / VAL_AT_MIN - 1)  # ln(99)
@@ -366,8 +369,24 @@ def extract_features_batch(
 
     clusters = _build_clusters(sorted_centers, max_dist)
     reader_pairs = [(bw_plus, bw_minus)] + list(extra_readers or [])
-    n_workers = min(len(reader_pairs), len(clusters))
-    n_workers = _cap_workers_for_memory(clusters, sorted_centers, max_dist, n_workers)
+    requested_workers = min(len(reader_pairs), len(clusters))
+    n_workers = _cap_workers_for_memory(clusters, sorted_centers, max_dist, requested_workers)
+    if n_workers < requested_workers:
+        max_span = max(
+            (int(sorted_centers[end_i - 1]) - int(sorted_centers[start_i]) + 2 * max_dist + 1)
+            for start_i, end_i in clusters
+        )
+        logger.info(
+            "extract_features_batch: memory cap reduced workers %d -> %d for %d "
+            "clusters (largest span %d bp, ~%.0fMB) to stay under the %.0fMB "
+            "concurrent-cluster budget",
+            requested_workers,
+            n_workers,
+            len(clusters),
+            max_span,
+            max_span * _CLUSTER_BYTES_PER_BP / 1024**2,
+            _MAX_CONCURRENT_CLUSTER_BYTES / 1024**2,
+        )
 
     if n_workers <= 1:
         for start_i, end_i in clusters:

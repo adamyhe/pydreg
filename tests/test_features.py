@@ -366,6 +366,70 @@ def test_extract_features_batch_memory_cap_still_matches_uncapped_result(
     np.testing.assert_array_equal(reference, result)
 
 
+def test_extract_features_batch_logs_when_memory_cap_reduces_workers(
+    monkeypatch, integer_bigwig_pair, caplog
+):
+    import logging
+
+    monkeypatch.setattr(features, "_MAX_CONCURRENT_CLUSTER_BYTES", 1)
+    plus_path, minus_path = integer_bigwig_pair
+    window_sizes = [10, 25, 50]
+    half_n_windows = [10, 10, 10]
+    centers = np.concatenate(
+        [base + np.arange(3) * 50 for base in [5_000, 25_000, 45_000, 65_000]]
+    )
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
+    extra_readers = [
+        (pybigtools.open(plus_path), pybigtools.open(minus_path)) for _ in range(3)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="pydreg.features"):
+        features.extract_features_batch(
+            bw_plus,
+            bw_minus,
+            "chr1",
+            centers,
+            window_sizes,
+            half_n_windows,
+            extra_readers=extra_readers,
+        )
+
+    (record,) = [r for r in caplog.records if "memory cap reduced workers" in r.getMessage()]
+    assert "4 -> 1" in record.getMessage()
+
+
+def test_extract_features_batch_does_not_log_when_cap_does_not_bind(
+    integer_bigwig_pair, caplog
+):
+    import logging
+
+    plus_path, minus_path = integer_bigwig_pair
+    window_sizes = [10, 25, 50]
+    half_n_windows = [10, 10, 10]
+    centers = np.concatenate(
+        [base + np.arange(3) * 50 for base in [5_000, 25_000, 45_000, 65_000]]
+    )
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
+    extra_readers = [
+        (pybigtools.open(plus_path), pybigtools.open(minus_path)) for _ in range(3)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="pydreg.features"):
+        features.extract_features_batch(
+            bw_plus,
+            bw_minus,
+            "chr1",
+            centers,
+            window_sizes,
+            half_n_windows,
+            extra_readers=extra_readers,
+        )
+
+    assert not [r for r in caplog.records if "memory cap reduced workers" in r.getMessage()]
+
+
 def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
     plus_path = str(tmp_path / "plus.bw")
     minus_path = str(tmp_path / "minus.bw")
