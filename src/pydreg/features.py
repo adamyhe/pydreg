@@ -192,6 +192,28 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
 # against unbounded memory for that edge case.
 _MAX_SHARED_FETCH_WIDTH = 5_000_000
 
+# Empirical per-bp cost of one cluster's transient working set inside
+# _extract_features_cluster: two raw per-bp fetch buffers (forward/reverse
+# strand) plus their two cumulative-sum buffers, all float64 (~32 bytes/bp),
+# rounded up for np.abs()'s own transient copy and general slack. Used only
+# to bound *concurrency* (how many clusters' buffers can be alive at once),
+# not to predict exact memory use.
+_CLUSTER_BYTES_PER_BP = 48
+
+# Total budget for concurrently in-flight cluster buffers across every
+# extraction worker thread combined, independent of --cores. Measured
+# directly (not assumed) that letting --cores alone decide worker count
+# multiplies extraction's peak memory by roughly the core count for sparse
+# position sets (density-aware clustering's own target case): 16-way
+# clustered extraction on a synthetic sparse dataset used ~2.7x the memory
+# of single-threaded for identical data, and real production runs showed a
+# proportional ~1.2-1.3x whole-pipeline RSS increase after this session's
+# parallel-extraction work -- see docs/PERF_LOG.md. A fixed (not
+# --cores-scaled) budget keeps that ceiling roughly constant regardless of
+# how many cores a run requests; deliberately not exposed as a CLI flag
+# yet -- revisit if a real workload needs tuning it.
+_MAX_CONCURRENT_CLUSTER_BYTES = 512 * 1024 * 1024
+
 
 def _extract_features_cluster(
     bw_plus, bw_minus, chrom, cluster_centers, max_dist, window_sizes, half_n_windows
@@ -256,6 +278,38 @@ def _build_clusters(sorted_centers, max_dist):
     return clusters
 
 
+def _cap_workers_for_memory(clusters, sorted_centers, max_dist, requested_workers):
+    """Reduces `requested_workers` (already min(len(reader_pairs),
+    len(clusters))) so that the worst-case simultaneous memory footprint of
+    that many concurrently in-flight cluster buffers stays under
+    _MAX_CONCURRENT_CLUSTER_BYTES. Uses the `requested_workers` LARGEST
+    clusters' combined span for that worst case, not just the single
+    largest one or an average -- clusters are assigned round-robin (see
+    extract_features_batch), so nothing guarantees the biggest clusters
+    land one-per-worker rather than piling onto a few; assuming they could
+    all end up running concurrently is the safe bound. This means a
+    handful of huge clusters among many tiny ones correctly reduces worker
+    count by only as much as those few clusters actually require, rather
+    than penalizing every worker for the single largest cluster in the
+    whole batch.
+
+    Never reduces below 1 -- this bounds concurrency, not whether the work
+    happens at all."""
+    if requested_workers <= 1:
+        return requested_workers
+    spans = sorted(
+        (
+            int(sorted_centers[end_i - 1]) - int(sorted_centers[start_i]) + 2 * max_dist + 1
+            for start_i, end_i in clusters
+        ),
+        reverse=True,
+    )
+    for n in range(requested_workers, 1, -1):
+        if sum(spans[:n]) * _CLUSTER_BYTES_PER_BP <= _MAX_CONCURRENT_CLUSTER_BYTES:
+            return n
+    return 1
+
+
 def extract_features_batch(
     bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
 ):
@@ -289,7 +343,16 @@ def extract_features_batch(
     assumed), so this only affects that worker's own calls -- to avoid
     n_workers x numba's own thread count oversubscribing real cores, the
     same class of problem peaks.py's BLAS thread-pinning already solves
-    for peak-calling workers."""
+    for peak-calling workers.
+
+    Worker count is also capped by _cap_workers_for_memory, independent of
+    (and potentially lower than) 1+len(extra_readers): letting --cores
+    alone decide worker count means every additional reader also means
+    another cluster's fetch/cumsum buffers alive at once, which -- for
+    sparse position sets with genuinely large clusters -- measurably
+    multiplies extraction's peak memory by close to the worker count
+    itself, not just its wall time. See docs/PERF_LOG.md for the real
+    numbers behind this cap."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -304,6 +367,7 @@ def extract_features_batch(
     clusters = _build_clusters(sorted_centers, max_dist)
     reader_pairs = [(bw_plus, bw_minus)] + list(extra_readers or [])
     n_workers = min(len(reader_pairs), len(clusters))
+    n_workers = _cap_workers_for_memory(clusters, sorted_centers, max_dist, n_workers)
 
     if n_workers <= 1:
         for start_i, end_i in clusters:

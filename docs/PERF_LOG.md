@@ -2812,3 +2812,79 @@ regardless of the exact multiple either (39.6x or 14-15x, the conclusion
 is the same). It only means these specific historical ratios should not
 be quoted as pydreg's *current* backend-to-backend gaps without this
 caveat.
+
+## 2026-08-14 — bounded multi-threaded extraction's worker count by memory, not just --cores
+
+Follow-up to the RSS regression surfaced while adding a 0.2.7 timing
+column to `docs/timing_comparison.tsv`: real x86 production runs showed
+peak RSS consistently up ~1.16-1.28x (proportional across every
+experiment, not a fixed per-run amount) after this session's
+density-aware-clustering/multi-threaded-extraction work. Root-caused via
+elimination, not guessed -- tested three candidates directly:
+
+- **`extra_readers` (the extra bigWig reader pairs themselves): ruled
+  out.** Opened 32 extra reader pairs on a real bigWig and measured zero
+  RSS change -- `pybigtools` readers are just file handles, no index
+  preloading.
+- **The bigWig `ProcessPoolExecutor` write (previous entry's fix):
+  ambiguous, likely not the driver.** Pickling a synthetic 20M-row
+  `infp_out`-sized DataFrame (~1.7GB) to a worker process did cost real
+  memory, but the parent's own peak RSS after the parallel write (2431MB)
+  matched a plain serial in-process write's peak (2431MB) almost exactly
+  -- and this path does *less* work than before anyway, since `infp` is
+  `.bw`-only now, not `.bed.gz`+`.bw`.
+- **Multi-threaded feature extraction: confirmed.** Built a synthetic
+  sparse dataset shaped like real gap-filled positions (900 scattered
+  point groups on a 50Mbp chromosome) and ran `extract_features_batch`
+  single-threaded vs. 16-way: **+268MB vs. +716MB, ~2.7x more memory for
+  identical data** -- every additional worker thread means another
+  cluster's fetch/cumsum buffers alive concurrently instead of one at a
+  time. This matches the *proportional* shape of the real regression:
+  more concurrent buffers, scaled by how much data there actually is, not
+  a fixed number of extra processes.
+
+**Fix: `features._cap_workers_for_memory`.** After computing
+`n_workers = min(len(reader_pairs), len(clusters))` as before,
+`extract_features_batch` now also caps it so the worst-case simultaneous
+memory of that many concurrently in-flight cluster buffers -- the
+`n_workers` LARGEST clusters' combined span (clusters are assigned
+round-robin, so nothing guarantees the biggest ones don't all land on
+distinct workers at once) -- stays under a fixed 512MB budget,
+independent of `--cores`. Uses an empirical ~48 bytes/bp per-cluster cost
+(two raw fetch buffers + two cumsum buffers, float64, plus slack for
+`np.abs()`'s own transient copy). Deliberately a fixed budget, not one
+that scales with `--cores`: the whole point is that requesting more cores
+shouldn't multiply this specific mechanism's memory use the way it
+previously did.
+
+**Verified the fix actually closes the gap, on the same repro.** Re-ran
+the exact single-threaded-vs-16-way test after the fix: 16-way now shows
+**+0MB** additional RSS (vs. the pre-fix +716MB), because the cap
+correctly reduces 16 requested workers down to 2 for this dataset's
+actual cluster sizes (clusters here reached ~4.98Mbp, close to
+`_MAX_SHARED_FETCH_WIDTH`'s 5Mbp backstop, given the pretrained model's
+~112kbp `max_dist` combined with genuinely sparse positions) -- 2 workers
+x ~4.98Mbp x 48 bytes/bp is just under the 512MB budget, while 3 would
+exceed it. Wall time was unaffected (0.29s before and after): each
+worker's own numba thread count scales up as worker count goes down
+(`numba.get_num_threads() // n_workers`, unchanged logic from the
+original multi-threading work), so fewer concurrent workers doesn't mean
+proportionally slower here.
+
+A single huge cluster among many tiny ones does NOT over-restrict every
+worker to fit the largest one -- the cap sums the `n_workers` *largest*
+spans, not the single largest, so it only costs what those few actually
+large clusters require (verified directly: `tests/test_features.py`'s
+`test_cap_workers_for_memory_does_not_over_restrict_for_one_huge_cluster`).
+
+5 new unit tests plus one integration test confirming the cap changes
+worker count only, never the computed result
+(`test_extract_features_batch_memory_cap_still_matches_uncapped_result`,
+`np.testing.assert_array_equal`, not just close). All 92 tests pass.
+
+Not yet re-validated end-to-end on real production hardware with real
+data at the scale that originally surfaced this -- the 512MB budget is a
+reasoned, conservative starting point, not swept against real workloads.
+Worth watching whether 0.2.7's real RSS numbers (once re-measured on the
+x86 machine) actually land back near the pre-regression baseline, or
+whether the budget needs tuning.

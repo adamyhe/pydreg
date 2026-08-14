@@ -595,6 +595,23 @@ correctness verification (a real CLI run at `--cores 1` vs `--cores 8`
 producing byte-identical output except the pre-existing stochastic
 peak-calling p-value column).
 
+**Worker count is capped by memory, not just `--cores`.** Real production
+runs showed peak RSS consistently up ~1.2-1.3x after this feature shipped
+— proportional across every experiment, not a fixed per-run amount.
+Traced to exactly this mechanism: every additional worker thread means
+another cluster's fetch/cumsum buffers alive concurrently, and for sparse
+position sets with genuinely large clusters (up to `_MAX_SHARED_FETCH_
+WIDTH`'s 5Mbp), that measurably multiplies peak memory by close to the
+worker count itself. `features._cap_workers_for_memory` now bounds worker
+count so the worst-case simultaneous memory of the `n_workers` *largest*
+concurrently in-flight clusters stays under a fixed 512MB budget,
+independent of `--cores` — verified directly to close the gap on the
+repro that found it (16-way extraction on a synthetic sparse dataset: +0MB
+after the fix, vs. +716MB before, with no wall-time cost since each
+worker's own numba thread share grows as worker count shrinks). See
+`docs/PERF_LOG.md`'s 2026-08-14 entry for the full elimination process
+(two other real candidates were measured and ruled out first).
+
 ## Peak calling: parallelism and per-worker BLAS pinning
 
 The final peak-calling stage runs as one independent unit of work per broad

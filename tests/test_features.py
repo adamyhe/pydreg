@@ -218,6 +218,48 @@ def test_build_clusters_respects_max_shared_fetch_width_backstop(monkeypatch):
         assert span <= step * 3
 
 
+def test_cap_workers_for_memory_reduces_for_several_large_clusters(monkeypatch):
+    monkeypatch.setattr(features, "_CLUSTER_BYTES_PER_BP", 1)
+    monkeypatch.setattr(features, "_MAX_CONCURRENT_CLUSTER_BYTES", 2_000)
+    max_dist = 0
+    # 4 clusters, each spanning 1000bp (1000 bytes/cluster at 1 byte/bp) --
+    # budget only fits 2 of them concurrently.
+    sorted_centers = np.array([0, 999, 2000, 2999, 4000, 4999, 6000, 6999])
+    clusters = [(0, 2), (2, 4), (4, 6), (6, 8)]
+    assert features._cap_workers_for_memory(clusters, sorted_centers, max_dist, 4) == 2
+
+
+def test_cap_workers_for_memory_does_not_over_restrict_for_one_huge_cluster(monkeypatch):
+    # One huge cluster among many tiny ones should only cost as much as
+    # that one cluster needs, not restrict every worker to fit the largest.
+    monkeypatch.setattr(features, "_CLUSTER_BYTES_PER_BP", 1)
+    monkeypatch.setattr(features, "_MAX_CONCURRENT_CLUSTER_BYTES", 1_100)
+    max_dist = 0
+    sorted_centers = np.array([0, 999, 2000, 2001, 3000, 3001, 4000, 4001])
+    # cluster 0: span 1000 (huge); clusters 1-3: span 2 each (tiny)
+    clusters = [(0, 2), (2, 4), (4, 6), (6, 8)]
+    # 4 workers: worst case is the 1000-span cluster plus the 3 largest of
+    # the rest (2 each) = 1006 <= 1100 -- still fits, no reduction needed.
+    assert features._cap_workers_for_memory(clusters, sorted_centers, max_dist, 4) == 4
+
+
+def test_cap_workers_for_memory_never_reduces_below_one(monkeypatch):
+    monkeypatch.setattr(features, "_CLUSTER_BYTES_PER_BP", 1)
+    monkeypatch.setattr(features, "_MAX_CONCURRENT_CLUSTER_BYTES", 1)
+    max_dist = 0
+    sorted_centers = np.array([0, 999, 2000, 2999])
+    clusters = [(0, 2), (2, 4)]
+    assert features._cap_workers_for_memory(clusters, sorted_centers, max_dist, 2) == 1
+
+
+def test_cap_workers_for_memory_is_a_noop_for_a_single_requested_worker():
+    # requested_workers <= 1 short-circuits -- no spans computed, nothing
+    # to reduce.
+    clusters = [(0, 2)]
+    sorted_centers = np.array([0, 999])
+    assert features._cap_workers_for_memory(clusters, sorted_centers, 0, 1) == 1
+
+
 def test_extract_features_batch_with_extra_readers_matches_single_threaded(
     integer_bigwig_pair,
 ):
@@ -273,6 +315,44 @@ def test_extract_features_batch_extra_readers_exceeding_cluster_count(
     bw_minus2 = pybigtools.open(minus_path)
     extra_readers = [
         (pybigtools.open(plus_path), pybigtools.open(minus_path)) for _ in range(4)
+    ]
+    result = features.extract_features_batch(
+        bw_plus2,
+        bw_minus2,
+        "chr1",
+        centers,
+        window_sizes,
+        half_n_windows,
+        extra_readers=extra_readers,
+    )
+    np.testing.assert_array_equal(reference, result)
+
+
+def test_extract_features_batch_memory_cap_still_matches_uncapped_result(
+    monkeypatch, integer_bigwig_pair
+):
+    # Force the memory cap to bind (4 clusters, 4 reader pairs available,
+    # but a budget that only fits 1 cluster's worth of buffers) and confirm
+    # the result is still identical -- the cap changes worker count, never
+    # what gets computed.
+    monkeypatch.setattr(features, "_MAX_CONCURRENT_CLUSTER_BYTES", 1)
+    plus_path, minus_path = integer_bigwig_pair
+    window_sizes = [10, 25, 50]
+    half_n_windows = [10, 10, 10]
+    centers = np.concatenate(
+        [base + np.arange(3) * 50 for base in [5_000, 25_000, 45_000, 65_000]]
+    )
+
+    bw_plus = pybigtools.open(plus_path)
+    bw_minus = pybigtools.open(minus_path)
+    reference = features.extract_features_batch(
+        bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows
+    )
+
+    bw_plus2 = pybigtools.open(plus_path)
+    bw_minus2 = pybigtools.open(minus_path)
+    extra_readers = [
+        (pybigtools.open(plus_path), pybigtools.open(minus_path)) for _ in range(3)
     ]
     result = features.extract_features_batch(
         bw_plus2,
