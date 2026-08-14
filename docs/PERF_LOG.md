@@ -2475,3 +2475,135 @@ process pool would add. New test
 (`test_write_outputs_parallel_matches_serial`) confirms byte-identical
 `.bed.gz` contents and identical `.bw` values between `cores=1` and
 `cores=4`.
+
+## 2026-08-13 — dropped the debug-only infp `.bed.gz`, and found/fixed a real regression in the 2026-08-10 parallel-output-writing change
+
+Follow-up to the 2026-08-10 entry above, prompted by re-examining that
+entry's own assumption (`"pysam.tabix_index's bgzip compression and
+pybigtools' own bigWig writer are both compiled (C/Rust) calls expected
+to release the GIL"`) instead of taking it at face value.
+
+**Finding 1: the informative-position `.bed.gz` was debug-only and, being
+the largest output by a wide margin, dominated this step's wall time.**
+`infp.bed.gz` duplicated exactly the same data as `infp.bw` (chrom, start,
+end, score, infp-flag) and was never read back in anywhere in the
+pipeline — confirmed against `docs/PLANNING.md`'s own note that `.bw`
+outputs are pure visualization artifacts, and `infp.bed.gz` was no
+different in practice, just also written as a tabix-indexed text file.
+One row per informative/gap-filled/densified position genome-wide makes
+it by far the largest of the ~8 output files (thousands to low millions
+of rows vs. the peak files' hundreds to low thousands), so even with
+2026-08-10's per-file thread pool, it was almost certainly the long pole
+in the "~2 minutes to write outputs" complaint that motivated that
+change — parallelizing *across* files can't shrink the single largest
+file's own write time. Dropped it; `infp.bw` remains as the sole
+informative-position output.
+
+**Finding 2: pybigtools' bigWig writer does not release the GIL safely
+for concurrent use — the opposite of what the 2026-08-10 entry assumed,
+and a measured regression in already-shipped code.** Benchmarked writing
+4 separate bigWig files (1.5M rows/chrom x 2 chroms each) three ways on
+this session's 10-core Apple M4:
+
+| mode | time |
+|---|---|
+| serial | 5.2s |
+| `ThreadPoolExecutor(max_workers=4)` (2026-08-10's approach) | **20.7s** |
+| `ProcessPoolExecutor(max_workers=4)` | 2.5s |
+
+Threading made it **4x slower than serial**, not merely "no speedup" —
+consistent with lock contention inside pybigtools' Rust binding rather
+than a clean GIL-release story, and ruled out disk/IO contention as the
+cause directly (the process-pool version writes the same 4 files to the
+same disk concurrently and is faster, not slower). This means any real
+run writing more than one bigWig per invocation (the normal case: infp.bw
++ peak.score.bw + peak.prob.bw) has been silently *slower* under
+2026-08-10's threaded `_write_outputs` than it would have been serially,
+for the bigWig-writing portion specifically. Root cause not pinned down
+further (not worth reading pybigtools' Rust source for a workaround when
+a correct fix is one line away) — a `pysam.tabix_compress` control
+benchmark confirmed threading *does* give a real ~5.6x speedup for the
+bgzip side, so this isn't a Python-threading-in-general artifact.
+
+**Fix: two pools, not one.** `pipeline._write_outputs` now dispatches
+`.bed.gz` writes on a `ThreadPoolExecutor` (unchanged from 2026-08-10,
+still correct) and `.bw` writes on a separate `ProcessPoolExecutor`
+(`max_workers=min(cores, n_bigwig_files)`, both pools sized from the same
+`cores` budget), running concurrently with each other (the thread pool's
+futures are submitted before blocking on the process pool's results, so
+both sets of writes overlap). Confirmed the process-pool switch doesn't
+reintroduce the "heavy import per worker" cost that makes `peaks.py`'s
+worker-process reuse valuable: `pydreg.io` itself imports only
+numpy/pybigtools (not numba/sklearn/scipy), so a fresh 3-worker pool
+importing it measured ~0.2s startup, not several seconds. Falls back to
+a serial loop on `(OSError, NotImplementedError)`, mirroring
+`peaks.call_peaks`'s existing `ProcessPoolExecutor` fallback for
+environments where process pools aren't available.
+
+**Correctness.** All 84 tests pass. `test_write_outputs_parallel_matches_serial`
+(updated: no longer checks a `.dREG.infp.bed.gz` that no longer exists)
+still confirms byte-identical `.bed.gz` contents and identical `.bw`
+values between `cores=1` and `cores=4` under the new two-pool dispatch.
+`test_pipeline_runs_end_to_end_on_synthetic_signal` now asserts
+`infp.bed.gz` is *absent* rather than present. README/METHODS/PLANNING
+updated to drop `infp.bed.gz` from the documented output set.
+
+## 2026-08-13 — model loading was silently costing 7-9s per run; `safe_open().get_tensor()` on a large tensor is far slower than a full in-memory `load()`
+
+Looked for other unexamined costs after the I/O work above, on the theory
+that the three previously-hot stages (infp, feature extraction, peak
+calling) had each already been profiled to their practical ceiling this
+session, but model loading — called once per pipeline run, not per
+position — never had been. It turned out to be a real, meaningful cost:
+`DREGModel.from_pretrained()` (the 605,187 x 360 float64 SVR, ~1.7GB
+decompressed) took **7-9s per call**, even fully warm (HF cache hit, no
+network) — comparable to or larger than the ~15s the informative-position
+scan itself now takes on 16 cores.
+
+**Root-caused with a component-by-component breakdown, not guessed.**
+`_safetensors_io.open_safetensors` read the compressed file (0.15s),
+zstd-decompressed it to bytes (1.3s), wrote those bytes to a fresh temp
+file (0.46s), then called `safe_open(tmp_path).get_tensor(...)` per
+tensor. That last step was the surprise: `get_tensor("support_vectors")`
+alone took **3.65s** for a tensor `safetensors.numpy.load()` can
+materialize — along with the other three tensors in the same file — from
+bytes already in memory in **0.52s total**, a >7x difference. Isolated
+this to `safe_open`'s mmap-based per-tensor access path specifically, not
+the temp file or decompression (both independently confirmed fast on
+their own, well under 1.5s combined).
+
+**Fix: load fully in memory, never touch disk after the initial read, and
+parse metadata by hand instead of through `safe_open`.**
+`_safetensors_io.open_safetensors` now reads the file, zstd-decompresses
+to bytes if `.zst` (no temp file at all), and calls
+`safetensors.numpy.load(bytes)` for every tensor at once.
+`safetensors.numpy.load()` doesn't expose the file's `__metadata__` header
+field the way `safe_open(...).metadata()` does, so that's parsed directly
+instead — safetensors' header format is a stable, documented layout
+(8-byte little-endian header length + that many bytes of UTF-8 JSON), so
+extracting just `__metadata__` from it is a couple of stdlib calls,
+microseconds in practice. `safe_open`'s only real advantage (lazy,
+selective tensor access) was never used here — every `pydreg.models` call
+site already reads every tensor in the file — so nothing is given up by
+dropping it.
+
+**Measured: ~7-9s -> ~2-2.7s per `DREGModel.from_pretrained()` call**,
+~3-4x, on this session's warm HF cache. Verified bit-identical (not just
+"looks right"): compared every tensor and the full metadata dict between
+the old temp-file/`safe_open` path and the new in-memory path on the real
+pretrained SVR file, `np.testing.assert_array_equal` on all four tensors
+plus an exact dict equality check on metadata, both passed. New unit
+tests (`tests/test_safetensors_io.py`, 3 tests, using small synthetic
+safetensors files so they don't depend on network/HF cache) cover the
+plain-`.safetensors` and `.zst` paths independently and confirm they agree
+with each other on both metadata and tensors. All 87 tests pass; the full
+suite's own wall time dropped from the low 20s to ~14.7s as a side effect,
+since several existing tests already exercise the real pretrained-model
+fixtures.
+
+Not applicable to `DREGPeakSplitForest` (the RF model) beyond the same
+code path automatically benefiting it too — its tensors are tiny (500
+trees x <=153 nodes), so its load time was always negligible (~0.01s)
+regardless of which safetensors API was used; this fix matters
+specifically because the SVR's `support_vectors` tensor is large enough
+for `safe_open`'s per-tensor overhead to dominate.

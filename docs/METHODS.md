@@ -110,7 +110,7 @@ final, significant peak set.
 ## Output
 
 See the README's "Output files" table for the exact files written. In
-short: every informative position's raw score (`*.dREG.infp.bed.gz`), every
+short: every informative position's raw score (`*.dREG.infp.bw`), every
 candidate peak before FDR filtering (`*.dREG.raw.peak.bed.gz`), and the
 final significant peaks with their scores/p-values/centers
 (`*.dREG.peak.full.bed.gz`, plus score-only and probability-only variants as

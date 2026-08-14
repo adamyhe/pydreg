@@ -105,7 +105,7 @@ Given `out_prefix`, pydreg writes:
 
 | file                                                  | contents                                                      |
 | ----------------------------------------------------- | ------------------------------------------------------------- |
-| `{out_prefix}.dREG.infp.bed.gz` (+`.tbi`), `.bw`      | Every informative position and its raw dREG score.            |
+| `{out_prefix}.dREG.infp.bw`                           | Every informative position and its raw dREG score.            |
 | `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`)         | All candidate peaks before FDR filtering.                     |
 | `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`)        | Significant peaks: chrom, start, end, score, p-value, center. |
 | `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only.                               |

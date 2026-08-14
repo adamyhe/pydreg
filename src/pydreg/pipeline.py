@@ -7,7 +7,7 @@ supplies peaks.py's score_fn callback.
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial
 
@@ -307,28 +307,44 @@ def run(
 
 
 def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1):
-    """Writes the standard output set. Each file is independent of every
-    other (distinct source DataFrame or a read-only slice of one, distinct
-    output path), and neither io.write_bed_gz nor io.write_bigwig mutates
-    its input DataFrame in place (write_bed_gz copies before any column
-    coercion; write_bigwig's sort_values already returns a new frame) --
-    so every write below is safe to run concurrently with every other,
-    including the two (bed.gz + bigwig) that share infp_out/score_bed/
-    prob_bed as a read-only source. Dispatched across a thread pool sized
-    to `cores` (the same pipeline-wide core budget as everywhere else, not
-    a separate setting) since these were previously fully serial despite
-    having no dependencies on each other -- real production runs saw this
-    step take on the order of minutes, dominated by pysam.tabix_index's
-    bgzip compression and pybigtools' own bigWig writer, both of which are
-    compiled (C/Rust) calls that release the GIL, so threads (not
-    processes) is enough here without needing to pickle these DataFrames
-    across a process boundary."""
+    """Writes the standard output set. Informative-position scores are
+    written only as `.bw` -- the `.bed.gz` version was dropped: it
+    duplicated the same data purely for debugging, was never read back in
+    anywhere, and (being by far the largest output, one row per
+    informative/gap-filled/densified position genome-wide) dominated this
+    step's wall time for a file most runs never actually looked at.
+
+    Every remaining file is independent of every other (distinct source
+    DataFrame or a read-only slice of one, distinct output path), and
+    neither io.write_bed_gz nor io.write_bigwig mutates its input
+    DataFrame in place, so every write below is safe to run concurrently
+    with every other, including the `.bed.gz`/`.bw` pairs that share
+    score_bed/prob_bed as a read-only source.
+
+    Dispatched across *two* pools, not one -- measured directly (not
+    assumed) that the two writers behave oppositely under threading:
+    `pysam.tabix_index`'s bgzip compression does release the GIL (~5.6x
+    speedup threading 8 concurrent calls), but `pybigtools`' bigWig
+    writer does not -- threading 4 concurrent write_bigwig calls measured
+    **4x slower** than calling them serially (20.7s vs 5.2s), i.e. real
+    lock contention inside its Rust binding, not just "no speedup". A
+    `ProcessPoolExecutor` sidesteps that (2.5s for the same 4 files) at
+    the cost of pickling each write's DataFrame across a process
+    boundary -- cheap here since `io.py` itself imports nothing heavier
+    than numpy/pybigtools (confirmed: ~0.2s pool startup, not the seconds
+    a fresh numba/sklearn import would cost) and bigWig outputs are small
+    now that the large infp `.bed.gz` is gone. `.bed.gz` writes stay on
+    threads, which need no such workaround. Falls back to serial bigWig
+    writes if process pools are unavailable in the current environment
+    (mirrors peaks.call_peaks's own ProcessPoolExecutor fallback). `cores`
+    is the same pipeline-wide budget as everywhere else, split between the
+    two pools rather than a separate setting."""
     sizes = bw_plus.chroms()
     chrom_col, start_col, end_col = dense_infp.columns[:3]
 
     infp_out = dense_infp[[chrom_col, start_col, end_col, "score", "infp"]]
-    tasks = [
-        partial(io.write_bed_gz, infp_out, f"{out_prefix}.dREG.infp.bed.gz"),
+    bedgz_tasks = []
+    bigwig_tasks = [
         partial(
             io.write_bigwig,
             f"{out_prefix}.dREG.infp.bw",
@@ -339,20 +355,20 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
     ]
 
     if raw_peak is not None and len(raw_peak) > 0:
-        tasks.append(
+        bedgz_tasks.append(
             partial(io.write_bed_gz, raw_peak, f"{out_prefix}.dREG.raw.peak.bed.gz")
         )
 
     if peak_bed is not None and len(peak_bed) > 0:
-        tasks.append(
+        bedgz_tasks.append(
             partial(io.write_bed_gz, peak_bed, f"{out_prefix}.dREG.peak.full.bed.gz")
         )
 
         score_bed = peak_bed[["chr", "start", "end", "score"]]
-        tasks.append(
+        bedgz_tasks.append(
             partial(io.write_bed_gz, score_bed, f"{out_prefix}.dREG.peak.score.bed.gz")
         )
-        tasks.append(
+        bigwig_tasks.append(
             partial(
                 io.write_bigwig,
                 f"{out_prefix}.dREG.peak.score.bw",
@@ -364,10 +380,10 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
 
         prob_bed = peak_bed[["chr", "start", "end", "prob"]].copy()
         prob_bed["prob"] = 1 - prob_bed["prob"]
-        tasks.append(
+        bedgz_tasks.append(
             partial(io.write_bed_gz, prob_bed, f"{out_prefix}.dREG.peak.prob.bed.gz")
         )
-        tasks.append(
+        bigwig_tasks.append(
             partial(
                 io.write_bigwig,
                 f"{out_prefix}.dREG.peak.prob.bw",
@@ -377,7 +393,22 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
             )
         )
 
-    with ThreadPoolExecutor(max_workers=min(cores, len(tasks))) as pool:
-        futures = [pool.submit(task) for task in tasks]
-        for future in futures:
+    with ThreadPoolExecutor(max_workers=max(1, min(cores, len(bedgz_tasks)))) as thread_pool:
+        thread_futures = [thread_pool.submit(task) for task in bedgz_tasks]
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=max(1, min(cores, len(bigwig_tasks)))
+            ) as process_pool:
+                process_futures = [process_pool.submit(task) for task in bigwig_tasks]
+                for future in process_futures:
+                    future.result()
+        except (OSError, NotImplementedError) as e:
+            logger.warning(
+                "parallel bigWig writing unavailable (%s); falling back to serial", e
+            )
+            for task in bigwig_tasks:
+                task()
+
+        for future in thread_futures:
             future.result()
