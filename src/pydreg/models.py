@@ -67,6 +67,7 @@ cross-check if that matters for your use case.
 """
 
 import json
+import math
 
 import numba
 import numpy as np
@@ -117,6 +118,48 @@ def _forest_predict(
     return out
 
 
+@numba.njit(cache=True, parallel=True)
+def _rbf_accumulate(cross, sq_x, sq_sv_block, gamma, coefs_block, y_scaled):
+    """Fuses DREGModel.predict's per-chunk `sqdist = sq_x + sq_sv - 2*cross`
+    / `exp(-gamma*sqdist)` / `K @ coefs_block` into one pass, parallelized
+    over queries via numba.prange -- the CPU-tier counterpart to
+    backend.py's `_build_cupy_predict_fn`/`_build_mlx_predict_fn`, which
+    already fuse this exact elementwise glue on their respective GPU
+    frameworks (cupy.ElementwiseKernel / mx.compile). Measured directly
+    (not assumed) that this glue step, not either GEMM, was the actual
+    bottleneck: on a real 605,187 SV x 360 feature model, it was ~70% of
+    predict()'s wall time and ran at ~1.1x CPU/wall ratio on a 10-core
+    machine -- i.e. effectively one core, since plain NumPy ufuncs don't
+    parallelize across cores on their own. This also avoids ever
+    materializing the separate `sqdist`/`K` arrays (each
+    (n_queries, n_sv_block)-shaped, easily hundreds of MB at real batch/SV-
+    chunk sizes) -- reduced memory traffic on top of the threading win,
+    the same principle behind the GPU tiers' fusion.
+
+    Mutates y_scaled in place (`+=` per query): safe under prange because
+    every query index is written by exactly one thread within a single
+    call, and separate calls (one per SV chunk) happen sequentially in
+    DREGModel.predict's Python loop, never concurrently with each other.
+
+    Not expected to be bit-identical to the NumPy formula it replaces --
+    numba's `math.exp` isn't guaranteed bit-identical to NumPy's `np.exp`
+    ufunc (same ~1e-12-level difference already documented and accepted
+    for the infp/features numba kernels), and the summation order differs
+    from a BLAS GEMV's internal reduction order regardless. Verified
+    directly against the real pretrained model: max abs diff ~1e-12,
+    negligible next to this model's own float32 training precision
+    ceiling (see this module's docstring) and light-years from anything
+    that could change a peak call."""
+    n_queries, n_sv_block = cross.shape
+    for q in numba.prange(n_queries):
+        total = 0.0
+        sqx = sq_x[q]
+        for j in range(n_sv_block):
+            d = sqx + sq_sv_block[j] - 2.0 * cross[q, j]
+            total += math.exp(-gamma * d) * coefs_block[j]
+        y_scaled[q] += total
+
+
 class DREGModel:
     def __init__(self, model_path):
         """model_path: a single .safetensors or .safetensors.zst file."""
@@ -154,7 +197,16 @@ class DREGModel:
     def predict(self, X_raw, chunk=20_000):
         """X_raw: (n_queries, n_features) in the original (unscaled) feature
         space produced by dREG's genomic_data_model feature extraction.
-        Returns dREG scores in their native (~[0, 1]) range."""
+        Returns dREG scores in their native (~[0, 1]) range.
+
+        Each chunk's GEMM (`X_scaled @ sv_block.T`) stays a plain NumPy/BLAS
+        call -- already reasonably well parallelized by whatever BLAS NumPy
+        is linked against, and not the actual bottleneck (see
+        _rbf_accumulate's docstring for the real profile). The elementwise
+        RBF-kernel-and-reduce step between the two GEMMs is fused and
+        parallelized via _rbf_accumulate instead of separate NumPy
+        `sqdist`/`np.exp`/`K @ coefs` calls, which measured as ~70% of this
+        function's wall time running on effectively one core."""
         X_scaled = (X_raw - self.x_center) / self.x_scale
         sq_x = np.sum(X_scaled**2, axis=1)
 
@@ -163,9 +215,9 @@ class DREGModel:
             end = min(start + chunk, self.n_sv)
             sv_block = self.SV[start:end]
             cross = X_scaled @ sv_block.T
-            sqdist = sq_x[:, None] + self._sq_sv[None, start:end] - 2 * cross
-            K = np.exp(-self.gamma * sqdist)
-            y_scaled += K @ self.coefs[start:end]
+            _rbf_accumulate(
+                cross, sq_x, self._sq_sv[start:end], self.gamma, self.coefs[start:end], y_scaled
+            )
         y_scaled -= self.rho
 
         return y_scaled * self.y_scale + self.y_center

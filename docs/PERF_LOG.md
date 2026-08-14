@@ -2607,3 +2607,208 @@ trees x <=153 nodes), so its load time was always negligible (~0.01s)
 regardless of which safetensors API was used; this fix matters
 specifically because the SVR's `support_vectors` tensor is large enough
 for `safe_open`'s per-tensor overhead to dominate.
+
+## 2026-08-13 — fused the CPU ("numpy") scoring backend's RBF-kernel elementwise step into a parallel numba kernel; found the GEMM is now the bottleneck, not yet confirmed whether that's Apple-Accelerate-specific
+
+Prompted by a direct observation: CPU scoring "looks mostly pinned to a
+single core." Measured `DREGModel.predict()` on the real pretrained model
+(605,187 SVs x 360 features, 4096-query batch) on a 10-core Apple Silicon
+dev machine, split into its three pieces via wall-clock vs. `resource.
+getrusage` CPU time (ratio close to 1x = one core, close to N = N cores
+worth of parallel work):
+
+| step | wall | cpu | cpu/wall |
+|---|---|---|---|
+| GEMM 1 (`X_scaled @ sv_block.T`) | 5.5s | 8.9s | 1.62x |
+| + elementwise `sqdist`+`exp` | 19.9s | 22.4s | 1.12x |
+| GEMM 2 (`K @ coefs`) | 0.5s | 0.5s | 1.00x |
+| full `predict()` | 21.1s | 23.7s | 1.13x |
+
+The elementwise glue between the two GEMMs -- `sqdist = sq_x + sq_sv -
+2*cross` then `exp(-gamma*sqdist)` -- is ~70% of total time and runs at
+essentially one core, since plain NumPy ufuncs don't parallelize across
+cores on their own. This is exactly the shape of problem numba already
+solves elsewhere in this codebase (`features._binned_sums_batch_numba`,
+`infp._windowed_sums_numba`, `models._forest_predict`), and exactly what
+the `cupy`/`mlx` GPU tiers already do for this same glue step
+(`_build_cupy_predict_fn`'s `ElementwiseKernel`, `_build_mlx_predict_fn`'s
+`mx.compile`) -- the CPU tier just never got the equivalent treatment.
+No principled reason found for the gap; an oversight, not a deliberate
+choice.
+
+**Fix: `models._rbf_accumulate`, a `numba.njit(parallel=True)` kernel**
+fusing `sqdist`/`exp`/`K @ coefs_block` into one pass over `(query, sv)`
+pairs, `numba.prange`'d over queries, mutating `y_scaled` in place. Keeps
+both GEMMs as plain NumPy/BLAS calls (already reasonably parallel, see
+below) -- only the elementwise-and-reduce glue moves to numba, same
+principle as the GPU tiers' fusion: avoids materializing the separate
+`sqdist`/`K` intermediates (each `(n_queries, n_sv_block)`-shaped, easily
+hundreds of MB at real batch/chunk sizes) on top of the threading win.
+
+**Correctness.** `DREGModel.predict()` is the ground-truth reference every
+other backend's smoke test is validated against, so this was checked
+carefully, not just glanced at: captured `predict()`'s output on the real
+pretrained model with the *old* implementation first, then compared
+against the *new* fused-kernel implementation on the identical input --
+max abs diff **1.65e-13**, max rel diff **3.05e-12**. Consistent with the
+already-documented, already-accepted numba-vs-NumPy `exp()` ULP-level
+difference from the `infp`/`features` kernels, not a formula bug. All 87
+tests pass.
+
+**`math.exp` vs `np.exp` inside the kernel: verified bit-identical, not
+just "probably fine."** Wrote both variants and directly compared: same
+wall-clock (333.0ms vs 332.3ms at 1 numba thread, 56.6ms vs 54.1ms at 10),
+and bit-identical output (`np.array_equal`) on real data, including a
+direct single-scalar check (`math.exp(x) == np.exp(x)` to the bit for a
+representative `x`). Both differ from the *original* array-based
+`np.exp()` formula by the same ~7e-14 -- that residual is summation-order
+(scalar accumulation loop vs. a BLAS GEMV's internal reduction order), not
+which `exp` implementation is called. Kept `math.exp`, matching
+`stats.py`'s existing convention for scalar transcendental calls inside
+its own numba loops -- a style choice, not a performance or precision one.
+
+**The fusion works (isolated kernel: ~5.7x at 10 numba threads -- 330ms
+-> 58ms), but full `predict()` only reaches ~3x, because GEMM 1 is now
+the dominant unparallelized cost.** Swept `VECLIB_MAXIMUM_THREADS`
+(1/default/10) against the GEMM alone: cpu/wall stayed ~1.6x regardless
+-- Apple's Accelerate BLAS appears to cap this specific shape's
+parallelism (a "thin" reduction dimension, K=360, relative to M=4096/
+N=20,000) via an internal heuristic that external thread-count env vars
+don't move. Net effect on full `predict()`: **21.1s (original) -> 11.2s
+(fused, 1 numba thread, pure memory-traffic win) -> 7.0s (fused, 10 numba
+threads)**, a real ~3x, but short of the ~5.7x ceiling the kernel alone
+demonstrated, because BLAS's own parallelism ceiling is now the limiting
+factor.
+
+**Open question, deliberately not resolved on this machine.** Apple's
+Accelerate is proprietary and its GEMM-parallelization heuristics aren't
+inspectable the way OpenBLAS/MKL's are -- plausible that x86/Linux
+(OpenBLAS or MKL, both far more common there, both tile GEMM over M/N
+rather than being sensitive to a thin K the way Accelerate seems to be
+here) would show better GEMM scaling. But there's a real risk in the
+other direction too: numba here uses the `omp` threading layer (confirmed
+via `numba.threading_layer()`), and Accelerate isn't OpenMP-based, so
+there's no collision on this machine -- on x86, OpenBLAS's OpenMP build
+and MKL both *also* use OpenMP, so numba's parallel kernel and BLAS's
+parallel GEMM could compete for the same cores in the same process
+without coordination, the same oversubscription failure mode
+`peaks._init_peak_worker` already guards against for its worker processes
+(`threadpoolctl.threadpool_limits(limits=1)`) -- scoring has no equivalent
+guard, because it never needed one before this fusion made both halves of
+`predict()` meaningfully parallel at once. Whether x86's better GEMM
+scaling or its oversubscription risk dominates isn't answerable from an
+Apple Silicon dev box.
+
+Added `scripts/bench_numpy_backend_threading.py` to answer this on real
+x86 hardware directly: reports what `threadpoolctl` sees (nothing on this
+Mac, since Accelerate isn't threadpoolctl-controllable -- expected to show
+real OpenBLAS/MKL info on Linux), sweeps BLAS threads against the GEMM
+alone, sweeps numba threads against the fused kernel alone, and sweeps
+every (BLAS threads, numba threads) combination against full `predict()`
+-- the last one directly answers the oversubscription question: if
+`blas=N, numba=N` doesn't beat `blas=1, numba=N`, they're contending for
+cores, not adding capacity, and scoring should pin BLAS to 1 thread the
+same way peak-calling workers already do. Not yet run on real x86
+hardware as of this entry -- that's the explicit next step, not assumed.
+Deliberately not spending further effort tuning this path for
+Apple/Accelerate specifically: CPU-only scoring on macOS is a narrow use
+case (the `mlx` GPU tier covers the real Apple Silicon path), so the
+fusion shipped as-is here and any further work should be driven by the
+x86 numbers, not by chasing Accelerate's opaque heuristics further.
+
+## 2026-08-13 (cont.) — real x86/Linux numbers: no BLAS/numba contention, and `--cores` now also governs BLAS
+
+Ran `scripts/bench_numpy_backend_threading.py` on real production hardware
+(32-core Haswell, OpenBLAS via `threadpoolctl` -- `libscipy_openblas64`,
+`threading_layer: pthreads`), resolving the open question from the entry
+above.
+
+**Both halves of `predict()` scale far better here than on the Apple
+Silicon dev machine.** GEMM alone: 2248ms -> 302ms, 1 -> 32 BLAS threads
+(**7.4x**, vs. Accelerate's ~1.6x ceiling regardless of thread count).
+Fused kernel alone: 988ms -> 56ms, 1 -> 32 numba threads (**17.6x**).
+Confirms the GEMM ceiling found on macOS was an Accelerate-specific
+heuristic for that GEMM's shape, not a property of the computation
+itself -- OpenBLAS tiles this GEMM over the query/support-vector
+dimensions rather than being sensitive to the thin (360) feature
+dimension the way Accelerate seemed to be.
+
+**Full `predict()`, every (BLAS threads, numba threads) combination --
+directly answers the oversubscription question this entry's predecessor
+left open:**
+
+| | numba=1 | numba=16 | numba=32 |
+|---|---|---|---|
+| blas=1 | 94.6s | 69.7s | 69.9s |
+| blas=16 | 37.2s | 15.4s | 14.5s |
+| blas=32 | 38.2s | 13.6s | **11.8s** |
+
+Every increase in either axis helps monotonically (one likely-noise blip:
+blas=16->32 at numba=1 is very slightly *slower*, 37.2s->38.2s, within
+ordinary run-to-run variance on a shared machine, not a pattern -- every
+other cell moves the expected direction). `blas=32,numba=32` is the
+fastest cell on the whole grid, not a regression from oversubscription --
+if the two were contending for cores, `blas=1,numba=32` (69.9s) would
+have beaten `blas=32,numba=32` (11.8s); it's over 5x slower instead. The
+milder risk flagged in the prior entry (two independent threading
+runtimes -- numba's `omp`, OpenBLAS's own `pthreads` here -- costing
+overhead on the 31-times-per-call handoff between them) doesn't show up
+either. Conclusion: **on this hardware, just run both at full `cores`,
+no BLAS-pinning workaround needed** -- the opposite of what
+peak-calling's workers need, and confirmed by data rather than assumed
+by analogy.
+
+**Real gap found along the way, unrelated to contention: BLAS never
+consulted `cores` at all.** `pipeline.run()` already called
+`numba.set_num_threads(cores)`, but nothing told BLAS about `cores` --
+it defaults to auto-detecting the machine's full core count regardless.
+On a shared box where a run deliberately requests fewer cores than the
+machine has (leaving headroom for other jobs), every `DREGModel.predict()`
+GEMM would have silently used every core anyway, undermining the whole
+point of `pipeline.run`'s own documented "one knob, applied consistently,
+so no stage undersells or oversubscribes independently of the others"
+design. Fixed: `pipeline.run()` now also calls
+`threadpoolctl.threadpool_limits(limits=cores)` right after
+`numba.set_num_threads(cores)`, process-wide (not a context manager,
+matching `peaks._init_peak_worker`'s own use of threadpoolctl) --
+confirmed harmless on machines with no threadpoolctl-visible BLAS (e.g.
+Apple Accelerate): `threadpool_limits()` is a documented no-op when
+`threadpool_info()` finds nothing to limit. Peak-calling's own worker
+processes are unaffected -- each still independently pins itself to a
+single BLAS thread via its own initializer, regardless of what the main
+process's limit is set to. All 87 tests pass.
+
+## 2026-08-13 (cont.) — note: the sklearn/mlx/cupy-vs-numpy speedup ratios logged earlier this session predate the NumPy-tier fusion
+
+Flagging, not editing (per this log's own rule against changing past
+entries except to fix factual errors -- these were accurate when
+measured): the 2026-07-09/2026-07-14 sklearn-vs-numpy entries and the
+2026-08-10 "mlx-vs-numpy head-to-head on a real Apple M4"/"cupy-vs-numpy
+head-to-head on a real P100" entries above all used the *pre-fusion*
+NumPy tier as their baseline.
+
+Re-measured both CPU-side comparisons directly on this same Apple M4
+after the fusion (`scripts/bench_backends.py`, 4096-query batch):
+
+- **sklearn vs. numpy**: 269.3s vs. 6.8s -- **~39.6x slower, not ~14-15x**.
+  The gap *widened*, as expected: libsvm's prediction path is completely
+  unchanged, while the NumPy tier got substantially faster.
+  `docs/OPTIMIZATION.md`'s scikit-learn paragraph updated to this number.
+- **mlx vs. numpy**: NumPy dropped from 23.1s to 7.06s at the same batch,
+  so mlx's real advantage *narrowed* to **~6.1x, not ~19x**.
+  `docs/OPTIMIZATION.md`'s "Apple Silicon: the `mlx` tier" section updated
+  to the current number.
+
+Did not re-run the P100 cupy comparison (no such hardware available in
+this session) -- expect the same direction of change as mlx (a real
+narrowing of the ratio, since cupy itself hasn't changed and NumPy's
+fusion win was measured independently of GPU vendor), just unconfirmed by
+a direct number on that hardware.
+
+None of this changes which backend to pick: GPU tiers remain the right
+choice whenever available regardless of the exact multiple, NumPy remains
+the correct CPU default, and sklearn remains not worth auto-selecting
+regardless of the exact multiple either (39.6x or 14-15x, the conclusion
+is the same). It only means these specific historical ratios should not
+be quoted as pydreg's *current* backend-to-backend gaps without this
+caveat.

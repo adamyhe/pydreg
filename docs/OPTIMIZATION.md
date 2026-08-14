@@ -41,18 +41,25 @@ backends for this (`--backend {auto,cupy,mlx,sklearn,numpy}`):
   below.
 
 scikit-learn is available (`--backend sklearn`) but is **never
-auto-selected on CPU** — it's measured at ~14-15x slower than the NumPy tier
-for this workload, despite computing identical math (both agree to ~1e-10).
-This isn't a threading gap (forcing single-threaded BLAS doesn't change the
-NumPy tier's wall-clock time at all) — it's that libsvm's prediction path
-evaluates the kernel one query-support-vector pair at a time (with a
-heap allocation per pair), while `DREGModel.predict`'s chunked matmul
-computes the entire kernel matrix in one BLAS call. Different computational
-shape, not a tuning difference — so it isn't fixable by parallelizing
-libsvm's loop, and there's no reason to expect Intel's oneDAL-accelerated
-scikit-learn fork (`scikit-learn-intelex`) to help either, beyond the fact
-that it doesn't ship any macOS/ARM wheels at all and would need real
-engineering to even engage on a model that was never `.fit()` through it (see
+auto-selected on CPU** — originally measured at ~14-15x slower than the
+NumPy tier for this workload (despite computing identical math, both agree
+to ~1e-10), and that gap has only grown since: libsvm's own prediction
+path is unchanged, while the NumPy tier got substantially faster from the
+numba-fusion work below (see "The CPU ('numpy') scoring backend"). Re-measured
+on the same Apple M4 at a 4096-query batch (`scripts/bench_backends.py
+--backends numpy sklearn --batch-sizes 4096`): sklearn now takes 269.3s
+against the fused NumPy tier's 6.8s, **~39.6x** slower, not ~14-15x. The
+underlying reason is a genuinely different computational shape, not a
+tuning gap that closed or could close with more threads: libsvm's
+prediction path evaluates the kernel one query-support-vector pair at a
+time (with a heap allocation per pair), while `DREGModel.predict`'s
+chunked matmul computes the entire kernel matrix in one BLAS call (and,
+as of the fusion below, one fused numba kernel for the elementwise/reduce
+step in between). Not fixable by parallelizing libsvm's loop, and there's
+no reason to expect Intel's oneDAL-accelerated scikit-learn fork
+(`scikit-learn-intelex`) to help either, beyond the fact that it doesn't
+ship any macOS/ARM wheels at all and would need real engineering to even
+engage on a model that was never `.fit()` through it (see
 `docs/PERF_LOG.md` for the full investigation of both).
 
 ### Why `cupy`, not `cuML`
@@ -341,9 +348,12 @@ inside `MLX_SMOKE_TEST_ATOL` (`1e-3`, reusing `CUPY_SMOKE_TEST_ATOL`'s
 value, since both tiers hit the identical float32 catastrophic-cancellation
 limitation in the identical expanded-form squared-distance formula — see
 above), and the same order of magnitude as `cupy`'s own measured
-2.3e-4–5.4e-4 range on real NVIDIA hardware. Speed: ~19x faster than the
-NumPy tier at that same 4096-query batch size on an Apple M4 (1.19s vs
-23.1s per call, warm/post-compile). See `docs/PERF_LOG.md`'s 2026-08-10
+2.3e-4–5.4e-4 range on real NVIDIA hardware. Speed: **~6.1x** faster than
+the NumPy tier at that same 4096-query batch size on an Apple M4 (1.16s
+vs 7.06s per call, warm/post-compile, re-measured via `scripts/
+bench_backends.py` after the NumPy tier's own numba-fusion speedup below
+— originally ~19x, back when the NumPy tier's elementwise RBF step ran
+single-threaded; `mlx` itself hasn't changed). See `docs/PERF_LOG.md`'s 2026-08-10
 entry for the full numbers.
 
 Not yet investigated: real `--mlx-sv-chunk` memory-headroom tuning. MLX's
@@ -513,12 +523,18 @@ numbers.
 consistently across every parallel stage in the pipeline, rather than
 being a peak-calling-specific setting: `numba.set_num_threads(cores)` is
 called once, early, governing the thread count for the numba-parallelized
-feature-extraction/informative-position-scanning kernels
-(`features._binned_sums_batch_numba`, `infp._windowed_sums_numba`), and
-the same value is threaded through to `peaks.call_peaks`'s
-`ProcessPoolExecutor(max_workers=cores)` for the final peak-calling stage.
-Deliberately one number, not two independently-tunable ones — a pipeline
-that restricted peak calling to, say, 4 processes while numba's kernels
+feature-extraction/informative-position-scanning/scoring kernels
+(`features._binned_sums_batch_numba`, `infp._windowed_sums_numba`,
+`models._rbf_accumulate`), and the same value is threaded through to
+`peaks.call_peaks`'s `ProcessPoolExecutor(max_workers=cores)` for the
+final peak-calling stage. `threadpoolctl.threadpool_limits(limits=cores)`
+is called right alongside `numba.set_num_threads(cores)` for the same
+reason: BLAS otherwise never learns about `cores` at all and defaults to
+auto-detecting the whole machine's core count regardless of what was
+requested — confirmed harmless on machines with no threadpoolctl-visible
+BLAS (`threadpool_limits()` is a documented no-op there). Deliberately one
+number, not several independently-tunable ones — a pipeline that
+restricted peak calling to, say, 4 processes while numba's kernels or BLAS
 defaulted to using every detected core elsewhere would both undersell
 available hardware in one stage and oversubscribe it in another, depending
 on which stage you happened to be looking at.
@@ -647,6 +663,50 @@ that fixed overhead amortizes away and scikit-learn's own parallelism
 across trees actually wins — just not at the batch sizes this pipeline
 ever actually uses.)
 
+## The CPU ("numpy") scoring backend: fusing the RBF kernel's elementwise step into numba
+
+`DREGModel.predict()` (used directly as the "numpy" backend, and as the
+ground-truth reference every other backend's smoke test is validated
+against) computes, per support-vector chunk: a GEMM (`X_scaled @
+sv_block.T`), an elementwise squared-distance-and-`exp` step, then a
+second GEMM/GEMV (`K @ coefs_block`). Measured directly (not assumed)
+that the elementwise step — not either GEMM — was the actual bottleneck:
+on a real 605,187 SV x 360 feature model, it was ~70% of `predict()`'s
+wall time and ran at ~1.1x CPU/wall ratio on a 10-core machine, i.e.
+effectively one core, since plain NumPy ufuncs don't parallelize across
+cores on their own.
+
+`models._rbf_accumulate`, a `numba.njit(parallel=True)` kernel
+`prange`'d over queries, now fuses that elementwise step with the
+`K @ coefs_block` reduction into one pass — the CPU-tier counterpart to
+`_build_cupy_predict_fn`/`_build_mlx_predict_fn`, which already fuse this
+same glue on their respective GPU frameworks. Both GEMMs stay plain
+NumPy/BLAS calls. Verified against the real pretrained model: max abs
+diff ~1.65e-13 vs. the old separate-NumPy-calls formula (the same
+numba-`exp`-vs-NumPy-`exp` ULP-level difference already documented and
+accepted for the `infp`/`features` kernels), all existing tests pass
+unchanged.
+
+**Net effect on a 10-core Apple Silicon dev machine: `predict()` dropped
+from 21.1s to 7.0s (~3x)** — but this undersells the fused kernel itself,
+which scales to ~5.7x in isolation. The gap there is that the first GEMM's
+own parallelism (via Apple's Accelerate BLAS) caps out around 1.6x on
+that machine regardless of requested thread count. **Confirmed on real
+x86/Linux hardware (32-core, OpenBLAS) that this ceiling is
+Accelerate-specific, not fundamental**: the same GEMM there scales 7.4x
+(1->32 BLAS threads) and the fused kernel scales 17.6x, with **no
+evidence of BLAS/numba contention** across every (BLAS threads, numba
+threads) combination tested — running both at full thread count was the
+fastest configuration on the grid, not a regression. See
+`docs/PERF_LOG.md`'s 2026-08-13 entries for the full profiling breakdown,
+including the real x86 numbers. One genuine gap did surface along the
+way: `pipeline.run()` never told BLAS about `--cores` at all, so it
+defaulted to the whole machine regardless of what was requested — fixed
+via `threadpoolctl.threadpool_limits(limits=cores)` (see "One `--cores`
+knob" above). Deliberately not pursued further on macOS
+specifically — CPU-only scoring there is a narrow use case now that the
+`mlx` GPU tier covers real Apple Silicon hardware.
+
 ## Loading the pretrained SVR: in-memory, not through a temp file
 
 `DREGModel.from_pretrained()` used to take 7-9s per call, even on a warm
@@ -713,6 +773,12 @@ score/prob bed.gz + bigWig pairs): neither `io.write_bed_gz` nor
 ## Reproducing these results
 
 `scripts/bench_backends.py` benchmarks the SVR backends against each other
-directly on your own hardware. `docs/PERF_LOG.md` has the full history for
-every change summarized above, including the exact numbers, the dead ends
-that didn't pan out, and the source-level evidence behind each root cause.
+directly on your own hardware. `scripts/bench_numpy_backend_threading.py`
+diagnoses the CPU backend's GEMM-vs-numba-kernel threading behavior
+specifically (BLAS thread sweeps, numba thread sweeps, and every
+combination of the two against full `predict()`) — see "The CPU
+('numpy') scoring backend" above for why that combination, not just each
+piece alone, is the real question on any given machine. `docs/PERF_LOG.md`
+has the full history for every change summarized above, including the
+exact numbers, the dead ends that didn't pan out, and the source-level
+evidence behind each root cause.
