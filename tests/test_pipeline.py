@@ -25,7 +25,7 @@ class _RecordingScorer:
 
 
 def _fake_extract_features_batch(
-    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
 ):
     return np.asarray(centers, dtype=float)[:, None]
 
@@ -63,7 +63,7 @@ def test_score_positions_matches_naive_sequential_result_across_chunks_and_chrom
 
 def test_score_positions_logs_accumulated_extract_and_predict_seconds(monkeypatch, caplog):
     def slow_extract(
-        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
     ):
         time.sleep(0.05)
         return np.asarray(centers, dtype=float)[:, None]
@@ -102,7 +102,7 @@ def test_score_positions_prefetches_next_chunk_while_scoring_current(monkeypatch
     unblock_predict = threading.Event()
 
     def fake_extract(
-        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
+        bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
     ):
         extract_started.append(tuple(int(c) for c in centers))
         if len(extract_started) == 2:
