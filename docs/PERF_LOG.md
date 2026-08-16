@@ -2983,3 +2983,40 @@ discarded, just not shipped until a real fix (upstream `bigtools`
 eviction, or a mitigation that survives real-hardware validation) is
 found. 11 tests covering `_cap_workers_for_memory`/`extra_readers`
 removed along with the code they tested; 85 tests pass.
+
+## 2026-08-15 (cont.) — real-hardware validation: memory back to v0.2.6 baseline, wall-clock unaffected (even slightly faster)
+
+Real production re-test on this branch's actual state (K562_groseq and
+G2, `--cores 16`, `/usr/bin/time -v`), against the same two datasets'
+v0.2.6 and full-multithreading numbers already on record:
+
+| dataset | | wall time | peak RSS |
+|---|---|---|---|
+| K562_groseq | v0.2.6 | 1401.32s | 5.139 GiB |
+| | full multithreading | 1289.17s | 6.238 GiB |
+| | **this branch (no threading)** | **1275.95s** | **5.194 GiB** |
+| G2 | v0.2.6 | 1419.44s | 5.123 GiB |
+| | full multithreading | 1300.57s | 6.246 GiB |
+| | **this branch (no threading)** | **1280.93s** | **5.132 GiB** |
+
+**Memory lands within 0.2-1.1% of the v0.2.6 baseline on both
+datasets** -- noise-level, not a residual regression -- confirming
+`extra_readers` really was the entire real cause, with nothing else
+from this work cycle contributing measurably.
+
+**Wall-clock is unaffected, and if anything very slightly faster than
+keeping multithreaded extraction** (0.9849-0.9897x vs. the
+full-multithreading numbers, both still ~9-10% faster than v0.2.6).
+Losing the threading cost nothing measurable in either direction: this
+matches the original build-out's own note that the gap-filling step
+threading targeted was "a small absolute contributor either way
+(~5-10% of total scoring time)" even when it helped -- density-aware
+clustering alone was already doing most of the real work (avoiding the
+old span-only rule's pathological multi-megabase clusters), and the
+marginal extra speedup threading added on top was small enough that
+losing it doesn't show up above run-to-run noise.
+
+This closes out the investigation for this release: shipping without
+multithreaded extraction is a clean win with no measurable tradeoff,
+not a compromise -- confirms the branch/PR split decision (this
+release vs. `multithreaded-extraction-dev`) was the right call.

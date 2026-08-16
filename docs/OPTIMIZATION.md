@@ -593,8 +593,14 @@ worker-thread/memory-cap machinery have been removed here and preserved,
 unmodified, on the `multithreaded-extraction-dev` branch — feature
 extraction in this release is always single-threaded, one reader,
 regardless of `--cores`, but still benefits from density-aware
-clustering. See `docs/PERF_LOG.md`'s 2026-08-10 and 2026-08-15 entries
-for the full investigation and numbers.
+clustering. Real production re-validation (K562_groseq and G2,
+`--cores 16`) confirmed this is a clean win, not a compromise: peak RSS
+landed within 0.2-1.1% of the v0.2.6 baseline on both (noise-level, not
+a residual regression), while wall-clock was unaffected — if anything
+very slightly faster than keeping multithreaded extraction, since that
+feature's own contribution was always a small fraction of total
+scoring time even when it helped. See `docs/PERF_LOG.md`'s 2026-08-10
+and 2026-08-15 entries for the full investigation and numbers.
 
 ## Peak calling: parallelism and per-worker BLAS pinning
 
