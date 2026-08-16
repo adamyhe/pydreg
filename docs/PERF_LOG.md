@@ -2939,24 +2939,381 @@ the earlier elimination process didn't catch. The next real `-v` run's
 logs (or absence of the new log line) should settle this directly rather
 than requiring another round of RSS-delta inference.
 
+## 2026-08-14 (cont.) — found the real cause: extra_readers accumulates per-chromosome caching, multiplied by reader count; capped at 8 total readers
+
+Follow-up to the previous entries above, which left the RSS regression
+unresolved after the extraction-memory cap turned out not to bind on
+real data. Systematic elimination via a series of real-hardware and
+local diagnostics, in order:
+
+1. **Per-stage RSS, real v0.2.6 vs. real current-main, same hardware,
+   same data (K562_groseq, `--cores 16`, both `cupy` and `numpy`
+   backends).** Isolated the entire regression to "scoring informative
+   positions" (+1180MB extra) and "densifying and merging" (+316MB
+   extra) -- model loading, scanning, peak calling, and writing outputs
+   all matched within noise or were already-explained. Peak calling and
+   output writing (the two most heavily previously-investigated
+   candidates) were fully cleared, again.
+2. **Per-chunk RSS during "scoring informative positions."** v0.2.6
+   plateaus by call ~675 of ~1025 (+66MB total); current main keeps
+   climbing until call ~950 (+1180MB total) -- ruled out a one-time
+   warm-up cost (numba JIT/thread-pool init), since that would jump once
+   early and go flat, not climb for 90% of the step.
+3. **Extraction alone, repeated 1000x on synthetic data** (small and
+   125Mbp-scale, sparse and dense position patterns, single- and
+   multi-threaded): completely flat every time.
+4. **Scoring alone, repeated 1000x on a fixed array, real `cupy`
+   hardware:** one-time jump, then completely flat -- ruled out cupy.
+5. **Scoring alone, real `numpy` backend, real data:** same gradual
+   growth pattern as `cupy` at the same call count -- ruled out the
+   backend entirely (numpy and cupy share almost no scoring code).
+6. **A faithful replica of `_score_positions`'s exact concurrent
+   extraction/prediction overlap, with a mock scorer:** still
+   completely flat.
+7. **Extraction alone, against REAL bigWig files** (no backend, no
+   model): finally reproduced it. 732MB -> 1719MB over ~1038 calls,
+   with growth tracking *new chromosomes being visited for the first
+   time* -- fast growth through the first ~500 calls (chr1 through
+   chr20-ish), then dead flat for the remaining ~500 once every
+   chromosome had been visited once.
+8. **Instrumented the real-data test to report actual cluster/worker
+   counts per call:** 583/1038 calls (56%) used more than one cluster,
+   with worker counts frequently in the 3-16 range -- confirming real
+   informative positions are irregular enough to exercise the
+   multi-reader path constantly, not just occasionally.
+9. **Synthetic real-scale chromosomes (up to 250Mbp) with a single
+   reader pair (no `extra_readers`):** minimal growth (+119MB across 25
+   chromosomes). **Same test with 8 reader pairs passed:** also minimal
+   (+132MB) -- but traced to the synthetic centers being perfectly
+   evenly spaced, which always forms exactly one cluster regardless of
+   how many readers are available, so `extra_readers` was never actually
+   exercised in either test.
+10. **Synthetic real-scale chromosomes with centers deliberately
+    constructed to force exactly 8 clusters every call** (8 reader pairs,
+    100% multi-cluster, vs. real data's 56%): still only +123MB across
+    400 calls -- far short of real data's ~1.6GB.
+
+**Conclusion: the effect requires real bigWig file structure specifically,
+and couldn't be reproduced with any synthetic bigWig built during this
+investigation.** Real PRO-seq/GRO-seq data is 3'-mapped point-mode read
+counts (corrected from an earlier "5'-mapped" error in this codebase's
+own CLAUDE.md) -- likely orders of magnitude more, smaller intervals per
+chromosome than any synthetic test here (a few hundred to a couple
+thousand large blobs per chromosome, vs. potentially millions of
+near-single-bp intervals in real data). The working hypothesis: each
+independently-opened `pybigtools` reader accumulates its own internal
+per-chromosome index/block cache the first time it queries that
+chromosome, and this cache's size scales with real bigWig index
+complexity in a way no synthetic file here replicated. With `extra_
+readers` (new this session, `e601657`) opening `cores-1` additional
+reader pairs, and real data confirmed to exercise most of them against
+most chromosomes over a real run (step 8 above), this multiplies a
+real per-reader cache cost by roughly however many readers `--cores`
+requests -- matching the measured ~15-25x difference between v0.2.6 (1
+reader, ~120MB growth) and `--cores 16` (16 readers, ~1.6GB growth) on
+*identical* real data.
+
+**Fix: capped at 8 total readers (`pipeline._MAX_EXTRA_READERS = 7`
+extra + 1 already open), independent of `--cores`.** Not an arbitrary
+number: it's the same point this feature's own original benchmark
+(2026-08-10 entry above) already found gave the best wall-clock
+throughput on a real reader-count sweep -- 1/4/8/16 readers measured
+9,500 / 16,320 / 19,797 / 18,881 pos/s, i.e. 16 readers was *already*
+slower than 8, not just no-better. So this caps a newly-discovered real
+memory cost at a point past which more readers were never actually
+buying more speed either, on either axis measured so far.
+`pipeline._resolve_extra_reader_count(cores)` extracted as its own
+tested function (`min(max(0, cores-1), _MAX_EXTRA_READERS)`); `run()`'s
+own docstring updated to reference the cap.
+
+**Not yet re-validated on real hardware** -- the next real `-v` run
+with the capped reader count should show peak RSS drop substantially for
+any `--cores` value above 8 (no change expected below that, since the
+cap only binds once `cores-1 > 7`). All 97 tests pass; 3 new tests cover
+`_resolve_extra_reader_count`'s scaling, cap, and non-negative-count
+behavior.
+
+## 2026-08-14 (cont.) — real-hardware validation of the 8-reader cap: closed less than half the memory regression, cost 8% wall time; reverted, favoring runtime over memory
+
+Real production re-test of the previous entry's fix (G2, `--cores 16`,
+`/usr/bin/time -v`):
+
+- **Peak RSS: 6.246 GiB (pre-fix, uncapped 16 readers) -> 5.763 GiB
+  (post-fix, capped at 8 total readers).** A real, measurable
+  improvement, but only 43% of the regression's total gap -- still 0.640
+  GiB / 12.5% above the 5.123 GiB v0.2.6 baseline, not a full fix.
+- **Wall time: capped run measured 23:25.02 elapsed, 8.0% slower than the
+  same run uncapped.** Still ~1% faster than v0.2.6 overall (other
+  0.2.7 wins more than covered this one regression's cost), but strictly
+  worse than not capping at all.
+
+This directly contradicts the cap's own justification. The 8-reader cap
+was chosen to match `features.extract_features_batch`'s own **isolated,
+extraction-only** reader-count sweep (2026-08-10 entry: 1/4/8/16 readers
+-> 9,500/16,320/19,797/18,881 pos/s, i.e. 16 already slower than 8 in
+that microbenchmark) -- the reasoning being that capping at the
+already-best point for speed would be memory-free. Real full-pipeline
+behavior didn't match: extraction there overlaps with scoring
+(`_score_positions`'s prefetch-one-chunk-ahead design), and real
+informative-position clusters routinely want worker counts in the 3-16
+range (56% of real chunks use >1 cluster, per the previous entry's step
+8) -- an isolated extraction-only loop with no concurrent scoring and no
+real cluster-shape variation simply wasn't the right proxy for the
+pipeline this cap actually ran inside.
+
+**Decision: revert the cap.** The user's explicit call: favor runtime
+over memory for this pipeline. Since the cap was already a net loss on
+both axes that mattered once measured end-to-end (worse wall time, and
+only a partial memory win), there's no version of "keep some cap" that's
+justified by data currently in hand -- picking a different fixed number
+without a real full-pipeline sweep behind it would just be another
+guess. `pipeline._resolve_extra_reader_count` is back to plain
+`max(0, cores - 1)`; `_MAX_EXTRA_READERS` removed entirely (not left as
+dead code/an unused constant). Tests updated to match (2 tests replacing
+the previous 3: uncapped scaling including at `--cores 16`/`64`, and the
+non-negative-count guard). All 96 tests pass.
+
+The underlying real memory cost (`bigtools`' unbounded
+`cir_tree_node_map` per-reader cache, confirmed present verbatim in
+bigtools 0.5.8, the latest release as of this writing, not just the
+vendored 0.5.7) is unfixed and now fully unmitigated again on pydreg's
+side -- worth an upstream `bigtools` issue regardless of this revert,
+since it's a real, currently-reproducible library limitation independent
+of what pydreg does with reader counts.
+
+## 2026-08-14 (cont.) — reset each extra reader's cache at chromosome boundaries, instead of trading it off against reader count at all
+
+Follow-up to the cap revert above. The revert restored full runtime but
+left the underlying memory cost fully unmitigated again -- both prior
+approaches (cap the reader count, or don't) were really just picking
+which axis to lose on, since neither touched the actual mechanism: each
+independently-opened `pybigtools` reader's `cir_tree_node_map` cache
+accumulates *cumulatively across every chromosome visited over the whole
+run*, and step 7 of the original elimination process (2026-08-14 "found
+the real cause" entry) already established that this growth tracks *new
+chromosomes being visited for the first time* and goes dead flat once
+every chromosome has been seen once. That's a strong hint the cache
+isn't actually being reused across chromosomes in practice -- positions
+are processed in genome order, chromosome by chromosome, so once a
+chromosome's chunks are done, nothing in this pipeline ever queries that
+chromosome again through that reader. Confirmed `pybigtools.BBIReader`
+supports `.close()` and that reopening the same path afterward is cheap
+(~10us per open+close locally, negligible next to real per-chunk
+extraction time, which runs to milliseconds-plus even before considering
+network/shared-filesystem latency on real HPC hardware).
+
+**Fix: `pipeline._reset_reader_pairs` closes and reopens every entry in
+`extra_readers`, in place, whenever `_score_positions` detects the
+chromosome changing between consecutive chunks** (new
+`plus_bw_path`/`minus_bw_path` params threaded through from `run()`).
+This bounds each extra reader's cache to roughly one chromosome's worth
+at a time instead of the whole genome's, while leaving reader *count*
+completely uncapped -- getting the full runtime benefit of more readers
+(no repeat of the 8%-slower regression from capping) without the
+unbounded memory cost that motivated the cap in the first place. The
+primary (non-extra) reader pair is deliberately left untouched: its
+own single-reader growth (~120MB over a full real run) was already
+established as the pre-existing, acceptable v0.2.6-matching baseline,
+not part of the regression -- resetting it would risk disrupting
+`_write_outputs`' later use of the same `bw_plus` object for no benefit.
+
+Safety: reset only ever happens immediately after `future.result()`
+returns for the chunk whose extraction just completed and before the
+next chunk's extraction is submitted -- at that point no thread is
+touching any reader in `extra_readers` (the single background thread is
+the only thing that ever calls into `features.extract_features_batch`,
+and `extract_features_batch`'s own worker threads are always joined
+before it returns), so closing and replacing those reader objects can't
+race an in-flight read. Mutates the list in place (not a rebind) so
+`_score_positions`'s own `extract()` closure and any other caller
+sharing the same `extra_readers` list (there's exactly one such list per
+`run()` call, shared across the main scoring pass and every later
+`score_fn` call) both see the reset readers on their next use.
+
+6 new tests: `_reset_reader_pairs` closes and reopens every pair in
+place; resets fire exactly at chromosome transitions (not within one
+chromosome, not when `plus_bw_path`/`minus_bw_path` are omitted, not
+when there are no extra readers); and an end-to-end test using the real
+(non-mocked) `_reset_reader_pairs` confirming correct scores survive a
+reset mid-run. All 102 tests pass.
+
+**Not yet validated on real hardware.** The next real `--cores 16` run
+should show wall-clock back near the pre-cap uncapped number (no
+regression reintroduced, since reader count itself is unchanged) *and*
+peak RSS dropping back close to the v0.2.6 baseline (since each extra
+reader's cache no longer accumulates past one chromosome) -- if either
+doesn't hold, that's new information about what the cache actually
+holds onto across a reset (e.g. if pybigtools's index-building cost
+itself, not just the cache, turns out non-negligible against real
+per-chromosome extraction time on real hardware).
+
+## 2026-08-15 — real-hardware validation of the per-chromosome reset: reverted, memory barely moved
+
+Real production re-test (K562_groseq, `--cores 16`, `/usr/bin/time -v`):
+peak RSS **6,483,292 KB (6.183 GiB)**, essentially unchanged from the
+pre-any-fix uncapped baseline (6.246 GiB) -- roughly a 1% reduction, not
+the "back near the v0.2.6 baseline" the previous entry's hypothesis
+predicted. Wall clock was 28:38 (slower than either prior variant), but
+per direct user report this run's timing shouldn't be trusted on its own
+(first-run-on-this-data effects) -- the RSS number doesn't have that
+confound and is the real finding here regardless of the timing question.
+
+**Reverted the reset mechanism entirely** (`_reset_reader_pairs`, the
+`plus_bw_path`/`minus_bw_path` params on `_score_positions`, and the
+`run()` wiring) -- back to plain uncapped `extra_readers` with no reset,
+same as the previous entry's cap-revert alone. Not worth keeping: it adds
+real complexity (reader-lifecycle management, a concurrency-safety
+argument that has to hold) for a memory goal it isn't delivering, and the
+project's priority is runtime over memory anyway (already satisfied by
+the plain uncap). 6 reset-specific tests removed; back to 96 tests, all
+passing.
+
+**Working theory for why it didn't help, not confirmed**: closing a
+`pybigtools` reader drops bigtools' internal `cir_tree_node_map`
+`HashMap`, but that only frees memory inside the process's own allocator
+-- it doesn't necessarily return pages to the OS. glibc's malloc (and
+Rust's default system allocator on Linux) commonly retains freed memory
+in its arena for reuse rather than `munmap`/`brk`-ing it back,
+especially for a many-small-allocations structure like a HashMap. If
+that's what's happening, the reset logic could be working exactly as
+designed *inside* bigtools while still showing ~zero change in
+`/usr/bin/time -v`'s OS-level "Maximum resident set size" -- the two
+just aren't measuring the same thing. This would mean reader-lifecycle
+tricks are fundamentally the wrong lever for this specific memory cost;
+actually confirming it would need something like comparing
+process-internal allocator stats (e.g. `malloc_stats`/jemalloc/mimalloc
+introspection reachable from Rust) against `/usr/bin/time`'s RSS on the
+same run, which hasn't been done and isn't obviously worth the effort
+given the memory story already stands on its own (uncapped is the
+runtime-favoring choice regardless of whether this theory is right).
+
+Current state: `_resolve_extra_reader_count` returns plain `cores - 1`,
+uncapped, no reset -- runtime-optimal per the cap-revert entry above,
+with the real memory cost (`bigtools`'s unbounded per-reader cache)
+fully unmitigated and, per this entry, not obviously mitigable from
+pydreg's side without deeper allocator-level work. An upstream
+`bigtools` issue remains the most promising real fix, since only
+upstream can change what that cache does or add real eviction.
+
+## 2026-08-15 (cont.) — restrict extra_readers to the one call site it was actually built for, instead of an all-or-nothing choice
+
+Follow-up prompted by re-reading the original per-stage RSS breakdown
+(2026-08-14 "found the real cause" entry) with a sharper question: does
+every `_score_positions` call site actually need `extra_readers`, or just
+the one it was originally built for? That breakdown already had the
+answer, unexamined until now: "scoring informative positions" (the main
+bulk scan) grew **+1180MB**, while "densifying and merging into broad
+peaks" (which covers *both* the gap-fill call and the 10bp-densify call,
+combined) grew only **+316MB**. Multithreaded extraction itself was
+motivated and measured (2026-08-10 entry) specifically for gap-filling --
+"the gap-filled-positions scoring step was extraction-bound by 6-7x...
+2.2x speedup" -- never for the main scan, which just happens to *also*
+hit multi-cluster chunks often enough (56% of real chunks, per the
+extraction-only diagnostic) to inherit the same per-reader cache cost,
+without ever being shown to need the parallelism.
+
+**Change: `score_fn` (the callback `pipeline.run()` hands to
+`peaks.get_dense_infp`) now takes a `sparse` parameter**
+(`_resolve_score_extra_readers(extra_readers, sparse)`) -- `sparse=True`
+routes the call through the shared `extra_readers` list; `sparse=False`
+(the default) pins it to the single primary reader, same as the main
+scan (which now hardcodes `extra_readers=None` directly, no longer
+passing the shared list at all). Only `peaks.get_dense_infp`'s gap-fill
+call sets `sparse=True` -- the 10bp-densify call (a regular grid inside
+already-known broad peaks, not scattered points) doesn't. `peaks.py`
+stays extraction-agnostic: it doesn't know what a reader or
+`extra_readers` is, only that gap-filled positions are structurally the
+sparse, scattered case (true regardless of how pydreg.pipeline chooses to
+handle that) -- a deliberately different shape than the earlier
+`gap_score_fn`-as-a-second-callback idea, which would have required
+`get_dense_infp` to juggle two callbacks instead of one flag on the one
+it already has.
+
+**Expected effect, not yet measured on real hardware**: the main scan
+should drop back to the single-reader ~120MB-per-run baseline (matching
+v0.2.6), addressing the ~79% of the regression it was found responsible
+for, while the gap-fill call keeps the real, measured multithreading win
+it was built for. The 10bp-densify call's own share of the remaining
++316MB (unknown split with gap-filling) should also shrink, since it no
+longer uses `extra_readers` either now. Total expected memory reduction:
+somewhere above 79%, ceiling unknown until measured; expected runtime
+cost: whatever the main scan's own 56%-of-chunks multi-cluster benefit
+was actually worth, which per this investigation's own repeated
+lesson (locally-reasoned magnitudes have not tracked real hardware so
+far) needs a real run to pin down, not analysis.
+
+3 new tests: `_resolve_score_extra_readers` returns the list only when
+`sparse=True`; `get_dense_infp`'s gap-fill call passes `sparse=True`;
+`_pred_dense_infp`'s densify call does not. All 99 tests pass.
+
+## 2026-08-15 (cont.) — real-hardware validation of the gap-fill-only restriction: saved almost no memory, gave back almost the entire runtime win; reverted
+
+Real production re-test (K562_groseq, `--cores 16`, `/usr/bin/time -v`),
+against every other number gathered on this exact dataset so far:
+
+| approach | peak RSS | wall time | vs. v0.2.6 wall time (1401.32s) |
+|---|---|---|---|
+| v0.2.6 baseline | 5.123 GiB | 1401.32s | -- |
+| plain uncapped (no mitigation) | 6.246 GiB | ~1289s (inferred) | 8% faster |
+| capped at 8 readers | 5.763 GiB | 1405.02s | 0.3% slower |
+| reset per chromosome | 6.183 GiB | 1718.03s | 23% slower (noisy, unverified) |
+| **restrict to gap-fill only** | **6.093 GiB** | **1392.75s** | **0.6% faster** |
+
+Only 2.4% less memory than doing nothing at all (6.246 -> 6.093 GiB),
+while giving back nearly the *entire* accumulated 2026-08-10/2026-08-13
+runtime win over v0.2.6 -- 1392.75s is barely distinguishable from
+v0.2.6's own 1401.32s on this dataset. Strictly worse than the already-
+rejected 8-reader cap on the actual tradeoff that matters (less memory
+saved, and *more* runtime given up, than capping achieved).
+
+**Why the prediction was wrong, and it's a real mechanistic miss, not
+noise:** cache growth tracks *distinct chromosomes visited per reader*,
+not *positions processed* -- established all the way back in the
+original elimination process ("growth tracked new chromosomes being
+visited for the first time, plateaued once every chromosome had been
+seen once"). The per-stage attribution this fix was based on (main scan
++1180MB, gap-fill+densify combined +316MB) was measured with all three
+call sites *sharing the same already-open reader objects, in sequence*
+-- the main scan ran first and, with 16 readers, had already warmed the
+cache for nearly every chromosome by the time gap-filling started, so
+gap-filling's own *marginal* contribution on top of that was artificially
+small. Restricting `extra_readers` to gap-filling alone doesn't remove
+that cost -- it just moves who pays it. Gap-filled positions exist
+specifically to cover gaps between dense regions *across the whole
+genome*, so they likely still touch nearly as many distinct chromosomes
+as the main scan did; with the main scan no longer using those readers
+at all, gap-filling became the *first and only* stage paying each
+reader's per-chromosome warm-up cost, reproducing almost the full
+original cost under a different name. Restricting *which stage* uses N
+readers doesn't shrink the (readers x chromosomes-visited) product;
+only reducing reader count N actually does -- which is exactly why the
+blunter 8-reader cap, despite being rejected for its own reasons, still
+came out ahead of this more "surgical"-looking fix on the metric that
+mattered.
+
+**Reverted**: `score_fn`'s `sparse` parameter,
+`_resolve_score_extra_readers`, and the main scan's hardcoded
+`extra_readers=None` are all gone; `peaks.py` is back to a single
+`score_fn(bed_df, desc="scoring")` signature with no reader-related
+concept in it at all. Back to 96 tests (the 3 sparse-flag tests removed).
+
 ## 2026-08-15 — resolved: multithreaded extraction (extra_readers) removed from the 0.2.7 release, split to a dev branch
 
-Follow-up investigation (on a separate diagnostic branch, not detailed
-here) found the actual cause: each independently-opened `extra_readers`
-`pybigtools` reader accumulates its own per-chromosome index cache
-inside `bigtools`, with no eviction -- confirmed directly against
-`bigtools`' Rust source, present unchanged even in its latest release.
-Real production data: 1 reader (pre-`extra_readers` behavior) grows
-~120MB over a full chromosome sweep; `--cores 16` (16 independent
-readers) grows ~1.6GB on identical data -- a real, consistent ~20%
-whole-pipeline RSS regression across every dataset measured. Several
-mitigations (capping reader count, resetting readers per chromosome,
-restricting threading to only the one call site -- gap-filling -- it was
-actually built and measured for) were each tried and validated on real
-hardware; none found a favorable tradeoff, each giving back most or all
-of the speedup to save only partial-to-negligible memory. The real fix
-is upstream (`bigtools` adding real eviction to that cache), not
-something resolvable purely from pydreg's side.
+The elimination process and three mitigation attempts detailed in the
+entries above (2026-08-14/2026-08-15) pinned the actual cause: each
+independently-opened `extra_readers` `pybigtools` reader accumulates its
+own per-chromosome index cache inside `bigtools`, with no eviction --
+confirmed directly against `bigtools`' Rust source, present unchanged
+even in its latest release. Real production data: 1 reader
+(pre-`extra_readers` behavior) grows ~120MB over a full chromosome
+sweep; `--cores 16` (16 independent readers) grows ~1.6GB on identical
+data -- a real, consistent ~20% whole-pipeline RSS regression across
+every dataset measured. None of capping reader count, resetting readers
+per chromosome, or restricting threading to only the gap-fill call it
+was originally built for found a favorable tradeoff -- each gave back
+most or all of the speedup to save only partial-to-negligible memory.
+The real fix is upstream (`bigtools` adding real eviction to that
+cache), not something resolvable purely from pydreg's side.
 
 **Decision: ship 0.2.7 without multithreaded extraction.** Given no
 memory-safe way to keep it was found, and every other optimization this

@@ -12,7 +12,14 @@ Prints one line per stage boundary: `[RSS so far] START/END stage (elapsed)`.
 Leaves the normal -v log output intact (this only adds RSS numbers to the
 existing stage boundaries, it doesn't replace them) -- run with -v too if
 you want both.
-"""
+
+Also runs against pre-0.2.7 checkouts (e.g. v0.2.6) for a real-hardware
+before/after comparison, even though this script itself is new: `cores`
+was called `peak_calling_cores` before the --cores unification, so this
+falls back to that name if the current checkout's pipeline.run() doesn't
+accept `cores`. This file lives outside src/pydreg/, so `git checkout
+v0.2.6 -- .` won't remove it -- copy it somewhere outside the repo first
+if checking out an older tag some other way (e.g. `git worktree`)."""
 
 import argparse
 import logging
@@ -56,14 +63,18 @@ def main():
     )
 
     print(f"[RSS {rss_mb():8.0f} MB]  baseline (process start)", flush=True)
-    result = pipeline.run(
-        args.plus_bw,
-        args.minus_bw,
-        args.out_prefix,
+    run_kwargs = dict(
         backend_name=args.backend,
-        cores=args.cores,
         progress=args.verbose,
     )
+    try:
+        result = pipeline.run(args.plus_bw, args.minus_bw, args.out_prefix, cores=args.cores, **run_kwargs)
+    except TypeError:
+        # pre-0.2.7 checkouts (e.g. v0.2.6): --cores unification hadn't
+        # happened yet, and this was the peak-calling-only knob.
+        result = pipeline.run(
+            args.plus_bw, args.minus_bw, args.out_prefix, peak_calling_cores=args.cores, **run_kwargs
+        )
     print(f"[RSS {rss_mb():8.0f} MB]  FINAL", flush=True)
     print(
         f"dense_infp rows: {len(result['dense_infp'])}, "
