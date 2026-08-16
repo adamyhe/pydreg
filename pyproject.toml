@@ -8,6 +8,11 @@ version = "0.2.7"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
+# Ceiling is implicitly 3.13 for now, not 3.14, even though nothing here
+# says so explicitly -- see .github/workflows/ci.yml's 3.14-exclusion
+# comment for why (pybigtools and safetensors, both native extensions,
+# don't have cp314 wheels yet as of 2026-08-15; every other dependency,
+# including numba/llvmlite, already does). Revisit once both ship one.
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",
