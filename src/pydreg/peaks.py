@@ -74,7 +74,7 @@ def merge_broad_peak(pred_bed, threshold, join=500):
         group_start, group_end = group_start[keep], group_end[keep]
 
         for gs, ge in zip(group_start, group_end):
-            peak_rows.append(dict(chrom=chrom, start=starts[gs - 1], end=ends[ge - 1]))
+            peak_rows.append({"chrom": chrom, "start": starts[gs - 1], "end": ends[ge - 1]})
 
     if not peak_rows:
         return None
@@ -112,17 +112,17 @@ def get_broadpeak_summary(infp_bed, threshold=0):
         for start, end, lo, hi in zip(peak_starts, peak_ends, lo_arr, hi_arr):
             scores = infp_scores[lo:hi]
             rows.append(
-                dict(
-                    chrom=chrom,
-                    start=start,
-                    end=end,
-                    min=scores.min(),
-                    max=scores.max(),
-                    mean=scores.mean(),
-                    sum=scores.sum(),
-                    stdev=scores.std(ddof=1) if scores.shape[0] > 1 else 0.0,
-                    count=scores.shape[0],
-                )
+                {
+                    "chrom": chrom,
+                    "start": start,
+                    "end": end,
+                    "min": scores.min(),
+                    "max": scores.max(),
+                    "mean": scores.mean(),
+                    "sum": scores.sum(),
+                    "stdev": scores.std(ddof=1) if scores.shape[0] > 1 else 0.0,
+                    "count": scores.shape[0],
+                }
             )
     return pd.DataFrame(rows)
 
@@ -168,7 +168,7 @@ def find_gap_infp(dreg_pred, threshold=0.2):
             if not positions:
                 continue
             for p in np.unique(np.concatenate(positions)):
-                new_rows.append(dict(chrom=chrom, start=int(p)))
+                new_rows.append({"chrom": chrom, "start": int(p)})
 
     if not new_rows:
         return None

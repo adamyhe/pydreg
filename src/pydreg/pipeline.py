@@ -303,11 +303,16 @@ def run(
 
     if write_outputs:
         with _timed("writing outputs"):
-            _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores)
+            _write_outputs(
+                out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores
+            )
 
-    return dict(
-        dense_infp=dense_infp, raw_peak=raw_peak, peak_bed=peak_bed, min_score=min_score
-    )
+    return {
+        "dense_infp": dense_infp,
+        "raw_peak": raw_peak,
+        "peak_bed": peak_bed,
+        "min_score": min_score,
+    }
 
 
 def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1):
@@ -397,7 +402,9 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
             )
         )
 
-    with ThreadPoolExecutor(max_workers=max(1, min(cores, len(bedgz_tasks)))) as thread_pool:
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(cores, len(bedgz_tasks)))
+    ) as thread_pool:
         thread_futures = [thread_pool.submit(task) for task in bedgz_tasks]
 
         try:

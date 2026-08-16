@@ -132,15 +132,15 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
             # y.p, R's re-derived argmax over this same [i_left,i_right]
             # window, is always equal to i_peak (identical window) -- reuse it.
             out_rows.append(
-                dict(
-                    start=x[i_left],
-                    stop=x[i_right],
-                    score=float(np.max(y_org[i_left : i_right + 1])),
-                    prob=-1.0,
-                    smooth_mode=x[i_peak],
-                    original_mode=0.0,
-                    centroid=0.0,
-                )
+                {
+                    "start": x[i_left],
+                    "stop": x[i_right],
+                    "score": float(np.max(y_org[i_left : i_right + 1])),
+                    "prob": -1.0,
+                    "smooth_mode": x[i_peak],
+                    "original_mode": 0.0,
+                    "centroid": 0.0,
+                }
             )
             continue
 
@@ -159,15 +159,15 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
 
         original_mode = x[i_left + int(np.argmax(y_org[i_left : i_right + 1]))]
         out_rows.append(
-            dict(
-                start=x[i_peak] - w_left + 10,
-                stop=x[i_peak] + w_right - 10,
-                score=float(np.max(y_org[i_left : i_right + 1])),
-                prob=1 - pv,
-                smooth_mode=x[i_peak],
-                original_mode=original_mode,
-                centroid=x_wc,
-            )
+            {
+                "start": x[i_peak] - w_left + 10,
+                "stop": x[i_peak] + w_right - 10,
+                "score": float(np.max(y_org[i_left : i_right + 1])),
+                "prob": 1 - pv,
+                "smooth_mode": x[i_peak],
+                "original_mode": original_mode,
+                "centroid": x_wc,
+            }
         )
 
     if not out_rows:
@@ -324,17 +324,17 @@ def _collapse_regions(rp):
             best = int(np.argmax(center_s))
             peak_center = center[best] if best < len(center) else np.nan
             rpeak_rows.append(
-                dict(
-                    LI=LI,
-                    RI=RI,
-                    PI=center_i[best],
-                    start=start,
-                    stop=stop,
-                    center=peak_center,
-                    LS=LS,
-                    RS=RS,
-                    VS=max(center_s),
-                )
+                {
+                    "LI": LI,
+                    "RI": RI,
+                    "PI": center_i[best],
+                    "start": start,
+                    "stop": stop,
+                    "center": peak_center,
+                    "LS": LS,
+                    "RS": RS,
+                    "VS": max(center_s),
+                }
             )
             LI = LS = start = None
             center, center_s, center_i = [], [], []
