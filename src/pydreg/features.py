@@ -19,15 +19,10 @@ property of a specific trained model (DREGModel exposes it after loading),
 passed in explicitly here rather than imported.
 """
 
-import logging
-from concurrent.futures import ThreadPoolExecutor
-
 import numba
 import numpy as np
 
 from . import io
-
-logger = logging.getLogger(__name__)
 
 VAL_AT_MIN = 0.01
 _ALPHA_LN99 = np.log(1 / VAL_AT_MIN - 1)  # ln(99)
@@ -52,15 +47,18 @@ def _logistic_scale(bins):
 
 def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_windows):
     """Extracts the 2*sum(2*half_n_windows) length feature vector (e.g. 360
-    for the pretrained dREG model) for a single genomic position `center`.
+    for the pretrained dREG model) for a single genomic position `center`,
+    via one raw fetch per position (width 2*max_dist+1, e.g. 200,001 bp for
+    the pretrained model's max_dist=100,000) -- the naive, unbatched
+    approach the R/C original also started from (see below).
 
-    Known perf note carried over from the R/C original: this does one raw
-    fetch per position (width 2*max_dist+1, e.g. 200,001 bp for the
-    pretrained model's max_dist=100,000). The C implementation batches
-    nearby centers into shared larger bigWig queries (merge_adjacent_range)
-    to cut down I/O; this Python port does not do that optimization yet
-    (per docs/PLANNING.md, v1 is single-process/unoptimized batching) --
-    worth revisiting if per-position fetch overhead dominates on real runs."""
+    Not used by the real pipeline -- pydreg.pipeline calls
+    extract_features_batch exclusively. Kept as
+    tests/test_features.py's naive per-position reference implementation,
+    to verify extract_features_batch's shared-fetch clustering
+    (_build_clusters, this Python port's equivalent of the C reference's
+    merge_adjacent_range) produces the same result as calling this once
+    per center would."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -195,28 +193,6 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
 # against unbounded memory for that edge case.
 _MAX_SHARED_FETCH_WIDTH = 5_000_000
 
-# Empirical per-bp cost of one cluster's transient working set inside
-# _extract_features_cluster: two raw per-bp fetch buffers (forward/reverse
-# strand) plus their two cumulative-sum buffers, all float64 (~32 bytes/bp),
-# rounded up for np.abs()'s own transient copy and general slack. Used only
-# to bound *concurrency* (how many clusters' buffers can be alive at once),
-# not to predict exact memory use.
-_CLUSTER_BYTES_PER_BP = 48
-
-# Total budget for concurrently in-flight cluster buffers across every
-# extraction worker thread combined, independent of --cores. Measured
-# directly (not assumed) that letting --cores alone decide worker count
-# multiplies extraction's peak memory by roughly the core count for sparse
-# position sets (density-aware clustering's own target case): 16-way
-# clustered extraction on a synthetic sparse dataset used ~2.7x the memory
-# of single-threaded for identical data, and real production runs showed a
-# proportional ~1.2-1.3x whole-pipeline RSS increase after this session's
-# parallel-extraction work -- see docs/PERF_LOG.md. A fixed (not
-# --cores-scaled) budget keeps that ceiling roughly constant regardless of
-# how many cores a run requests; deliberately not exposed as a CLI flag
-# yet -- revisit if a real workload needs tuning it.
-_MAX_CONCURRENT_CLUSTER_BYTES = 512 * 1024 * 1024
-
 
 def _extract_features_cluster(
     bw_plus, bw_minus, chrom, cluster_centers, max_dist, window_sizes, half_n_windows
@@ -281,41 +257,7 @@ def _build_clusters(sorted_centers, max_dist):
     return clusters
 
 
-def _cap_workers_for_memory(clusters, sorted_centers, max_dist, requested_workers):
-    """Reduces `requested_workers` (already min(len(reader_pairs),
-    len(clusters))) so that the worst-case simultaneous memory footprint of
-    that many concurrently in-flight cluster buffers stays under
-    _MAX_CONCURRENT_CLUSTER_BYTES. Uses the `requested_workers` LARGEST
-    clusters' combined span for that worst case, not just the single
-    largest one or an average -- clusters are assigned round-robin (see
-    extract_features_batch), so nothing guarantees the biggest clusters
-    land one-per-worker rather than piling onto a few; assuming they could
-    all end up running concurrently is the safe bound. This means a
-    handful of huge clusters among many tiny ones correctly reduces worker
-    count by only as much as those few clusters actually require, rather
-    than penalizing every worker for the single largest cluster in the
-    whole batch.
-
-    Never reduces below 1 -- this bounds concurrency, not whether the work
-    happens at all."""
-    if requested_workers <= 1:
-        return requested_workers
-    spans = sorted(
-        (
-            int(sorted_centers[end_i - 1]) - int(sorted_centers[start_i]) + 2 * max_dist + 1
-            for start_i, end_i in clusters
-        ),
-        reverse=True,
-    )
-    for n in range(requested_workers, 1, -1):
-        if sum(spans[:n]) * _CLUSTER_BYTES_PER_BP <= _MAX_CONCURRENT_CLUSTER_BYTES:
-            return n
-    return 1
-
-
-def extract_features_batch(
-    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, extra_readers=None
-):
+def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
     """Same as extract_features(), for an array of centers on one
     chromosome. Returns (n_centers, n_features).
 
@@ -324,38 +266,25 @@ def extract_features_batch(
     (see _build_clusters) instead of re-fetching an overlapping
     ~2*max_dist-wide window per position -- adjacent informative positions
     are frequently 10-50bp apart while max_dist can be ~100,000bp, so this
-    is the batching this module's docstring flagged as still missing
-    relative to the C original's merge_adjacent_range. Input order need not
-    be sorted; this sorts internally and restores the original order
-    before returning.
+    is the batching the C original's merge_adjacent_range does that
+    extract_features (the naive per-position reference above) doesn't.
+    Input order need not be sorted; this sorts internally and restores the
+    original order before returning.
 
-    extra_readers: optional list of additional (bw_plus, bw_minus) reader
-    pairs, each independently opened from the same underlying bigWig files
-    (pybigtools readers aren't safe for concurrent use from multiple
-    threads -- see docs/PERF_LOG.md -- so a shared pool of *distinct*
-    reader objects is required, not just more threads). When given,
-    clusters are statically partitioned round-robin across
-    1+len(extra_readers) worker threads, each thread owning exactly one
-    reader pair for the threads's entire lifetime (never handed to another
-    concurrently-running task, so there's no risk of two threads touching
-    the same reader at once). Falls back to the original single-threaded
-    loop when omitted or when there are fewer clusters than reader pairs
-    (no point spinning up threads that would sit idle). Each worker's own
-    numba thread count is reduced to numba.get_num_threads() // n_workers
-    -- numba.set_num_threads() is thread-local (confirmed directly, not
-    assumed), so this only affects that worker's own calls -- to avoid
-    n_workers x numba's own thread count oversubscribing real cores, the
-    same class of problem peaks.py's BLAS thread-pinning already solves
-    for peak-calling workers.
-
-    Worker count is also capped by _cap_workers_for_memory, independent of
-    (and potentially lower than) 1+len(extra_readers): letting --cores
-    alone decide worker count means every additional reader also means
-    another cluster's fetch/cumsum buffers alive at once, which -- for
-    sparse position sets with genuinely large clusters -- measurably
-    multiplies extraction's peak memory by close to the worker count
-    itself, not just its wall time. See docs/PERF_LOG.md for the real
-    numbers behind this cap."""
+    Single-threaded, one reader, by design -- see docs/PERF_LOG.md. A
+    multi-threaded variant (independently-opened extra reader pairs
+    processing clusters concurrently) was built and measured to speed up
+    the specific extraction-bound gap-filling step, but real production
+    hardware showed it also multiplies a real, unbounded per-reader
+    caching cost inside pybigtools/bigtools (each independently-opened
+    reader accumulates its own per-chromosome index cache with no
+    eviction), and every mitigation tried (capping reader count,
+    resetting readers per chromosome, restricting threading to just the
+    gap-fill call) traded away most or all of the speedup without fixing
+    the memory cost. That work is preserved on the
+    `multithreaded-extraction-dev` branch rather than discarded --
+    revisit once upstream `bigtools` adds real eviction to that cache, or
+    a cap/restriction is found that survives real-hardware validation."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -368,63 +297,9 @@ def extract_features_batch(
     out = np.empty((n, n_features), dtype=np.float64)
 
     clusters = _build_clusters(sorted_centers, max_dist)
-    reader_pairs = [(bw_plus, bw_minus)] + list(extra_readers or [])
-    requested_workers = min(len(reader_pairs), len(clusters))
-    n_workers = _cap_workers_for_memory(clusters, sorted_centers, max_dist, requested_workers)
-    if n_workers < requested_workers:
-        max_span = max(
-            (int(sorted_centers[end_i - 1]) - int(sorted_centers[start_i]) + 2 * max_dist + 1)
-            for start_i, end_i in clusters
+    for start_i, end_i in clusters:
+        cluster = sorted_centers[start_i:end_i]
+        out[order[start_i:end_i]] = _extract_features_cluster(
+            bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
         )
-        logger.info(
-            "extract_features_batch: memory cap reduced workers %d -> %d for %d "
-            "clusters (largest span %d bp, ~%.0fMB) to stay under the %.0fMB "
-            "concurrent-cluster budget",
-            requested_workers,
-            n_workers,
-            len(clusters),
-            max_span,
-            max_span * _CLUSTER_BYTES_PER_BP / 1024**2,
-            _MAX_CONCURRENT_CLUSTER_BYTES / 1024**2,
-        )
-
-    if n_workers <= 1:
-        for start_i, end_i in clusters:
-            cluster = sorted_centers[start_i:end_i]
-            out[order[start_i:end_i]] = _extract_features_cluster(
-                bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
-            )
-        return out
-
-    numba_threads_per_worker = max(1, numba.get_num_threads() // n_workers)
-
-    def _run_worker(reader_pair, owned_clusters):
-        bwp, bwm = reader_pair
-        numba.set_num_threads(numba_threads_per_worker)
-        computed = []
-        for start_i, end_i in owned_clusters:
-            cluster = sorted_centers[start_i:end_i]
-            computed.append(
-                (
-                    start_i,
-                    end_i,
-                    _extract_features_cluster(
-                        bwp, bwm, chrom, cluster, max_dist, window_sizes, half_n_windows
-                    ),
-                )
-            )
-        return computed
-
-    owned = [[] for _ in range(n_workers)]
-    for i, cluster_range in enumerate(clusters):
-        owned[i % n_workers].append(cluster_range)
-
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [
-            pool.submit(_run_worker, reader_pairs[w], owned[w]) for w in range(n_workers)
-        ]
-        for future in futures:
-            for start_i, end_i, result in future.result():
-                out[order[start_i:end_i]] = result
-
     return out

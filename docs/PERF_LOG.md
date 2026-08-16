@@ -2938,3 +2938,85 @@ G2/K562_groseq's real RSS regression at all, or whether the true cause
 the earlier elimination process didn't catch. The next real `-v` run's
 logs (or absence of the new log line) should settle this directly rather
 than requiring another round of RSS-delta inference.
+
+## 2026-08-15 — resolved: multithreaded extraction (extra_readers) removed from the 0.2.7 release, split to a dev branch
+
+Follow-up investigation (on a separate diagnostic branch, not detailed
+here) found the actual cause: each independently-opened `extra_readers`
+`pybigtools` reader accumulates its own per-chromosome index cache
+inside `bigtools`, with no eviction -- confirmed directly against
+`bigtools`' Rust source, present unchanged even in its latest release.
+Real production data: 1 reader (pre-`extra_readers` behavior) grows
+~120MB over a full chromosome sweep; `--cores 16` (16 independent
+readers) grows ~1.6GB on identical data -- a real, consistent ~20%
+whole-pipeline RSS regression across every dataset measured. Several
+mitigations (capping reader count, resetting readers per chromosome,
+restricting threading to only the one call site -- gap-filling -- it was
+actually built and measured for) were each tried and validated on real
+hardware; none found a favorable tradeoff, each giving back most or all
+of the speedup to save only partial-to-negligible memory. The real fix
+is upstream (`bigtools` adding real eviction to that cache), not
+something resolvable purely from pydreg's side.
+
+**Decision: ship 0.2.7 without multithreaded extraction.** Given no
+memory-safe way to keep it was found, and every other optimization this
+work-cycle produced (mlx backend, numba-fused feature-extraction/
+informative-position-scanning kernels, the `--cores`-unification and
+BLAS-thread-count fix, the CPU scoring backend's RBF-kernel fusion, model
+loading, dropping the debug `.bed.gz`, parallel output writing) is
+memory-neutral on its own, `extract_features_batch`'s `extra_readers`
+parameter and the worker-thread/memory-cap machinery around it
+(`_cap_workers_for_memory`, `_MAX_CONCURRENT_CLUSTER_BYTES`,
+`_CLUSTER_BYTES_PER_BP`) are removed from this release. **Density-aware
+clustering (`_build_clusters`) stays** -- it's a genuinely free win on
+its own, with no reader-count cost: it only changes how a *single*
+reader groups nearby centers into shared fetches, avoiding the old
+span-only rule's pathological multi-megabase clusters for sparse point
+sets (gap-filled positions) even with no threading involved at all.
+`extract_features_batch` is now always single-threaded, one reader,
+regardless of `--cores`.
+
+The full multithreaded-extraction feature (both clustering and
+threading together, exactly as before this entry) is preserved,
+unmodified, on the `multithreaded-extraction-dev` branch -- not
+discarded, just not shipped until a real fix (upstream `bigtools`
+eviction, or a mitigation that survives real-hardware validation) is
+found. 11 tests covering `_cap_workers_for_memory`/`extra_readers`
+removed along with the code they tested; 85 tests pass.
+
+## 2026-08-15 (cont.) — real-hardware validation: memory back to v0.2.6 baseline, wall-clock unaffected (even slightly faster)
+
+Real production re-test on this branch's actual state (K562_groseq and
+G2, `--cores 16`, `/usr/bin/time -v`), against the same two datasets'
+v0.2.6 and full-multithreading numbers already on record:
+
+| dataset | | wall time | peak RSS |
+|---|---|---|---|
+| K562_groseq | v0.2.6 | 1401.32s | 5.139 GiB |
+| | full multithreading | 1289.17s | 6.238 GiB |
+| | **this branch (no threading)** | **1275.95s** | **5.194 GiB** |
+| G2 | v0.2.6 | 1419.44s | 5.123 GiB |
+| | full multithreading | 1300.57s | 6.246 GiB |
+| | **this branch (no threading)** | **1280.93s** | **5.132 GiB** |
+
+**Memory lands within 0.2-1.1% of the v0.2.6 baseline on both
+datasets** -- noise-level, not a residual regression -- confirming
+`extra_readers` really was the entire real cause, with nothing else
+from this work cycle contributing measurably.
+
+**Wall-clock is unaffected, and if anything very slightly faster than
+keeping multithreaded extraction** (0.9849-0.9897x vs. the
+full-multithreading numbers, both still ~9-10% faster than v0.2.6).
+Losing the threading cost nothing measurable in either direction: this
+matches the original build-out's own note that the gap-filling step
+threading targeted was "a small absolute contributor either way
+(~5-10% of total scoring time)" even when it helped -- density-aware
+clustering alone was already doing most of the real work (avoiding the
+old span-only rule's pathological multi-megabase clusters), and the
+marginal extra speedup threading added on top was small enough that
+losing it doesn't show up above run-to-run noise.
+
+This closes out the investigation for this release: shipping without
+multithreaded extraction is a clean win with no measurable tradeoff,
+not a compromise -- confirms the branch/PR split decision (this
+release vs. `multithreaded-extraction-dev`) was the right call.

@@ -467,11 +467,13 @@ handles onto the same file. So the safe pattern is **one
 independently-opened `BBIReader` per worker thread** rather than sharing
 `pipeline.run()`'s single `bw_plus`/`bw_minus` pair across threads.
 
-**Update: implemented, once real numbers justified it.** See "Density-
-aware clustering and multi-threaded feature extraction" below —
-`pipeline.run()` now opens `cores-1` extra reader pairs and
-`features.extract_features_batch` uses them to process clusters
-concurrently, exactly the pattern scoped out above.
+**Update: implemented once real numbers justified it, then found a real
+memory cost and moved to a dev branch instead of shipping it.** See
+"Density-aware clustering: a free win kept; multi-threaded extraction:
+tried, found a real memory cost, moved to a dev branch" below —
+extraction in this release stays single-threaded, one reader, matching
+this section's original scoping; the multi-reader variant sketched above
+lives on the `multithreaded-extraction-dev` branch instead.
 
 **Update:** the gap-filled-positions row above — extraction-dominant on
 *both* cards, not just a fast one — is exactly the case a numba-jitted
@@ -539,7 +541,7 @@ defaulted to using every detected core elsewhere would both undersell
 available hardware in one stage and oversubscribe it in another, depending
 on which stage you happened to be looking at.
 
-## Density-aware clustering and multi-threaded feature extraction
+## Density-aware clustering: a free win kept; multi-threaded extraction: tried, found a real memory cost, moved to a dev branch
 
 Real production runs (TITAN Xp and P100, both 16 cores) showed the
 gap-filled-positions scoring step extraction-bound by 6-7x, at ~1,600-2,000
@@ -554,63 +556,51 @@ span than any actual query point needed — and that wasted fetch +
 `np.cumsum` work is single-threaded (no BLAS, no numba), which is exactly
 why extra cores didn't help.
 
-Two changes, addressing the two distinct problems this uncovered:
+**Density-aware clustering** (`features._build_clusters`) fixes this on
+its own, with no reader-count cost: a cluster now only extends to the
+next point when doing so adds no wasted span — i.e. only when that
+point's own `max_dist`-wide window would already overlap the previous
+point's, which is exactly when consecutive points are within
+`2*max_dist+1` of each other. The absolute-span cap remains as a backstop
+for a pathological equally-spaced chain, not the primary rule. Dense
+position sets (10-50bp apart, e.g. the bulk scan) are unaffected; only
+genuinely sparse ones (gap-filled positions) change behavior. This is a
+real, free algorithmic improvement — it changes how a *single* reader
+groups its fetches, nothing about reader count or threading — so it ships
+unconditionally.
 
-- **Density-aware clustering** (`features._build_clusters`): a cluster
-  now only extends to the next point when doing so adds no wasted span —
-  i.e. only when that point's own `max_dist`-wide window would already
-  overlap the previous point's, which is exactly when consecutive points
-  are within `2*max_dist+1` of each other. The absolute-span cap remains
-  as a backstop for a pathological equally-spaced chain, not the primary
-  rule. Dense position sets (10-50bp apart) are unaffected; only genuinely
-  sparse ones change behavior.
-- **Multi-threaded cluster extraction** (`extract_features_batch(...,
-  extra_readers=...)`): `pipeline.run()` opens `cores-1` extra,
-  independently-opened `(bw_plus, bw_minus)` reader pairs (pybigtools
-  readers aren't safe for concurrent use from multiple threads — see the
-  "Overlapping feature extraction with scoring" section above), and
-  clusters are statically partitioned round-robin across worker threads,
-  each owning exactly one reader pair for its whole lifetime. Falls back
-  to the original single-threaded loop whenever there are fewer clusters
-  than reader pairs, so this is a no-op at the default `cores=1` and for
-  any dense position set that naturally forms few clusters.
+**Multi-threaded cluster extraction was also built and measured** (extra,
+independently-opened `(bw_plus, bw_minus)` reader pairs processing
+clusters concurrently, one per worker thread), giving a real 2.2x
+combined speedup over the original span-only/single-threaded behavior on
+a synthetic sparse benchmark. But real production data later showed it
+also multiplies a genuine, unbounded memory cost: each independently-
+opened `pybigtools` reader accumulates its own per-chromosome index cache
+inside `bigtools`, with no eviction — confirmed directly against
+`bigtools`' own Rust source, present unchanged even in its latest
+release. A single reader grows ~120MB over a full genome sweep;
+`--cores 16` (16 independent readers) grows ~1.6GB on identical data — a
+consistent ~20% whole-pipeline RSS regression across every real dataset
+measured. Every mitigation tried (capping reader count, resetting readers
+per chromosome, restricting threading to only the call site it was
+actually built for) was validated on real hardware and found to trade
+away most or all of the speedup without fixing the memory cost — the
+real fix needs `bigtools` itself to add eviction to that cache.
 
-Combining both against the two parallelism axes needed care: each
-extraction worker thread reduces numba's own thread count to
-`numba.get_num_threads() // n_workers` (confirmed `numba.set_num_threads`
-is thread-local first, rather than assumed) — otherwise `cores` worker
-threads each running a `cores`-thread numba kernel would oversubscribe
-real cores by up to `cores²`, the same class of problem `peaks.py`'s
-per-worker BLAS pinning already solves for peak calling.
-
-Measured on this session's 10-core Apple M4 (synthetic sparse benchmark,
-not the real TITAN Xp/P100 hardware that motivated this): both changes
-combined gave a 2.2x speedup over the original span-only/single-threaded
-behavior. This single-chromosome test likely understates the real
-production win, since production scans 69 chromosomes/contigs — the total
-wasted span the old rule fetched genome-wide was almost certainly far
-larger than one chromosome can demonstrate. See `docs/PERF_LOG.md`'s
-2026-08-10 entry for the full investigation and numbers, including the
-correctness verification (a real CLI run at `--cores 1` vs `--cores 8`
-producing byte-identical output except the pre-existing stochastic
-peak-calling p-value column).
-
-**Worker count is capped by memory, not just `--cores`.** Real production
-runs showed peak RSS consistently up ~1.2-1.3x after this feature shipped
-— proportional across every experiment, not a fixed per-run amount.
-Traced to exactly this mechanism: every additional worker thread means
-another cluster's fetch/cumsum buffers alive concurrently, and for sparse
-position sets with genuinely large clusters (up to `_MAX_SHARED_FETCH_
-WIDTH`'s 5Mbp), that measurably multiplies peak memory by close to the
-worker count itself. `features._cap_workers_for_memory` now bounds worker
-count so the worst-case simultaneous memory of the `n_workers` *largest*
-concurrently in-flight clusters stays under a fixed 512MB budget,
-independent of `--cores` — verified directly to close the gap on the
-repro that found it (16-way extraction on a synthetic sparse dataset: +0MB
-after the fix, vs. +716MB before, with no wall-time cost since each
-worker's own numba thread share grows as worker count shrinks). See
-`docs/PERF_LOG.md`'s 2026-08-14 entry for the full elimination process
-(two other real candidates were measured and ruled out first).
+**Not shipped in this release.** Rather than ship a known, unfixed memory
+regression, `extract_features_batch`'s `extra_readers` parameter and its
+worker-thread/memory-cap machinery have been removed here and preserved,
+unmodified, on the `multithreaded-extraction-dev` branch — feature
+extraction in this release is always single-threaded, one reader,
+regardless of `--cores`, but still benefits from density-aware
+clustering. Real production re-validation (K562_groseq and G2,
+`--cores 16`) confirmed this is a clean win, not a compromise: peak RSS
+landed within 0.2-1.1% of the v0.2.6 baseline on both (noise-level, not
+a residual regression), while wall-clock was unaffected — if anything
+very slightly faster than keeping multithreaded extraction, since that
+feature's own contribution was always a small fraction of total
+scoring time even when it helped. See `docs/PERF_LOG.md`'s 2026-08-10
+and 2026-08-15 entries for the full investigation and numbers.
 
 ## Peak calling: parallelism and per-worker BLAS pinning
 

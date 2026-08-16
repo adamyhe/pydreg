@@ -52,20 +52,20 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; f
 <circle cx="384.3" cy="493.3" r="7" class="mark-old"><title>Jurkat_leChROseq (pydreg 0.2.6): dreg 1.50, pydreg 0.43</title></circle>
 <circle cx="361.0" cy="506.1" r="7" class="mark-old"><title>K562_groseq (pydreg 0.2.6): dreg 1.29, pydreg 0.39</title></circle>
 <circle cx="507.7" cy="384.5" r="7" class="mark-old"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.6): dreg 3.26, pydreg 0.90</title></circle>
-<circle cx="543.9" cy="361.8" r="7" class="mark-new"><title>G1 (pydreg 0.2.7): dreg 4.10, pydreg 1.06</title></circle>
-<circle cx="362.1" cy="516.9" r="7" class="mark-new"><title>G2 (pydreg 0.2.7): dreg 1.30, pydreg 0.36</title></circle>
-<circle cx="441.4" cy="450.9" r="7" class="mark-new"><title>G3 (pydreg 0.2.7): dreg 2.15, pydreg 0.57</title></circle>
-<circle cx="433.0" cy="462.0" r="7" class="mark-new"><title>G5 (pydreg 0.2.7): dreg 2.04, pydreg 0.53</title></circle>
-<circle cx="377.2" cy="509.2" r="7" class="mark-new"><title>G6 (pydreg 0.2.7): dreg 1.43, pydreg 0.38</title></circle>
-<circle cx="376.3" cy="506.8" r="7" class="mark-new"><title>G7 (pydreg 0.2.7): dreg 1.43, pydreg 0.39</title></circle>
-<circle cx="511.6" cy="383.2" r="7" class="mark-new"><title>GM12878_groseq (pydreg 0.2.7): dreg 3.35, pydreg 0.91</title></circle>
-<circle cx="429.2" cy="459.5" r="7" class="mark-new"><title>Jurkat_ChROseq (pydreg 0.2.7): dreg 1.99, pydreg 0.54</title></circle>
-<circle cx="381.4" cy="499.3" r="7" class="mark-new"><title>Jurkat_ChROseq_1 (pydreg 0.2.7): dreg 1.47, pydreg 0.41</title></circle>
-<circle cx="358.2" cy="523.0" r="7" class="mark-new"><title>Jurkat_ChROseq_2 (pydreg 0.2.7): dreg 1.27, pydreg 0.35</title></circle>
-<circle cx="364.3" cy="520.6" r="7" class="mark-new"><title>Jurkat_PROseq (pydreg 0.2.7): dreg 1.32, pydreg 0.35</title></circle>
-<circle cx="384.3" cy="502.2" r="7" class="mark-new"><title>Jurkat_leChROseq (pydreg 0.2.7): dreg 1.50, pydreg 0.40</title></circle>
-<circle cx="361.0" cy="518.2" r="7" class="mark-new"><title>K562_groseq (pydreg 0.2.7): dreg 1.29, pydreg 0.36</title></circle>
-<circle cx="507.7" cy="394.9" r="7" class="mark-new"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.7): dreg 3.26, pydreg 0.84</title></circle>
+<circle cx="543.9" cy="362.5" r="7" class="mark-new"><title>G1 (pydreg 0.2.7): dreg 4.10, pydreg 1.05</title></circle>
+<circle cx="362.1" cy="519.1" r="7" class="mark-new"><title>G2 (pydreg 0.2.7): dreg 1.30, pydreg 0.36</title></circle>
+<circle cx="441.4" cy="450.6" r="7" class="mark-new"><title>G3 (pydreg 0.2.7): dreg 2.15, pydreg 0.57</title></circle>
+<circle cx="433.0" cy="462.6" r="7" class="mark-new"><title>G5 (pydreg 0.2.7): dreg 2.04, pydreg 0.53</title></circle>
+<circle cx="377.2" cy="509.5" r="7" class="mark-new"><title>G6 (pydreg 0.2.7): dreg 1.43, pydreg 0.38</title></circle>
+<circle cx="376.3" cy="507.8" r="7" class="mark-new"><title>G7 (pydreg 0.2.7): dreg 1.43, pydreg 0.38</title></circle>
+<circle cx="511.6" cy="381.7" r="7" class="mark-new"><title>GM12878_groseq (pydreg 0.2.7): dreg 3.35, pydreg 0.92</title></circle>
+<circle cx="429.2" cy="462.0" r="7" class="mark-new"><title>Jurkat_ChROseq (pydreg 0.2.7): dreg 1.99, pydreg 0.53</title></circle>
+<circle cx="381.4" cy="500.5" r="7" class="mark-new"><title>Jurkat_ChROseq_1 (pydreg 0.2.7): dreg 1.47, pydreg 0.40</title></circle>
+<circle cx="358.2" cy="525.0" r="7" class="mark-new"><title>Jurkat_ChROseq_2 (pydreg 0.2.7): dreg 1.27, pydreg 0.34</title></circle>
+<circle cx="364.3" cy="522.0" r="7" class="mark-new"><title>Jurkat_PROseq (pydreg 0.2.7): dreg 1.32, pydreg 0.35</title></circle>
+<circle cx="384.3" cy="507.6" r="7" class="mark-new"><title>Jurkat_leChROseq (pydreg 0.2.7): dreg 1.50, pydreg 0.39</title></circle>
+<circle cx="361.0" cy="519.6" r="7" class="mark-new"><title>K562_groseq (pydreg 0.2.7): dreg 1.29, pydreg 0.35</title></circle>
+<circle cx="507.7" cy="397.0" r="7" class="mark-new"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.7): dreg 3.26, pydreg 0.83</title></circle>
 <text x="375.0" y="632" class="axis" text-anchor="middle">dreg walltime (hours, log scale)</text>
 <text x="40" y="320.0" class="axis" text-anchor="middle" transform="rotate(-90 40 320.0)">pydreg walltime (hours, log scale)</text>
 <text x="108" y="90" class="note" text-anchor="start">Below diagonal favors pydreg</text>
@@ -110,20 +110,20 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; f
 <circle cx="1287.7" cy="494.7" r="7" class="mark-old"><title>Jurkat_leChROseq (pydreg 0.2.6): dreg 36.33, pydreg 6.07</title></circle>
 <circle cx="1287.2" cy="524.8" r="7" class="mark-old"><title>K562_groseq (pydreg 0.2.6): dreg 36.25, pydreg 5.14</title></circle>
 <circle cx="1290.2" cy="438.2" r="7" class="mark-old"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.6): dreg 36.79, pydreg 8.31</title></circle>
-<circle cx="1291.8" cy="384.3" r="7" class="mark-new"><title>G1 (pydreg 0.2.7): dreg 37.10, pydreg 11.20</title></circle>
-<circle cx="1279.1" cy="489.6" r="7" class="mark-new"><title>G2 (pydreg 0.2.7): dreg 34.80, pydreg 6.25</title></circle>
-<circle cx="1285.0" cy="440.0" r="7" class="mark-new"><title>G3 (pydreg 0.2.7): dreg 35.85, pydreg 8.23</title></circle>
-<circle cx="1284.5" cy="445.4" r="7" class="mark-new"><title>G5 (pydreg 0.2.7): dreg 35.75, pydreg 7.98</title></circle>
-<circle cx="1286.3" cy="457.9" r="7" class="mark-new"><title>G6 (pydreg 0.2.7): dreg 36.08, pydreg 7.45</title></circle>
-<circle cx="1285.0" cy="459.8" r="7" class="mark-new"><title>G7 (pydreg 0.2.7): dreg 35.84, pydreg 7.37</title></circle>
-<circle cx="1286.1" cy="430.9" r="7" class="mark-new"><title>GM12878_groseq (pydreg 0.2.7): dreg 36.03, pydreg 8.65</title></circle>
-<circle cx="1289.8" cy="451.4" r="7" class="mark-new"><title>Jurkat_ChROseq (pydreg 0.2.7): dreg 36.72, pydreg 7.72</title></circle>
-<circle cx="1286.7" cy="474.8" r="7" class="mark-new"><title>Jurkat_ChROseq_1 (pydreg 0.2.7): dreg 36.14, pydreg 6.78</title></circle>
-<circle cx="1286.9" cy="468.4" r="7" class="mark-new"><title>Jurkat_ChROseq_2 (pydreg 0.2.7): dreg 36.19, pydreg 7.03</title></circle>
-<circle cx="1286.4" cy="465.0" r="7" class="mark-new"><title>Jurkat_PROseq (pydreg 0.2.7): dreg 36.10, pydreg 7.16</title></circle>
-<circle cx="1287.7" cy="451.2" r="7" class="mark-new"><title>Jurkat_leChROseq (pydreg 0.2.7): dreg 36.33, pydreg 7.73</title></circle>
-<circle cx="1287.2" cy="489.9" r="7" class="mark-new"><title>K562_groseq (pydreg 0.2.7): dreg 36.25, pydreg 6.24</title></circle>
-<circle cx="1290.2" cy="397.9" r="7" class="mark-new"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.7): dreg 36.79, pydreg 10.39</title></circle>
+<circle cx="1291.8" cy="405.9" r="7" class="mark-new"><title>G1 (pydreg 0.2.7): dreg 37.10, pydreg 9.94</title></circle>
+<circle cx="1279.1" cy="525.1" r="7" class="mark-new"><title>G2 (pydreg 0.2.7): dreg 34.80, pydreg 5.13</title></circle>
+<circle cx="1285.0" cy="466.8" r="7" class="mark-new"><title>G3 (pydreg 0.2.7): dreg 35.85, pydreg 7.09</title></circle>
+<circle cx="1284.5" cy="471.1" r="7" class="mark-new"><title>G5 (pydreg 0.2.7): dreg 35.75, pydreg 6.92</title></circle>
+<circle cx="1286.3" cy="484.6" r="7" class="mark-new"><title>G6 (pydreg 0.2.7): dreg 36.08, pydreg 6.42</title></circle>
+<circle cx="1285.0" cy="485.4" r="7" class="mark-new"><title>G7 (pydreg 0.2.7): dreg 35.84, pydreg 6.39</title></circle>
+<circle cx="1286.1" cy="455.0" r="7" class="mark-new"><title>GM12878_groseq (pydreg 0.2.7): dreg 36.03, pydreg 7.57</title></circle>
+<circle cx="1289.8" cy="475.1" r="7" class="mark-new"><title>Jurkat_ChROseq (pydreg 0.2.7): dreg 36.72, pydreg 6.77</title></circle>
+<circle cx="1286.7" cy="504.1" r="7" class="mark-new"><title>Jurkat_ChROseq_1 (pydreg 0.2.7): dreg 36.14, pydreg 5.76</title></circle>
+<circle cx="1286.9" cy="496.5" r="7" class="mark-new"><title>Jurkat_ChROseq_2 (pydreg 0.2.7): dreg 36.19, pydreg 6.01</title></circle>
+<circle cx="1286.4" cy="490.3" r="7" class="mark-new"><title>Jurkat_PROseq (pydreg 0.2.7): dreg 36.10, pydreg 6.22</title></circle>
+<circle cx="1287.7" cy="477.3" r="7" class="mark-new"><title>Jurkat_leChROseq (pydreg 0.2.7): dreg 36.33, pydreg 6.69</title></circle>
+<circle cx="1287.2" cy="522.9" r="7" class="mark-new"><title>K562_groseq (pydreg 0.2.7): dreg 36.25, pydreg 5.19</title></circle>
+<circle cx="1290.2" cy="428.7" r="7" class="mark-new"><title>Sample_K562UNT_121109_proseq_1_QC (pydreg 0.2.7): dreg 36.79, pydreg 8.76</title></circle>
 <text x="1125.0" y="632" class="axis" text-anchor="middle">dreg maximum RSS (GiB, log scale)</text>
 <text x="790" y="320.0" class="axis" text-anchor="middle" transform="rotate(-90 790 320.0)">pydreg maximum RSS (GiB, log scale)</text>
 <text x="858" y="90" class="note" text-anchor="start">Below diagonal favors pydreg</text>

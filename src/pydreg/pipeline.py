@@ -55,7 +55,6 @@ def _score_positions(
     chunk,
     progress=False,
     desc="scoring",
-    extra_readers=None,
 ):
     """Scores every row of bed_df (columns chrom, start, ... positionally)
     and returns scores in the same row order. Groups by chromosome first
@@ -75,18 +74,11 @@ def _score_positions(
     a background extraction is in flight, and a ThreadPoolExecutor with
     max_workers=1 guarantees at most one call into this level's extract()
     ever runs at a time regardless of how far ahead a chunk gets submitted.
-    (features.extract_features_batch may itself spin up further worker
-    threads *inside* a single extract() call when extra_readers is given --
-    each of those owns a distinct, independently-opened reader for its own
-    duration, per that function's own docstring, so this doesn't reintroduce
-    concurrent access to any one reader object.) The overlap itself relies
-    on scorer.predict() releasing the GIL while it blocks on the GPU (true
-    for CuPy's device-sync calls) -- on the numpy/sklearn CPU backends this
-    prefetch still can't hurt correctness, just may not overlap as usefully
-    since there's no GPU wait to hide behind.
-
-    extra_readers: passed straight through to
-    features.extract_features_batch -- see that function's docstring.
+    The overlap itself relies on scorer.predict() releasing the GIL while
+    it blocks on the GPU (true for CuPy's device-sync calls) -- on the
+    numpy/sklearn CPU backends this prefetch still can't hurt correctness,
+    just may not overlap as usefully since there's no GPU wait to hide
+    behind.
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).
@@ -117,7 +109,6 @@ def _score_positions(
             centers,
             model.window_sizes,
             model.half_n_windows,
-            extra_readers=extra_readers,
         )
         extract_seconds += time.perf_counter() - t0
         return positions, X
@@ -208,10 +199,10 @@ def run(
     scoring kernels (features._binned_sums_batch_numba,
     infp._windowed_sums_numba, models._rbf_accumulate), the BLAS thread
     count for the CPU scoring backend's GEMMs (via threadpoolctl -- see
-    below), the extra independently-opened bigWig readers used to
-    parallelize feature extraction itself across clusters (see
-    features.extract_features_batch's extra_readers), and the worker pool
-    that writes output files concurrently. Deliberately one knob, not
+    below), and the worker pool that writes output files concurrently.
+    Feature extraction itself (features.extract_features_batch) is
+    single-threaded, one reader, regardless of cores -- see that
+    function's own docstring for why. Deliberately one knob otherwise, not
     several independently-tunable ones -- a run restricted to N cores in
     one stage but left unrestricted (or serial) in another would both
     undersell available hardware and oversubscribe it, depending on which
@@ -238,15 +229,6 @@ def run(
     threadpoolctl.threadpool_limits(limits=cores)
     bw_plus = pybigtools.open(plus_bw_path)
     bw_minus = pybigtools.open(minus_bw_path)
-    # One reader pair is already open above; open cores-1 more, each
-    # independently, so feature extraction can process that many clusters
-    # concurrently without ever sharing a single pybigtools reader across
-    # threads (see extract_features_batch's docstring for why that's
-    # required, not just a nice-to-have).
-    extra_readers = [
-        (pybigtools.open(plus_bw_path), pybigtools.open(minus_bw_path))
-        for _ in range(max(0, cores - 1))
-    ]
 
     logger.info("loading models...")
     with _timed("loading models"):
@@ -273,7 +255,6 @@ def run(
             chunk,
             progress=progress,
             desc="scoring informative positions",
-            extra_readers=extra_readers,
         )
 
     def score_fn(bed_df, desc="scoring"):
@@ -285,7 +266,6 @@ def run(
             bed_df,
             chunk,
             progress=progress,
-            extra_readers=extra_readers,
             desc=desc,
         )
 
@@ -323,11 +303,16 @@ def run(
 
     if write_outputs:
         with _timed("writing outputs"):
-            _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores)
+            _write_outputs(
+                out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=cores
+            )
 
-    return dict(
-        dense_infp=dense_infp, raw_peak=raw_peak, peak_bed=peak_bed, min_score=min_score
-    )
+    return {
+        "dense_infp": dense_infp,
+        "raw_peak": raw_peak,
+        "peak_bed": peak_bed,
+        "min_score": min_score,
+    }
 
 
 def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1):
@@ -417,7 +402,9 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
             )
         )
 
-    with ThreadPoolExecutor(max_workers=max(1, min(cores, len(bedgz_tasks)))) as thread_pool:
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(cores, len(bedgz_tasks)))
+    ) as thread_pool:
         thread_futures = [thread_pool.submit(task) for task in bedgz_tasks]
 
         try:
