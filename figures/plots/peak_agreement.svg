@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="620" viewBox="0 0 280 620" role="img">
+<title>pydreg vs dREG called-peak agreement (Jaccard index)</title>
+<style>
+text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
+.title { font-size: 28px; font-weight: 600; }
+.axis { font-size: 24px; }
+.tick, .note, .value { font-size: 24px; fill: #5f6368; }
+.lib { font-size: 24px; }
+.plot { fill: #fff; stroke: #9aa0a6; }
+.grid { stroke: #e3e6e8; stroke-width: 1; }
+.diagonal { stroke: #5f6368; stroke-width: 2; stroke-dasharray: 7 6; }
+.ref { stroke: #d62728; stroke-width: 1.2; stroke-dasharray: 5 4; }
+.mark { fill: #2878b5; stroke: #174a6e; stroke-width: 1.5; }
+.stem { stroke: #9aa0a6; stroke-width: 1.4; }
+</style>
+<rect width="280" height="620" fill="#fff"/>
+<text x="10" y="34" class="title">Agreement</text>
+<rect x="150" y="75" width="110" height="445" class="plot"/>
+<line x1="150" y1="520.0" x2="260" y2="520.0" class="grid"/>
+<text x="140" y="528.0" class="tick" text-anchor="end">0.9972</text>
+<line x1="150" y1="408.7" x2="260" y2="408.7" class="grid"/>
+<text x="140" y="416.7" class="tick" text-anchor="end">0.9979</text>
+<line x1="150" y1="297.5" x2="260" y2="297.5" class="grid"/>
+<text x="140" y="305.5" class="tick" text-anchor="end">0.9986</text>
+<line x1="150" y1="186.3" x2="260" y2="186.3" class="grid"/>
+<text x="140" y="194.3" class="tick" text-anchor="end">0.9993</text>
+<line x1="150" y1="75.0" x2="260" y2="75.0" class="grid"/>
+<text x="140" y="83.0" class="tick" text-anchor="end">1.0000</text>
+<line x1="150" y1="75.0" x2="260" y2="75.0" class="ref"/>
+<line x1="205.0" y1="265.1" x2="205.0" y2="240.8" class="stem"/>
+<line x1="205.0" y1="196.9" x2="205.0" y2="170.2" class="stem"/>
+<line x1="185.0" y1="265.1" x2="225.0" y2="265.1" class="stem"/>
+<line x1="185.0" y1="170.2" x2="225.0" y2="170.2" class="stem"/>
+<rect x="165.0" y="196.9" width="80.0" height="43.8" fill="#dce9f8" stroke="#174a6e" stroke-width="1.5"/>
+<line x1="165.0" y1="221.8" x2="245.0" y2="221.8" stroke="#174a6e" stroke-width="2"/>
+<circle cx="193.0" cy="439.9" r="7" class="mark"><title>G7: 0.997723</title></circle>
+<circle cx="181.0" cy="400.6" r="7" class="mark"><title>G6: 0.997968</title></circle>
+<circle cx="229.0" cy="265.1" r="7" class="mark"><title>K562_groseq: 0.998814</title></circle>
+<circle cx="181.0" cy="232.7" r="7" class="mark"><title>Jurkat_leChROseq: 0.999016</title></circle>
+<circle cx="193.0" cy="226.4" r="7" class="mark"><title>GM12878_groseq: 0.999055</title></circle>
+<circle cx="181.0" cy="226.1" r="7" class="mark"><title>G1: 0.999057</title></circle>
+<circle cx="229.0" cy="217.5" r="7" class="mark"><title>G5: 0.999111</title></circle>
+<circle cx="181.0" cy="206.2" r="7" class="mark"><title>Jurkat_ChROseq_1: 0.999181</title></circle>
+<circle cx="205.0" cy="197.7" r="7" class="mark"><title>G3: 0.999234</title></circle>
+<circle cx="193.0" cy="194.5" r="7" class="mark"><title>Jurkat_ChROseq: 0.999254</title></circle>
+<circle cx="181.0" cy="184.4" r="7" class="mark"><title>Jurkat_PROseq: 0.999317</title></circle>
+<circle cx="193.0" cy="170.2" r="7" class="mark"><title>Jurkat_ChROseq_2: 0.999406</title></circle>
+<text x="30" y="297.5" class="axis" text-anchor="middle" transform="rotate(-90 30 297.5)">Jaccard index</text>
+<text x="205.0" y="575" class="axis" text-anchor="middle">pydreg/dREG</text>
+<text x="10" y="60" class="note" text-anchor="start">n=12 median=0.9991</text>
+</svg>

@@ -12,12 +12,14 @@ pydreg is a faithful, inference-only port of [dREG](https://github.com/Danko-Lab
 (Danko Lab) — it reproduces the original R/C package's `run_dREG.R` pipeline
 end to end, including several upstream quirks that would look like bugs in
 isolation but are kept deliberately because the pretrained model's expected
-output depends on them. This has been validated directly: on real test data,
-pydreg's called peaks agree with real dREG's at a **0.999728 Jaccard index**
-(the fraction of the union of both peak sets that both implementations
+output depends on them. This has been validated directly: across 12 real
+PRO-seq/GRO-seq/ChRO-seq libraries, pydreg's called peaks agree with real
+dREG's at a **median 0.999084 Jaccard index** (range 0.997723-0.999406;
+the fraction of the union of both peak sets that both implementations
 agree on) — near-total agreement, with only the small residual expected from
 inherent randomization in the p-value calculation (see "Peak calling"
-below).
+below). See `figures/plot_peak_agreement.py` and
+`figures/plots/peak_agreement.svg` for the per-library breakdown.
 
 ## 1. Informative-position scan
 

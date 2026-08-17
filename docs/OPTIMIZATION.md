@@ -16,7 +16,10 @@ distilled "why it's built this way" version.
 On an NVIDIA P100 using 16 cores, pydreg is consistently faster and uses
 less peak memory than dREG across completed paired experiments:
 
-![dREG versus pydreg walltime and peak RSS](timing_comparison.svg)
+<p>
+  <img src="../figures/plots/walltime.svg" alt="dREG versus pydreg walltime" width="45%">
+  <img src="../figures/plots/memory.svg" alt="dREG versus pydreg peak RSS" width="45%">
+</p>
 
 ## Scoring: four backends, why NumPy (not scikit-learn) is the CPU default, and why the GPU tiers are `cupy`/`mlx` (not `cuML`)
 

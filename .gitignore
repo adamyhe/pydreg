@@ -2,6 +2,8 @@
 **/.vscode
 _reference/
 _models/
+figures/data/
+figures/output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

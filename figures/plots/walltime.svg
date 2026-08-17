@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="560" viewBox="0 0 560 560" role="img">
+<title>Wall time</title>
+<style>
+text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
+.title { font-size: 28px; font-weight: 600; }
+.axis { font-size: 24px; }
+.tick, .note, .value { font-size: 24px; fill: #5f6368; }
+.lib { font-size: 24px; }
+.plot { fill: #fff; stroke: #9aa0a6; }
+.grid { stroke: #e3e6e8; stroke-width: 1; }
+.diagonal { stroke: #5f6368; stroke-width: 2; stroke-dasharray: 7 6; }
+.ref { stroke: #d62728; stroke-width: 1.2; stroke-dasharray: 5 4; }
+.mark { fill: #2878b5; stroke: #174a6e; stroke-width: 1.5; }
+.stem { stroke: #9aa0a6; stroke-width: 1.4; }
+</style>
+<rect width="560" height="560" fill="#fff"/>
+<text x="90" y="30" class="title">Wall time</text>
+<rect x="90" y="55" width="440" height="415" class="plot"/>
+<line x1="90.0" y1="55" x2="90.0" y2="470" class="grid"/>
+<line x1="90" y1="470.0" x2="530" y2="470.0" class="grid"/>
+<text x="90.0" y="492" class="tick" text-anchor="middle">0.25</text>
+<text x="80" y="474.0" class="tick" text-anchor="end">0.25</text>
+<line x1="191.8" y1="55" x2="191.8" y2="470" class="grid"/>
+<line x1="90" y1="374.0" x2="530" y2="374.0" class="grid"/>
+<text x="191.8" y="492" class="tick" text-anchor="middle">0.5</text>
+<text x="80" y="378.0" class="tick" text-anchor="end">0.5</text>
+<line x1="293.6" y1="55" x2="293.6" y2="470" class="grid"/>
+<line x1="90" y1="278.0" x2="530" y2="278.0" class="grid"/>
+<text x="293.6" y="492" class="tick" text-anchor="middle">1</text>
+<text x="80" y="282.0" class="tick" text-anchor="end">1</text>
+<line x1="395.4" y1="55" x2="395.4" y2="470" class="grid"/>
+<line x1="90" y1="181.9" x2="530" y2="181.9" class="grid"/>
+<text x="395.4" y="492" class="tick" text-anchor="middle">2</text>
+<text x="80" y="185.9" class="tick" text-anchor="end">2</text>
+<line x1="497.2" y1="55" x2="497.2" y2="470" class="grid"/>
+<line x1="90" y1="85.9" x2="530" y2="85.9" class="grid"/>
+<text x="497.2" y="492" class="tick" text-anchor="middle">4</text>
+<text x="80" y="89.9" class="tick" text-anchor="end">4</text>
+<line x1="90.0" y1="470.0" x2="530.0" y2="55.0" class="diagonal"/>
+<circle cx="500.9" cy="270.8" r="7" class="mark"><title>G1: dREG 4.10h, pydreg 1.05h</title></circle>
+<circle cx="405.9" cy="355.4" r="7" class="mark"><title>G3: dREG 2.15h, pydreg 0.57h</title></circle>
+<circle cx="398.2" cy="366.8" r="7" class="mark"><title>G5: dREG 2.04h, pydreg 0.53h</title></circle>
+<circle cx="346.6" cy="411.9" r="7" class="mark"><title>G6: dREG 1.43h, pydreg 0.38h</title></circle>
+<circle cx="345.7" cy="410.3" r="7" class="mark"><title>G7: dREG 1.43h, pydreg 0.38h</title></circle>
+<circle cx="471.0" cy="289.2" r="7" class="mark"><title>GM12878_groseq: dREG 3.35h, pydreg 0.92h</title></circle>
+<circle cx="331.6" cy="421.6" r="7" class="mark"><title>K562_groseq: dREG 1.29h, pydreg 0.35h</title></circle>
+<circle cx="334.6" cy="423.9" r="7" class="mark"><title>Jurkat_PROseq: dREG 1.32h, pydreg 0.35h</title></circle>
+<circle cx="350.4" cy="403.2" r="7" class="mark"><title>Jurkat_ChROseq_1: dREG 1.47h, pydreg 0.40h</title></circle>
+<circle cx="329.0" cy="426.8" r="7" class="mark"><title>Jurkat_ChROseq_2: dREG 1.27h, pydreg 0.34h</title></circle>
+<circle cx="394.7" cy="366.3" r="7" class="mark"><title>Jurkat_ChROseq: dREG 1.99h, pydreg 0.53h</title></circle>
+<circle cx="353.2" cy="410.1" r="7" class="mark"><title>Jurkat_leChROseq: dREG 1.50h, pydreg 0.39h</title></circle>
+<text x="310.0" y="525" class="axis" text-anchor="middle">dREG wall time (hours, log scale)</text>
+<text x="28" y="262.5" class="axis" text-anchor="middle" transform="rotate(-90 28 262.5)">pydreg wall time (hours, log scale)</text>
+<text x="98" y="75" class="note" text-anchor="start">Below diagonal favors pydreg</text>
+</svg>

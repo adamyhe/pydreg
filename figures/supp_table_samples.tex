@@ -1,0 +1,29 @@
+% Supplementary table: the 12 real PRO-seq/GRO-seq/ChRO-seq libraries used in
+% the pydreg-vs-dREG benchmark (figures/timing_scripts_*.sh). Library names
+% match figures/_common.py's LIBRARIES. GEO metadata (biosample, assay) and
+% citations pulled from each accession's own GEO record and its linked
+% PubMed entry -- see figures/supp_table_samples.bib for full references.
+\begin{table}[htbp]
+\centering
+\caption{Real PRO-seq/GRO-seq/ChRO-seq libraries used in the pydreg-vs-dREG
+timing and peak-agreement benchmarks.}
+\label{tab:benchmark-libraries}
+\begin{tabular}{lllll}
+\toprule
+Library & GEO accession & Biosample & Assay & Citation \\
+\midrule
+G1                 & GSM1480327             & K562    & PRO-seq                      & \cite{core2014} \\
+G3                 & GSM3452725             & K562    & PRO-seq                      & \cite{wang2019dreg} \\
+G5                 & GSE89230               & K562    & PRO-seq                      & \cite{vihervaara2017} \\
+G6                 & GSM2545324             & K562    & PRO-seq                      & \cite{dukler2017} \\
+G7                 & GSM2545325             & K562    & PRO-seq                      & \cite{dukler2017} \\
+GM12878\_groseq    & GSM1480326             & GM12878 & GRO-seq                       & \cite{core2014} \\
+K562\_groseq       & GSM1480325             & K562    & GRO-seq                       & \cite{core2014} \\
+Jurkat\_PROseq     & GSM3309955             & Jurkat  & PRO-seq                       & \cite{chu2018} \\
+Jurkat\_ChROseq\_1 & GSM3309957             & Jurkat  & ChRO-seq                      & \cite{chu2018} \\
+Jurkat\_ChROseq\_2 & GSM3309956             & Jurkat  & ChRO-seq                      & \cite{chu2018} \\
+Jurkat\_ChROseq    & GSM3309956, GSM3309957 & Jurkat  & ChRO-seq (pooled replicates)  & \cite{chu2018} \\
+Jurkat\_leChROseq  & GSM3309958             & Jurkat  & leChRO-seq                    & \cite{chu2018} \\
+\bottomrule
+\end{tabular}
+\end{table}
