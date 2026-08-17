@@ -626,7 +626,7 @@ wheels = [
 
 [[package]]
 name = "pydreg"
-version = "0.2.7"
+version = "0.2.7.post1"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
