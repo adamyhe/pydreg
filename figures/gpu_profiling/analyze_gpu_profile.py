@@ -364,6 +364,14 @@ def main():
         else:
             default_gpu_index = int(args.gpu_index)
 
+    unknown_keys = set(gpu_index_by_label) - set(args.labels)
+    if unknown_keys:
+        raise SystemExit(
+            f"--gpu-index key(s) {sorted(unknown_keys)} don't match any "
+            f"label in {args.labels} -- typo? Refusing to silently fall "
+            "back to auto-detect for a label you thought you'd pinned."
+        )
+
     summaries = []
     for label in args.labels:
         summary = summarize_label(
