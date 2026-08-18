@@ -149,8 +149,23 @@ def summarize_util(df):
 
 
 def _run_nsys_stats(rep_path, report):
+    # --force-export=true: without it, nsys reuses a cached .sqlite export
+    # next to the .nsys-rep if one exists, and errors out ("could not be
+    # opened and appears to be invalid") rather than regenerating it if
+    # that cache is stale/corrupt from an earlier interrupted run --
+    # confirmed on real data. Always paying the re-export cost is cheap
+    # relative to a silent, confusing failure on every subsequent call.
     result = subprocess.run(
-        ["nsys", "stats", "--report", report, "--format", "csv", str(rep_path)],
+        [
+            "nsys",
+            "stats",
+            "--report",
+            report,
+            "--format",
+            "csv",
+            "--force-export=true",
+            str(rep_path),
+        ],
         capture_output=True,
         text=True,
     )
