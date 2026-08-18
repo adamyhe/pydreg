@@ -64,15 +64,26 @@ run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
 number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
 entries for the full before/after.)
 
-Two figures, both regenerable from the real profiling data in `gpu_out/`:
+Three figures, all regenerable from the real profiling data in `gpu_out/`:
 `plot_gpu_utilization.py` (`figures/plots/gpu_utilization.svg`) is the
 qualitative one -- dREG's sawtooth vs. pydreg's plateau, real dmon data,
 own x-axis per panel since the phases differ ~6.5x in duration.
-`plot_gpu_time_breakdown.py` (`figures/plots/gpu_time_breakdown.svg`) is
-the quantitative one -- stacked idle/kernel/memcpy time per tool, with
-kernel-launch and H2D-memcpy call counts as direct text annotations
-(their *time* is too small a fraction of either bar to encode by height,
-even though their *count* is one of the two headline findings).
+`plot_gpu_time_breakdown.py` (`figures/plots/gpu_time_breakdown.svg`) shows
+totals -- stacked idle/kernel/memcpy time per tool, with kernel-launch and
+H2D-memcpy call counts as direct text annotations (their *time* is too
+small a fraction of either bar to encode by height, even though their
+*count* is one of the two headline findings). Neither of those two
+actually states an inefficiency, though -- a symptom (idle GPU) and raw
+counts/totals side by side both still require the reader to do the
+division themselves. `plot_gpu_efficiency.py`
+(`figures/plots/gpu_efficiency.svg`) is that division, done for them: a
+log-scale dot plot of *positions processed per GPU operation*
+(kernel launch, H2D memcpy call) -- dREG does ~25x/~972x less useful work
+per individual operation than pydreg, which is the actual "inefficient"
+claim, not just "the GPU is idle a lot" or "there are more calls." Built
+as a dumbbell dot plot rather than a bar chart specifically because a
+log-scale axis distorts bar *length* perceptually (the same reason
+`figures/_common.py`'s scatter panels use log-scale point marks, not bars).
 
 ## Isolating the right process/phase, with zero source modification
 
