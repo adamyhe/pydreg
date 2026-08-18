@@ -205,22 +205,104 @@ def _num(row, *candidates):
     return None
 
 
-def gpu_trace_events(rep_path):
-    """Returns (start_ns, end_ns, name) for every GPU-side event (kernel,
-    memcpy, memset) in the trace, sorted by start. Column names in
-    `cuda_gpu_trace` (Start/Duration vs. "Start (ns)"/"Duration (ns)", etc.)
-    have varied across nsys releases -- tries the common candidates rather
-    than assuming one."""
+def load_start_epoch(outdir, label):
+    """LABEL.start_epoch (written by profile_gpu.sh, captured immediately
+    before nsys launched the command) is the wall-clock unix-epoch moment
+    nsys's own internal ns-since-recording-start timeline begins at --
+    without it, LABEL.log's wall-clock phase markers can't be translated
+    into nsys's timestamps, so per-phase nsys windowing isn't possible
+    (falls back to whole-trace). Returns None if missing (e.g. a capture
+    made before this file existed)."""
+    p = outdir / f"{label}.start_epoch"
+    if not p.exists():
+        return None
+    try:
+        return float(p.read_text().strip())
+    except ValueError:
+        return None
+
+
+def gpu_trace_df(rep_path):
+    """Returns a DataFrame (start_ns, end_ns, dur_ns, name) for every
+    GPU-side event (kernel, memcpy, memset) in the trace, sorted by start.
+    Column names in `cuda_gpu_trace` (Start/Duration vs. "Start (ns)"/
+    "Duration (ns)", etc.) have varied across nsys releases -- tries the
+    common candidates rather than assuming one."""
     rows = _parse_nsys_csv(_run_nsys_stats(rep_path, "cuda_gpu_trace"))
-    events = []
+    records = []
     for row in rows:
         start = _num(row, "Start (ns)", "Start", "Start:ts_ns")
         dur = _num(row, "Duration (ns)", "Duration", "Duration:dur_ns")
         name = row.get("Name") or row.get("Kernel Name") or ""
         if start is None or dur is None:
             continue
-        events.append((start, start + dur, name))
-    return sorted(events)
+        records.append({"start_ns": start, "dur_ns": dur, "end_ns": start + dur, "name": name})
+    df = pd.DataFrame.from_records(records, columns=["start_ns", "end_ns", "dur_ns", "name"])
+    return df.sort_values("start_ns").reset_index(drop=True)
+
+
+def window_events_df(df, window, start_epoch):
+    """Restricts a gpu_trace_df to a wall-clock window by converting nsys's
+    recording-relative start_ns into wall-clock using start_epoch (see
+    load_start_epoch). Returns df unchanged if either window or
+    start_epoch is unavailable -- callers must check windowed separately
+    rather than silently treating an unfiltered df as phase-scoped.
+
+    Uses `Timestamp.to_pydatetime().timestamp()`, not `Timestamp.timestamp()`
+    directly -- confirmed these disagree for naive timestamps: pandas'
+    own `.timestamp()` always assumes UTC, while the stdlib's (and
+    `date +%s.%N`'s, which wrote start_epoch) assumes local time. window's
+    Timestamps are naive local wall-clock (parsed from LABEL.log, which is
+    local time on whatever machine ran the job), so using pandas'
+    UTC-assuming version here silently mis-windows by the local UTC
+    offset on any non-UTC host. Also only correct if this function runs on
+    the same machine that captured the data (same local timezone at both
+    ends) -- true in practice since it's only reachable where `nsys` is
+    installed, i.e. NSYS_AVAILABLE, which in this project has so far only
+    ever been true on the capture host itself."""
+    if df.empty or window is None or start_epoch is None:
+        return df
+    start, end = window
+    wall_start_ns = df["start_ns"] + start_epoch * 1e9
+    lo_ns = start.to_pydatetime().timestamp() * 1e9
+    hi_ns = end.to_pydatetime().timestamp() * 1e9
+    return df[(wall_start_ns >= lo_ns) & (wall_start_ns <= hi_ns)]
+
+
+def _is_memory_op(name):
+    lname = name.lower()
+    return "memcpy" in lname or "memset" in lname
+
+
+def summarize_events_by_name(df, kind_filter):
+    """Aggregates a (possibly windowed) gpu_trace_df by event name, in the
+    same column layout as nsys stats' own cuda_gpu_kern_sum/
+    cuda_gpu_mem_time_sum reports -- computed locally, rather than via
+    those reports directly, specifically so it can be windowed to one
+    phase (nsys's own *_sum reports have no version-stable time-range
+    filter to rely on)."""
+    if df.empty:
+        return []
+    subset = df[df["name"].apply(kind_filter)]
+    if subset.empty:
+        return []
+    total = subset["dur_ns"].sum()
+    rows = []
+    for name, s in subset.groupby("name")["dur_ns"]:
+        rows.append(
+            {
+                "Name": name,
+                "Time (%)": round(100 * s.sum() / total, 1) if total else 0.0,
+                "Total Time (ns)": float(s.sum()),
+                "Instances": int(s.count()),
+                "Avg (ns)": float(s.mean()),
+                "Med (ns)": float(s.median()),
+                "Min (ns)": float(s.min()),
+                "Max (ns)": float(s.max()),
+                "StdDev (ns)": float(s.std()) if len(s) > 1 else 0.0,
+            }
+        )
+    return sorted(rows, key=lambda r: -r["Total Time (ns)"])
 
 
 def idle_gap_analysis(events):
@@ -281,27 +363,41 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_inde
             "machine with nsys installed to get the rest."
         )
     elif rep_path.exists():
-        events = gpu_trace_events(rep_path)
-        if window is not None:
-            # nsys timestamps are ns since profile start, not wall-clock --
-            # without a captured profile-start epoch there's no exact way to
-            # translate the log-derived wall-clock window into this
-            # timeline, so kernel/memcpy-time reports below reflect the
-            # WHOLE recorded trace, not just this phase, whenever a window
-            # was found. See README.md's "nsys and windowing" section.
+        start_epoch = load_start_epoch(outdir, label)
+        nsys_windowed = window is not None and start_epoch is not None
+        summary["nsys_windowed"] = nsys_windowed
+        if window is not None and not nsys_windowed:
+            # No LABEL.start_epoch (capture predates profile_gpu.sh writing
+            # it, or nsys wasn't used at capture time) -- there's no way to
+            # translate the log-derived wall-clock window into nsys's
+            # recording-relative timestamps, so every nsys number below
+            # reflects the WHOLE recorded trace, not just this phase. See
+            # README.md's "nsys and windowing" section.
             print(
-                f"[{label}] NOTE: nsys report reflects the whole recorded "
-                "trace, not just the windowed phase -- see README.md"
+                f"[{label}] NOTE: no {label}.start_epoch found -- nsys report "
+                "reflects the whole recorded trace, not just the windowed "
+                "phase -- see README.md"
             )
+
+        full_df = gpu_trace_df(rep_path)
+        df = window_events_df(full_df, window, start_epoch) if nsys_windowed else full_df
+
+        events = list(zip(df["start_ns"], df["end_ns"], df["name"]))
         summary["nsys_idle_gaps"] = idle_gap_analysis(events)
+        summary["nsys_cuda_gpu_kern_sum"] = summarize_events_by_name(
+            df, lambda n: not _is_memory_op(n)
+        )
+        summary["nsys_cuda_gpu_mem_time_sum"] = summarize_events_by_name(
+            df, _is_memory_op
+        )
+        # cuda_api_sum is CPU-side API call timing, from nsys's own
+        # pre-aggregated report -- still whole-trace-only (cuda_api_trace's
+        # raw per-call data would need the same local-aggregation treatment
+        # as above to window it; not done here since the kernel/memcpy
+        # numbers were what mattered for the scheduling/kernel-design
+        # comparison this tooling was built for).
         summary["nsys_cuda_api_sum"] = _parse_nsys_csv(
             _run_nsys_stats(rep_path, "cuda_api_sum")
-        )
-        summary["nsys_cuda_gpu_kern_sum"] = _parse_nsys_csv(
-            _run_nsys_stats(rep_path, "cuda_gpu_kern_sum")
-        )
-        summary["nsys_cuda_gpu_mem_time_sum"] = _parse_nsys_csv(
-            _run_nsys_stats(rep_path, "cuda_gpu_mem_time_sum")
         )
     else:
         print(f"[{label}] no {rep_path} found, skipping nsys summary")
@@ -326,6 +422,7 @@ def print_summary(summary):
                 )
     gaps = summary.get("nsys_idle_gaps")
     if gaps:
+        print(f"  nsys_windowed={summary.get('nsys_windowed')}")
         print(
             f"  nsys: {gaps['pct_busy']:.1f}% GPU-busy, {gaps['n_gaps']} idle gaps, "
             f"mean gap={gaps.get('gap_mean_ns', 0) / 1e6:.2f}ms "

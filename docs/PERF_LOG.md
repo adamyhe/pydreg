@@ -3460,3 +3460,35 @@ change (this is a comparison against dREG, not a modification to this
 package), so there's no output-equivalence claim to make; recorded here
 because it's exactly the kind of investigation this log exists to
 preserve.
+
+## 2026-08-18 (cont.) — closed the nsys windowing gap for pydreg's kernel/memcpy numbers, and caught a real pandas UTC-vs-local timestamp bug doing it
+
+The entry above's caveat (pydreg's `cuda_gpu_kern_sum`/`cuda_gpu_mem_time_sum`
+numbers spanned its whole run, all three scoring phases, not just the
+informative-positions phase dREG's numbers are isolated to) was closeable
+without touching `src/pydreg/`: `profile_gpu.sh` now writes
+`LABEL.start_epoch` (`date +%s.%N`, captured right before `nsys profile`
+launches) alongside the existing `LABEL.log`, giving `analyze_gpu_profile.py`
+the one piece of information it was missing -- the wall-clock instant nsys's
+own recording-relative timestamps start counting from. `cuda_gpu_trace`'s
+raw per-event data is now aggregated locally (mirroring nsys's own
+`*_sum` report columns) after filtering to the log-derived window, rather
+than relying on nsys's pre-aggregated whole-trace reports.
+
+**Real bug caught before trusting this on real data**: `pandas.Timestamp.timestamp()`
+assumes a *naive* timestamp is UTC; the stdlib's `datetime.timestamp()`
+(and `date +%s.%N`, which writes `start_epoch`) assumes local time. Since
+the log timestamps are local wall-clock time (Python logging's default),
+using pandas' version directly silently mis-windowed by the local UTC
+offset on any non-UTC host -- caught with a synthetic fixture (known
+in-window/out-of-window events at fixed relative timestamps) before ever
+running this against real data, not by inspecting output after the fact.
+Fixed via `Timestamp.to_pydatetime().timestamp()` instead.
+
+Old `.nsys-rep` captures (made before `profile_gpu.sh` wrote
+`start_epoch`, including the ones behind the entry above) have no way to
+be windowed retroactively -- the analyzer detects the missing file and
+falls back to whole-trace numbers for them automatically, same as before.
+This doesn't change the 2026-08-18 findings above, which already
+disclosed the whole-run caveat; it means a *fresh* capture would now give
+a phase-exact comparison instead.

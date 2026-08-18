@@ -66,6 +66,13 @@ if command -v nsys >/dev/null; then
   # since the traced process never issues a single CUDA call itself. This
   # flag makes nsys follow across that fork+exec boundary instead of only
   # watching the top-level wrapper.
+  # LABEL.start_epoch: nsys's own per-event timestamps in the .nsys-rep are
+  # nanoseconds since nsys started recording, not wall-clock -- this file
+  # (captured right before nsys launches the command, same clock as
+  # LABEL.log's own timestamps) is what lets analyze_gpu_profile.py convert
+  # between the two and window the nsys data to just one phase, the same
+  # way LABEL.log already windows the dmon data.
+  date +%s.%N > "$OUTDIR/$LABEL.start_epoch"
   nsys profile --trace=cuda,nvtx,osrt --trace-fork-before-exec=true \
     --output="$OUTDIR/$LABEL" -- "${COMMAND[@]}" \
     2>&1 | tee "$LOG_FILE"
