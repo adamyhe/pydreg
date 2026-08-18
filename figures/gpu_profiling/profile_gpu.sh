@@ -58,7 +58,16 @@ trap cleanup EXIT
 
 if command -v nsys >/dev/null; then
   echo "[profile_gpu] running under nsys profile -> $NSYS_REP"
-  nsys profile --trace=cuda,nvtx,osrt --output="$OUTDIR/$LABEL" -- "${COMMAND[@]}" \
+  # --trace-fork-before-exec=true: without it, nsys only traces the exact
+  # process it launched -- confirmed on real data that wrapping a shell
+  # script (dREG's run_predict.bsh) which itself fork+execs a brand-new R
+  # process silently produces a .nsys-rep with NO CUDA trace data at all
+  # ("SKIPPED: ... does not contain CUDA trace data" from `nsys stats`),
+  # since the traced process never issues a single CUDA call itself. This
+  # flag makes nsys follow across that fork+exec boundary instead of only
+  # watching the top-level wrapper.
+  nsys profile --trace=cuda,nvtx,osrt --trace-fork-before-exec=true \
+    --output="$OUTDIR/$LABEL" -- "${COMMAND[@]}" \
     2>&1 | tee "$LOG_FILE"
 else
   echo "[profile_gpu] WARNING: nsys not found on PATH -- skipping kernel-level trace," \
