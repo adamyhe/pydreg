@@ -154,6 +154,12 @@ def _run_nsys_stats(rep_path, report):
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(
+            f"[{rep_path.name}] nsys stats --report {report} "
+            f"(exit {result.returncode}) produced no usable stdout -- stderr:\n"
+            f"{result.stderr.strip()}"
+        )
     return result.stdout
 
 
