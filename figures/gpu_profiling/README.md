@@ -155,32 +155,42 @@ Each run produces, under `OUTDIR`:
     that is worth doing only if this first pass actually points at the
     kernels rather than scheduling.
 
-## nsys and windowing (a real limitation)
+## nsys and windowing (resolved, with one caveat for old captures)
 
-`nsys` timestamps are nanoseconds since the profile started, not wall-clock
-time, and no profile-start epoch is currently captured to translate the
-log-derived wall-clock window into that timeline. So:
+`nsys`'s own per-event timestamps in `cuda_gpu_trace` are nanoseconds since
+*nsys itself* started recording, not wall-clock time -- there's no way to
+compare them against `LABEL.log`'s wall-clock phase markers without
+knowing the wall-clock instant nsys started. `profile_gpu.sh` now writes
+that instant to `LABEL.start_epoch` (via `date +%s.%N`, captured
+immediately before launching `nsys profile`), and `analyze_gpu_profile.py`
+uses it to convert every `cuda_gpu_trace` event's timestamp into wall-clock
+time and filter to exactly the log-derived window -- the same idea as the
+dmon windowing, just needing one extra piece of information since nsys's
+clock isn't wall-clock to begin with.
 
-- For **dREG**, this doesn't matter -- the whole recorded trace already is the
-  target phase.
-- For **pydreg**, `nsys_cuda_gpu_kern_sum`/`nsys_cuda_gpu_mem_time_sum` in the
-  analyzer's output reflect the **whole run** (informative + gap-filled +
-  densified scoring combined), not just the informative-positions phase, even
-  though the dmon utilization numbers above them are correctly windowed. The
-  analyzer prints a note when this applies. The idle-gap analysis is affected
-  the same way, so a mixed gap pattern across all three phases is expected --
-  treat pydreg's nsys numbers as "how cupy behaves on this workload overall,"
-  not a phase-exact match to dREG's isolated number, when comparing.
+This means `nsys_cuda_gpu_kern_sum`/`nsys_cuda_gpu_mem_time_sum`/
+`nsys_idle_gaps` are now correctly restricted to just the informative-
+positions phase for pydreg too, not its whole run -- confirmed with a
+synthetic fixture (in-window/out-of-window events at known relative
+timestamps) before trusting it on real data. One real bug found and fixed
+while building this: `pandas.Timestamp.timestamp()` assumes a naive
+timestamp is **UTC**, while the stdlib's `datetime.timestamp()` (and
+`date +%s.%N`, which writes `start_epoch`) assumes **local time** -- using
+pandas' version directly would have silently mis-windowed by the local UTC
+offset on any non-UTC host. Fixed by converting via
+`Timestamp.to_pydatetime().timestamp()` instead.
 
-Two ways to close this gap later if the coarser comparison isn't conclusive
-enough, in increasing order of effort:
-1. `nsys`'s external `nsys start`/`nsys stop` attach-to-running-process
-   commands can bracket an arbitrary window of an already-launched process
-   from a separate watcher script tailing pydreg's log for the same two
-   marker lines -- no source change, but exact flags vary across `nsys`
-   versions and this hasn't been validated here (no GPU/`nsys` available in
-   this environment); check `nsys launch --help`/`nsys start --help` on the
-   actual server before relying on it.
-2. An NVTX range around just that phase in `pipeline.py` would make `nsys`
-   natively phase-aware (considered and reverted for this pass -- avoided
-   touching `src/pydreg/` per your preference).
+**Caveat**: this only works for captures made *after* `profile_gpu.sh`
+started writing `LABEL.start_epoch`. A `.nsys-rep` from before that change
+has no matching `.start_epoch` file, so the analyzer falls back to
+whole-trace nsys numbers for it automatically (prints a NOTE when this
+happens) -- the 2026-08-18 findings in `docs/PERF_LOG.md` were computed
+this way, before this fix existed, so pydreg's kernel/memcpy counts there
+are its whole run, not just the informative-positions phase (the entry
+already says so).
+
+`cuda_api_sum` (CPU-side CUDA API call timing) is still whole-trace-only --
+windowing it the same way would need the raw `cuda_api_trace` report
+aggregated locally exactly like `cuda_gpu_trace` is now, not done here
+since the kernel/memcpy numbers were what the scheduling/kernel-design
+comparison actually needed.
