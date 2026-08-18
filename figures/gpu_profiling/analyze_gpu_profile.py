@@ -27,11 +27,14 @@ import csv
 import io
 import json
 import re
+import shutil
 import statistics
 import subprocess
 from pathlib import Path
 
 import pandas as pd
+
+NSYS_AVAILABLE = shutil.which("nsys") is not None
 
 DEFAULT_PHASE_START_RE = r"scoring informative positions\.\.\."
 DEFAULT_PHASE_END_RE = r"scoring informative positions done in"
@@ -88,6 +91,26 @@ def parse_dmon(dmon_path):
         if col not in ("Date", "Time", "timestamp"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["timestamp"])
+
+
+def select_active_gpu(df, label, gpu_index=None):
+    """dmon logs one row per GPU per sample -- on a multi-GPU host, pooling
+    every GPU's rows together silently dilutes every stat with whatever
+    idle cards were never touched by the job (confirmed on real 2-GPU
+    profiling data: doubled sample counts, ~2x inflated idle fraction).
+    Picks the GPU with the most total activity (by `fb` memory used, or
+    `sm` utilization if `fb` wasn't captured) unless gpu_index overrides it."""
+    if "gpu" not in df.columns or df["gpu"].nunique() <= 1:
+        return df
+    metric = "fb" if "fb" in df.columns else "sm"
+    totals = df.groupby("gpu")[metric].sum()
+    selected = gpu_index if gpu_index is not None else totals.idxmax()
+    print(
+        f"[{label}] multiple GPUs in dmon log ({sorted(df['gpu'].unique().tolist())}) "
+        f"-- using gpu {int(selected)} "
+        f"({'auto-selected by total ' + metric if gpu_index is None else 'explicit --gpu-index'})"
+    )
+    return df[df["gpu"] == selected]
 
 
 def window_df(df, window, pad=pd.Timedelta(seconds=1)):
@@ -215,7 +238,7 @@ def idle_gap_analysis(events):
     return result
 
 
-def summarize_label(outdir, label, start_re, end_re, force_whole_trace):
+def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_index=None):
     dmon_path = outdir / f"{label}.dmon.csv"
     log_path = outdir / f"{label}.log"
     rep_path = outdir / f"{label}.nsys-rep"
@@ -224,12 +247,19 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace):
     summary = {"label": label, "windowed": window is not None}
 
     if dmon_path.exists():
-        df = parse_dmon(dmon_path)
+        df = select_active_gpu(parse_dmon(dmon_path), label, gpu_index)
         summary["dmon"] = summarize_util(window_df(df, window))
     else:
         print(f"[{label}] WARNING: {dmon_path} not found, skipping dmon summary")
 
-    if rep_path.exists():
+    if rep_path.exists() and not NSYS_AVAILABLE:
+        print(
+            f"[{label}] {rep_path} found but `nsys` isn't on PATH on this "
+            "machine -- skipping kernel/memcpy/idle-gap analysis (dmon "
+            "utilization above is still valid). Run this script on a "
+            "machine with nsys installed to get the rest."
+        )
+    elif rep_path.exists():
         events = gpu_trace_events(rep_path)
         if window is not None:
             # nsys timestamps are ns since profile start, not wall-clock --
@@ -299,8 +329,34 @@ def main():
         "(use for a tool with no separate phases to slice out, e.g. dREG's "
         "run_predict.bsh, whose whole process already is the target phase)",
     )
+    parser.add_argument(
+        "--gpu-index",
+        default=None,
+        help="which nvidia-smi GPU index each label's dmon data is actually "
+        "on -- either a bare int applied to every label (single-GPU host), "
+        "or label=index pairs, comma-separated (e.g. 'dreg=1,pydreg=0') for "
+        "a shared multi-GPU host where jobs land on different physical "
+        "cards, or where CUDA's device enumeration doesn't match "
+        "nvidia-smi's (a real, confirmed gap -- Rgtsvm/dREG's own "
+        "'GPU ID: 0' argument is a *CUDA* index, which silently mapped to "
+        "nvidia-smi index 1 on real hardware; verify explicitly rather than "
+        "trusting the auto-detect fallback below whenever possible). "
+        "Omitted labels fall back to auto-selecting the GPU with the most "
+        "total fb/sm activity, which is unreliable on a shared node where "
+        "another user's job may dominate that metric on an unrelated card.",
+    )
     args = parser.parse_args()
     whole_trace_labels = set(args.whole_trace.split(",")) if args.whole_trace else set()
+    gpu_index_by_label = {}
+    default_gpu_index = None
+    if args.gpu_index is not None:
+        if "=" in args.gpu_index:
+            gpu_index_by_label = {
+                k: int(v)
+                for k, v in (pair.split("=") for pair in args.gpu_index.split(","))
+            }
+        else:
+            default_gpu_index = int(args.gpu_index)
 
     summaries = []
     for label in args.labels:
@@ -310,6 +366,7 @@ def main():
             args.phase_start_regex,
             args.phase_end_regex,
             force_whole_trace=label in whole_trace_labels,
+            gpu_index=gpu_index_by_label.get(label, default_gpu_index),
         )
         summaries.append(summary)
         print_summary(summary)

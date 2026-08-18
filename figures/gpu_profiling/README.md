@@ -50,14 +50,37 @@ do the same here if hardware access allows it).
 ## Running
 
 ```
-./profile_gpu.sh OUTDIR dreg   -- bash run_predict.bsh plus.bw minus.bw dreg_model.RData out_prefix
+./profile_gpu.sh OUTDIR dreg   -- bash run_predict.bsh plus.bw minus.bw dreg_model.RData out_prefix 16 0
 ./profile_gpu.sh OUTDIR pydreg -- pydreg plus.bw minus.bw out_prefix --backend cupy -v
-python3 analyze_gpu_profile.py OUTDIR dreg pydreg --whole-trace dreg
+python3 analyze_gpu_profile.py OUTDIR dreg pydreg --whole-trace dreg --gpu-index dreg=1,pydreg=0
 ```
 
 (`--whole-trace dreg` tells the analyzer not to look for pydreg-style log
 markers in dREG's log -- there aren't any, and there don't need to be, since
-the whole process already is the target phase.)
+the whole process already is the target phase. `--gpu-index` is explained
+below -- don't skip it on a multi-GPU host.)
+
+### A real gotcha: CUDA's GPU index isn't nvidia-smi's GPU index
+
+Confirmed on real hardware (a 2-GPU server): `run_predict.bsh`'s `[gpu_id]`
+argument (`eval_svm.R`'s `Rgtsvm::selectGPUdevice(gpu_id)`) is a **CUDA**
+device index, which is not guaranteed to match `nvidia-smi`'s enumeration
+(CUDA defaults to its own ordering heuristic unless
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` is set; `nvidia-smi` always uses PCI bus
+order). Concretely: `run_predict.bsh ... 16 0` (`gpu_id=0`) logged `GPU ID:
+0` and genuinely ran on CUDA device 0 -- which turned out to be
+`nvidia-smi`'s GPU **1**, not GPU 0. Trusting the argument you passed in
+without checking would have profiled the wrong (idle) card entirely.
+
+On top of that, `analyze_gpu_profile.py`'s dmon auto-detect (pick the GPU
+with the most total `fb`/`sm` activity) is **only a fallback** and is
+unreliable on a shared multi-tenant node -- confirmed on the same run,
+where another process's memory footprint on an unrelated GPU outranked the
+actual job's `fb` total and got auto-selected instead. Always pass
+`--gpu-index LABEL=INDEX` pairs once you know which physical
+(`nvidia-smi`-numbered) GPU each job actually landed on -- don't rely on
+the argument you *passed* to the job, and don't rely on auto-detect on a
+shared host.
 
 Verify `run_predict.bsh`'s actual argument order/model path against your
 checkout before running -- `_reference/dREG` isn't available in this sandbox
