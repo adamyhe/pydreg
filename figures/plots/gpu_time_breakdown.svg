@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="660" viewBox="0 0 720 660" role="img">
+<title>Where dREG's and pydreg's GPU time goes, same 5,617,218-position scoring phase</title>
+<style>
+text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
+.title { font-size: 26px; font-weight: 600; }
+.subtitle { font-size: 17px; fill: #5f6368; }
+.tick { font-size: 17px; fill: #5f6368; }
+.barlabel { font-size: 17px; font-weight: 600; }
+.grouplabel { font-size: 21px; font-weight: 600; }
+.legend { font-size: 17px; }
+.callout { font-size: 17px; fill: #202124; }
+.grid { stroke: #e3e6e8; stroke-width: 1; }
+</style>
+<rect width="720" height="660" fill="#fff"/>
+<text x="90" y="34" class="title">Where the GPU time actually goes</text>
+<text x="90" y="58" class="subtitle">Same 5,617,218-position phase, both sides phase-exact</text>
+<line x1="90" y1="530.0" x2="480" y2="530.0" class="grid"/>
+<text x="78" y="536.0" class="tick" text-anchor="end">0s</text>
+<line x1="90" y1="439.5" x2="480" y2="439.5" class="grid"/>
+<text x="78" y="445.5" class="tick" text-anchor="end">500s</text>
+<line x1="90" y1="349.0" x2="480" y2="349.0" class="grid"/>
+<text x="78" y="355.0" class="tick" text-anchor="end">1000s</text>
+<line x1="90" y1="258.5" x2="480" y2="258.5" class="grid"/>
+<text x="78" y="264.5" class="tick" text-anchor="end">1500s</text>
+<line x1="90" y1="168.0" x2="480" y2="168.0" class="grid"/>
+<text x="78" y="174.0" class="tick" text-anchor="end">2000s</text>
+<rect x="85.0" y="410.6" width="140" height="119.4" fill="#c7c6bd" stroke="#fff" stroke-width="2"><title>dREG scheduling idle: 659.8s (27.1%)</title></rect>
+<text x="155.0" y="476.3" class="barlabel" text-anchor="middle" fill="#fff">660s</text>
+<rect x="85.0" y="90.7" width="140" height="319.9" fill="#1baf7a" stroke="#fff" stroke-width="2"><title>dREG kernel compute: 1767.1s (72.7%)</title></rect>
+<text x="155.0" y="256.6" class="barlabel" text-anchor="middle" fill="#fff">1767s</text>
+<rect x="85.0" y="90.0" width="140" height="0.7" fill="#4a3aa7" stroke="#fff" stroke-width="2"><title>dREG memcpy: 3.9s (0.2%)</title></rect>
+<text x="155.0" y="564" class="grouplabel" text-anchor="middle">dREG</text>
+<text x="155.0" y="588" class="tick" text-anchor="middle">2431s total</text>
+<text x="155.0" y="612" class="tick" text-anchor="middle">653,677 kernel launches</text>
+<text x="155.0" y="634" class="tick" text-anchor="middle">1,345,274 H2D memcpy calls</text>
+<rect x="345.0" y="525.7" width="140" height="4.3" fill="#c7c6bd" stroke="#fff" stroke-width="2"><title>pydreg scheduling idle: 23.9s (5.4%)</title></rect>
+<rect x="345.0" y="450.6" width="140" height="75.0" fill="#1baf7a" stroke="#fff" stroke-width="2"><title>pydreg kernel compute: 414.5s (94.4%)</title></rect>
+<text x="415.0" y="494.2" class="barlabel" text-anchor="middle" fill="#fff">414s</text>
+<rect x="345.0" y="450.5" width="140" height="0.1" fill="#4a3aa7" stroke="#fff" stroke-width="2"><title>pydreg memcpy: 0.7s (0.2%)</title></rect>
+<text x="415.0" y="564" class="grouplabel" text-anchor="middle">pydreg</text>
+<text x="415.0" y="588" class="tick" text-anchor="middle">439s total</text>
+<text x="415.0" y="612" class="tick" text-anchor="middle">26,281 kernel launches</text>
+<text x="415.0" y="634" class="tick" text-anchor="middle">1,384 H2D memcpy calls</text>
+<rect x="510" y="110" width="18" height="18" fill="#c7c6bd"/>
+<text x="536" y="124" class="legend">Scheduling idle</text>
+<rect x="510" y="142" width="18" height="18" fill="#1baf7a"/>
+<text x="536" y="156" class="legend">Kernel compute</text>
+<rect x="510" y="174" width="18" height="18" fill="#4a3aa7"/>
+<text x="536" y="188" class="legend">Memcpy</text>
+<text x="510" y="230" class="callout">Total time: 5.5x</text>
+<text x="510" y="254" class="callout">Busy-only time: 4.27x</text>
+<text x="510" y="278" class="callout">Kernel launches: 25x</text>
+<text x="510" y="302" class="callout">H2D memcpy calls: 972x</text>
+</svg>

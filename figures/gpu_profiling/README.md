@@ -64,6 +64,16 @@ run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
 number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
 entries for the full before/after.)
 
+Two figures, both regenerable from the real profiling data in `gpu_out/`:
+`plot_gpu_utilization.py` (`figures/plots/gpu_utilization.svg`) is the
+qualitative one -- dREG's sawtooth vs. pydreg's plateau, real dmon data,
+own x-axis per panel since the phases differ ~6.5x in duration.
+`plot_gpu_time_breakdown.py` (`figures/plots/gpu_time_breakdown.svg`) is
+the quantitative one -- stacked idle/kernel/memcpy time per tool, with
+kernel-launch and H2D-memcpy call counts as direct text annotations
+(their *time* is too small a fraction of either bar to encode by height,
+even though their *count* is one of the two headline findings).
+
 ## Isolating the right process/phase, with zero source modification
 
 - **dREG**: run `run_predict.bsh` (the legacy score-only workflow -- steps 1
