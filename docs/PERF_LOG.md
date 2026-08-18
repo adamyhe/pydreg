@@ -3493,6 +3493,41 @@ This doesn't change the 2026-08-18 findings above, which already
 disclosed the whole-run caveat; it means a *fresh* capture would now give
 a phase-exact comparison instead.
 
+## 2026-08-18 (cont.) — phase-exact re-capture: every ratio from the first pass was an *underestimate*
+
+Re-ran pydreg with the `start_epoch` fix in place (dREG's original capture
+reused as-is, since `run_predict.bsh` was already exactly one phase).
+Confirmed via the analyzer's own `nsys_windowed: true` field that pydreg's
+numbers below are now restricted to just the informative-positions phase,
+not its whole run. Corrected numbers, same 5,617,218 positions both sides:
+
+| | dREG | pydreg (informative-positions only) | ratio |
+|---|---|---|---|
+| Core kernel launches | 653,677 (`SparseEvaluateKernel`) | 26,281 (`sgemm_128x128x8_NT_vec`) | ~25x (was ~17x against pydreg's inflated 3-phase count) |
+| Core kernel total time | 1,439.3s | 299.9s | ~4.8x |
+| H2D memcpy calls | 1,345,274 | 1,384 | ~972x (was ~666x) |
+| H2D memcpy total time | 3.13s | 0.66s | ~4.7x |
+| H2D memcpy avg time/call | 2.3us | 478.5us | pydreg moves far more per call |
+| **Total GPU-busy time** (idle time excluded entirely) | 1,771.0s | 415.1s | **~4.27x** |
+| GPU idle fraction of its own window | 27.1% | 5.4% | -- |
+
+The last row is the cleanest single number this investigation produced:
+restricting to time the GPU is *actually doing something* -- fully
+excluding the scheduling/overlap gap -- dREG still takes **~4.27x longer**
+than pydreg for the identical workload. That isolates the kernel-design
+gap from the scheduling gap cleanly for the first time, rather than
+inferring both from one conflated wall-clock ratio. Every number in the
+first-pass entry above understated the gap, not overstated it -- exactly
+the direction predicted there ("correcting for scope would only
+strengthen the conclusion, not reverse it"), now confirmed rather than
+just argued.
+
+This supersedes the kernel/memcpy numbers in the first 2026-08-18 entry;
+that entry is left as-is (not edited) since this log is append-only by
+convention, but the numbers above are the ones to cite going forward.
+`figures/gpu_profiling/README.md`'s Findings section has been updated to
+match.
+
 ## 2026-08-19 — an opt-in, fidelity-breaking "fast mode" for `pmv_laplace`: uniform z-grid thinning rejected (real false-positive bias at the FDR boundary), a provably-bounded tail-truncation shipped instead
 
 Asked directly for a further, explicitly-approximate speedup on top of
