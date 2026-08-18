@@ -41,23 +41,28 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   round count predicted from source precisely -- ~660s of a 2,431s
   nsys-covered span (27%) is pure GPU idle time from this alone.
 - **Kernel-design gap (hypothesis 2), confirmed and sharper than
-  expected.** For the identical 5,617,218 positions: Rgtsvm's
-  `GTSVM::CUDA::SparseEvaluateKernelKernel256` launches **653,677** times
-  (~2.2ms each) vs. pydreg's `sgemm_128x128x8_NT_vec` (cuBLAS) in **38,247**
-  calls (~11.3ms each) -- ~17x fewer kernel launches for comparable work.
-  Memory transfers are starker still: dREG issues **1,345,274** separate
-  Host-to-Device memcpys averaging **2.3us** each (clearly
-  launch-overhead-dominated) vs. pydreg's **2,019** H2D memcpys averaging
-  **509us** each -- 666x more transfer calls for only ~3x more total H2D
-  time. Textbook confirmation of "many small sparse-oriented operations"
-  vs. "few large batched dense operations."
+  expected -- numbers below are phase-exact** (both sides restricted to
+  just the informative-positions phase, via the `start_epoch` windowing
+  fix; see "nsys and windowing" below). For the identical 5,617,218
+  positions: Rgtsvm's `GTSVM::CUDA::SparseEvaluateKernelKernel256` launches
+  **653,677** times (~2.2ms each) vs. pydreg's `sgemm_128x128x8_NT_vec`
+  (cuBLAS) in **26,281** calls (~11.4ms each) -- **~25x** fewer kernel
+  launches for the same work. Memory transfers are starker still: dREG
+  issues **1,345,274** separate Host-to-Device memcpys averaging **2.3us**
+  each (clearly launch-overhead-dominated) vs. pydreg's **1,384** H2D
+  memcpys averaging **478.5us** each -- **~972x** more transfer calls for
+  only ~4.7x more total H2D time. Textbook confirmation of "many small
+  sparse-oriented operations" vs. "few large batched dense operations."
+- **Cleanest single number**: restricting to time the GPU is *actually
+  doing something* (excluding the scheduling gap above entirely), dREG's
+  total GPU-busy time is 1,771.0s vs. pydreg's 415.1s for the identical
+  workload -- **~4.27x**, the kernel-design gap in isolation. dREG loses
+  27.1% of its own window to scheduling idle time; pydreg loses only 5.4%.
 
-Caveat carried over from "nsys and windowing" below: the kernel/memcpy
-counts above are pydreg's *whole* run (all three scoring phases), not just
-the informative-positions phase dREG's numbers are cleanly isolated to --
-not a perfectly scope-matched comparison, though the gaps found are large
-enough (17x, 666x) that correcting for scope would only strengthen the
-conclusion, not reverse it.
+(The first pass at this comparison used pydreg numbers spanning its whole
+run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
+number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
+entries for the full before/after.)
 
 ## Isolating the right process/phase, with zero source modification
 
