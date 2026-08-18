@@ -3378,6 +3378,89 @@ multithreaded extraction is a clean win with no measurable tradeoff,
 not a compromise -- confirms the branch/PR split decision (this
 release vs. `multithreaded-extraction-dev`) was the right call.
 
+## 2026-08-18 — GPU-profiled dREG's Rgtsvm against pydreg's cupy backend: confirmed both the scheduling gap and the kernel-design hypothesis, with real numbers
+
+Motivated by the standing question of why dREG (Rgtsvm, GPU-accelerated)
+is so much slower than pydreg on identical hardware/inputs -- two
+competing hypotheses going in: (1) Rgtsvm's CUDA kernels, built around
+sparse SVM operations, create heavier memory traffic than pydreg's dense
+chunked-matmul kernel; (2) something about scheduling/overlap, not the
+kernels themselves. Full methodology, scripts, and a Pascal/nsys gotcha
+writeup live in `figures/gpu_profiling/` (`profile_gpu.sh` +
+`analyze_gpu_profile.py`); this entry is the real-hardware result.
+
+**Setup**: same bigWig pair, same 5,617,218 informative positions
+(confirmed identical via `dreg.log`'s `Genome Loci=` and `pydreg.log`'s
+own `informative positions found` line) on a 2-GPU Tesla P100 host.
+dREG run via `run_predict.bsh` (the legacy score-only path -- steps 1,
+2, 4 only, no gap-fill/densify/peak-calling -- so its whole process is
+exactly the one `eval_reg_svm()` call being compared, no windowing
+needed). pydreg run via the normal full pipeline, windowed down to just
+its own "scoring informative positions" phase using its existing `-v`
+log timestamps -- no source changes needed on either side.
+
+**Real dead ends worth recording so they're not rediscovered**:
+- `nvidia-smi dmon` logs one row per GPU per sample on a multi-GPU host;
+  naively pooling both rows dilutes every stat with whatever GPU the job
+  never touched. Fixed in `analyze_gpu_profile.py` (`select_active_gpu`).
+- Rgtsvm's `[gpu_id]` argument (`selectGPUdevice(gpu_id)`) is a *CUDA*
+  device index, not an `nvidia-smi` index -- `gpu_id=0` genuinely landed
+  on `nvidia-smi` GPU 1 on this host. Auto-detecting the active GPU by
+  total `fb`/`sm` is *also* unreliable on a shared node (another
+  process's memory footprint on an unrelated card outranked the real
+  job's once). Always confirm the physical GPU directly; don't trust
+  either the launch argument or an auto-detect heuristic.
+- Nsight Systems dropped CUDA trace support for Pascal/Volta entirely
+  as of version 2025.4 (confirmed directly in NVIDIA's own release
+  notes) -- `nsys profile` completes with no error or warning on a
+  P100, but produces a `.nsys-rep` that `nsys stats` reports as
+  containing no CUDA trace data at all. Needed Nsight Systems 2025.3
+  (the last compatible release) to get any kernel-level data on this
+  hardware.
+
+**Finding 1 -- the scheduling gap, exactly as predicted from source.**
+Read `eval_svm.R`'s `eval_reg_svm()`: for the GPU path, positions are
+split into 50,000-row batches (113 total here), grouped into rounds of
+`ncores` batches each (16 here -> 8 rounds), and each round strictly
+serializes CPU-parallel `read_genomic_data()` (via a *freshly spun-up
+and torn-down* snowfall SOCK cluster every round) followed by a single
+big `Rgtsvm::predict.gtsvm` call -- no overlap between rounds at all.
+Real `nsys` `cuda_gpu_trace` idle-gap analysis confirmed this exactly:
+the 7 largest gaps are `[93.8s, 92.9s, 92.9s, 92.8s, 92.3s, 92.0s,
+21.3s]` -- precisely `n.loop - 1 = 7` gaps, six from full 16-batch
+rounds and one shorter gap from the undersized final round (1 batch).
+~660s of the 2,431s nsys-covered span (27%) is pure GPU idle time from
+this alone, with no counterpart in pydreg (whose one-chunk prefetch
+thread was built to eliminate exactly this pattern -- see the
+2026-07-14/15 entries above).
+
+**Finding 2 -- the kernel-design hypothesis, confirmed and sharper than
+expected.** For the identical 5,617,218 positions, Rgtsvm's core
+`GTSVM::CUDA::SparseEvaluateKernelKernel256` kernel launches **653,677**
+times (~2.2ms each, extremely uniform) plus 1,961,031
+`GTSVM::CUDA::ReduceKernel` calls. pydreg's cupy backend does comparable
+(if anything more, since this number spans all three of its scoring
+phases, not just the informative-position one) work via cuBLAS's
+`sgemm_128x128x8_NT_vec` in just **38,247** calls (~11.3ms each) --
+**~17x fewer kernel launches**. Memory transfers are even starker:
+dREG issues **1,345,274** separate Host-to-Device memcpys averaging
+**2.3us** each (clearly launch-overhead-dominated, not bandwidth-bound)
+vs. pydreg's **2,019** H2D memcpys averaging **509us** each -- **666x**
+more transfer calls for only ~3x more total H2D time (3.13s vs. 1.03s),
+meaning almost all of dREG's transfer time is pure per-call overhead.
+
+**Conclusion**: both original hypotheses were right, and now have a
+real mechanism each rather than an inference from a utilization graph.
+The scheduling gap (no host/device overlap across Rgtsvm's 8 rounds)
+and the kernel-design gap (many small sparse-oriented launches/transfers
+vs. pydreg's few large batched GEMM calls) are separate, independently
+confirmed, and roughly comparable in scale -- neither alone explains
+the full gap between the two implementations. Nothing here is a pydreg
+change (this is a comparison against dREG, not a modification to this
+package), so there's no output-equivalence claim to make; recorded here
+because it's exactly the kind of investigation this log exists to
+preserve.
+
 ## 2026-08-19 — an opt-in, fidelity-breaking "fast mode" for `pmv_laplace`: uniform z-grid thinning rejected (real false-positive bias at the FDR boundary), a provably-bounded tail-truncation shipped instead
 
 Asked directly for a further, explicitly-approximate speedup on top of

@@ -25,6 +25,40 @@ These look similar in a coarse utilization trace (both show "not pegged at
 methodology below is built to tell them apart rather than just confirm "yes,
 utilization differs."
 
+## Findings (2026-08-18)
+
+Both hypotheses were confirmed, on real hardware, as two separate and
+independently-measured mechanisms -- neither alone explains the whole gap.
+Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
+
+- **Scheduling gap (hypothesis 1), confirmed from source and from the
+  trace.** `eval_svm.R`'s GPU path serializes CPU-parallel feature
+  extraction (a *freshly spun-up and torn-down* snowfall cluster every
+  round) against a single big `Rgtsvm::predict.gtsvm` call, once per round
+  of `ncores` batches, with zero overlap between rounds. Real `nsys`
+  `cuda_gpu_trace` idle-gap analysis found exactly `n.loop - 1 = 7` large
+  gaps (`[93.8s, 92.9s, 92.9s, 92.8s, 92.3s, 92.0s, 21.3s]`) matching the
+  round count predicted from source precisely -- ~660s of a 2,431s
+  nsys-covered span (27%) is pure GPU idle time from this alone.
+- **Kernel-design gap (hypothesis 2), confirmed and sharper than
+  expected.** For the identical 5,617,218 positions: Rgtsvm's
+  `GTSVM::CUDA::SparseEvaluateKernelKernel256` launches **653,677** times
+  (~2.2ms each) vs. pydreg's `sgemm_128x128x8_NT_vec` (cuBLAS) in **38,247**
+  calls (~11.3ms each) -- ~17x fewer kernel launches for comparable work.
+  Memory transfers are starker still: dREG issues **1,345,274** separate
+  Host-to-Device memcpys averaging **2.3us** each (clearly
+  launch-overhead-dominated) vs. pydreg's **2,019** H2D memcpys averaging
+  **509us** each -- 666x more transfer calls for only ~3x more total H2D
+  time. Textbook confirmation of "many small sparse-oriented operations"
+  vs. "few large batched dense operations."
+
+Caveat carried over from "nsys and windowing" below: the kernel/memcpy
+counts above are pydreg's *whole* run (all three scoring phases), not just
+the informative-positions phase dREG's numbers are cleanly isolated to --
+not a perfectly scope-matched comparison, though the gaps found are large
+enough (17x, 666x) that correcting for scope would only strengthen the
+conclusion, not reverse it.
+
 ## Isolating the right process/phase, with zero source modification
 
 - **dREG**: run `run_predict.bsh` (the legacy score-only workflow -- steps 1
