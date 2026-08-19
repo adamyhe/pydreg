@@ -101,6 +101,30 @@ def main(argv=None):
         "GenzBretz() default. Lower values increase precision beyond R's own "
         "reference implementation, at a large speed cost",
     )
+    parser.add_argument(
+        "--pmv-laplace-tail-tol",
+        type=float,
+        default=None,
+        help="opt-in approximation: stop pmv_laplace's z-grid integration "
+        "loop once the remaining tail's provable upper bound falls below "
+        "this tolerance, instead of evaluating the full grid. 0.0 (the "
+        "implicit default with this flag omitted) is exact -- identical to "
+        "R. Unlike --pmv-laplace-cdf-maxpts/-eps (which only change how "
+        "precisely a fixed integral is evaluated), this changes how much "
+        "of the integral is evaluated at all, bounded by this tolerance "
+        "regardless of the actual peak's cor_mat/x -- see "
+        "stats.set_pmv_laplace_tail_tol's docstring and "
+        "docs/OPTIMIZATION.md. Overrides --pmv-laplace-fast's default if "
+        "both are given",
+    )
+    parser.add_argument(
+        "--pmv-laplace-fast",
+        action="store_true",
+        help="shorthand for a validated fast-but-approximate "
+        "--pmv-laplace-tail-tol default (1e-6; see docs/OPTIMIZATION.md for "
+        "the measured speed/fidelity numbers behind this value) -- pass "
+        "--pmv-laplace-tail-tol explicitly to use a different tolerance",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--no-progress",
@@ -114,6 +138,13 @@ def main(argv=None):
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.pmv_laplace_tail_tol is not None:
+        pmv_laplace_tail_tol = args.pmv_laplace_tail_tol
+    elif args.pmv_laplace_fast:
+        pmv_laplace_tail_tol = 1e-6
+    else:
+        pmv_laplace_tail_tol = 0.0
 
     backend_name = None if args.backend == "auto" else args.backend
     pipeline.run(
@@ -133,6 +164,7 @@ def main(argv=None):
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
+        pmv_laplace_tail_tol=pmv_laplace_tail_tol,
         progress=not args.no_progress,
     )
 

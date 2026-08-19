@@ -97,6 +97,8 @@ def _r_seq(from_, to, by):
 _Z_GRID = None
 _Z_WIDTHS = None
 _Z_WEIGHTS = None
+_Z_TAIL_BOUND = None
+_PMV_TAIL_TOL = 0.0
 # R's mvtnorm::pmvnorm() (called with no `algorithm=` override by peak_calling.R's
 # pmvLaplace()) runs on mvtnorm's own GenzBretz(maxpts=25000, abseps=1e-3, releps=0)
 # default -- confirmed from mvtnorm's R source (R/mvt.R) and its algorithms.Rd doc.
@@ -136,8 +138,47 @@ def get_pmv_laplace_cdf_options():
     return {"maxpts": _PMV_CDF_MAXPTS, "eps": _PMV_CDF_EPS}
 
 
+def set_pmv_laplace_tail_tol(tol=0.0):
+    """Set the z-grid tail-truncation tolerance used inside pmv_laplace().
+
+    pmv_laplace's z-grid loop sums `widths[i] * p0[i]` for each grid point,
+    where `p0[i] = weights[i] * (a box probability in [0, 1])` -- so
+    `widths[i] * weights[i]` is a hard, per-point upper bound on that term,
+    computable in advance from the grid alone, with NO dependence on the
+    actual box (cor_mat/x) being evaluated. Summing that upper bound over
+    the grid's tail (from some index to the end) gives a hard bound on how
+    much skipping the rest of the loop from that index onward could possibly
+    change the final result, in the worst case -- tol=0.0 (default) only
+    ever skips points already proven to be EXACTLY zero (weight underflow;
+    see the "skip 19 provably-zero z-grid evals" entry in
+    docs/PERF_LOG.md), identical to pmv_laplace's long-standing exact
+    behavior. tol>0.0 additionally skips every point beyond the first index
+    whose remaining-tail upper bound already falls below `tol`, cutting the
+    number of QMC box-probability evaluations roughly 2.5-3x at a safe
+    default (see docs/OPTIMIZATION.md) -- with the resulting p_max provably
+    within `tol` of the exact value, REGARDLESS of cor_mat/x, unlike z-grid
+    thinning (tried and rejected: see the removed set_pmv_laplace_grid_stride
+    prototype in git history / docs/PERF_LOG.md) which showed large,
+    systematic, directional bias concentrated exactly at the FDR decision
+    boundary -- this bound instead only ever discards tail mass that's
+    already provably negligible everywhere, so it has no such failure mode.
+
+    Only ever meant to be loosened (tol > 0) deliberately, in an explicit
+    "fast mode" -- see peaks.call_peaks's pmv_laplace_tail_tol parameter and
+    pydreg.cli's --pmv-laplace-fast flag."""
+    global _PMV_TAIL_TOL
+    tol = float(tol)
+    if tol < 0:
+        raise ValueError(f"pmv_laplace_tail_tol must be >= 0, got {tol}")
+    _PMV_TAIL_TOL = tol
+
+
+def get_pmv_laplace_tail_tol():
+    return _PMV_TAIL_TOL
+
+
 def _z_grid():
-    global _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS
+    global _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS, _Z_TAIL_BOUND
     if _Z_GRID is None:
         z = np.concatenate(
             [
@@ -163,7 +204,19 @@ def _z_grid():
         # never used at all -- p_max sums p0[:-1] -- but it happens to also
         # have exp(-z0)==0.0, so no separate case is needed for it.)
         _Z_WEIGHTS = np.exp(-z)
-    return _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS
+        # tail_bound[i] = sum_{j>=i} widths[j]*weights[j] (terms j run 0..
+        # n-2, matching p_max's own `widths * p0[:-1]`) -- a hard upper
+        # bound on how much the loop's remaining terms from index i onward
+        # could possibly contribute, since each p0[j] <= weights[j] (the
+        # box probability factor is in [0, 1]). Used by pmv_laplace to
+        # decide, for a given _PMV_TAIL_TOL, the first index it's safe to
+        # stop the z-grid loop at -- see set_pmv_laplace_tail_tol's
+        # docstring. Monotonically non-increasing in i by construction (a
+        # sum of non-negative terms with the lower limit moving up), which
+        # is what makes a single stopping index well-defined per call.
+        term = _Z_WIDTHS * _Z_WEIGHTS[:-1]
+        _Z_TAIL_BOUND = np.concatenate([np.cumsum(term[::-1])[::-1], [0.0]])
+    return _Z_GRID, _Z_WIDTHS, _Z_WEIGHTS, _Z_TAIL_BOUND
 
 
 # SciPy's Genz-Bretz CDF integration (scipy.stats._qmvnt, used internally by
@@ -435,7 +488,18 @@ def pmv_laplace(x, cor_mat):
     profile now counts actual underlying `_qmvn` kernel invocations
     (usually one per box, occasionally more), not a fixed 291 -- a more
     direct measure of real work than the previous batched-call version's
-    count."""
+    count.
+
+    `set_pmv_laplace_tail_tol()` above is a genuinely approximate, opt-in
+    "fast mode" (unlike `set_pmv_laplace_cdf_options()`, which only changes
+    how precisely the same integral is evaluated): tol=0.0 (the default)
+    only skips grid points already proven to contribute exactly 0.0
+    (identical to the long-standing exact behavior above); tol>0.0
+    additionally stops the z-grid loop once the remaining tail's hard
+    upper bound falls below `tol`, cutting the number of QMC evaluations
+    at the cost of a bounded (never worse than `tol`, for any cor_mat/x)
+    approximation to the same integral. See docs/OPTIMIZATION.md for
+    measured speed/fidelity numbers and a recommended default."""
     t0 = time.perf_counter()
     cdf_evals = 0
     try:
@@ -450,9 +514,17 @@ def pmv_laplace(x, cor_mat):
         if p_norm > 0.99:
             return p_norm
 
-        z, widths, z_weights = _z_grid()
+        z, widths, z_weights, tail_bound = _z_grid()
+        # First index whose remaining-tail upper bound is already <= the
+        # configured tolerance -- every p0[i] from there on is left at its
+        # np.zeros_like default rather than spending a QMC integration on
+        # it, which can change p_max by at most _PMV_TAIL_TOL (0.0 by
+        # default: only ever skips already-exactly-zero terms, identical to
+        # the long-standing behavior). tail_bound is non-increasing, so a
+        # single cutoff index is well-defined.
+        stop_idx = int(np.searchsorted(-tail_bound, -_PMV_TAIL_TOL, side="left"))
         p0 = np.zeros_like(z)
-        for i, z0 in enumerate(z):
+        for i in range(stop_idx):
             weight = z_weights[i]
             if weight == 0.0:
                 # p0[i] = pi * weight would be 0.0 regardless of pi (any
@@ -460,6 +532,7 @@ def pmv_laplace(x, cor_mat):
                 # QMC integration entirely rather than spend it on a result
                 # that's already determined. See _z_grid()'s comment.
                 continue
+            z0 = z[i]
             scaled = abs_x / np.sqrt(z0)
             pi, n_calls = _qmvn_adaptive(
                 cor_mat, -scaled, scaled, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS
