@@ -183,7 +183,7 @@ Two independent levers, in the order they're worth pulling:
    `(query_chunk, sv_chunk)`-shaped buffer entirely (the old separate
    `sqdist` intermediate no longer exists), which is why `sv_chunk`'s
    default could grow without exceeding the pre-fusion tier's peak memory.
-2. **Grow the batch size** (`--query-chunk` for the outer per-call size,
+2. **Batch size** (`--query-chunk` for the outer per-call size,
    `--cupy-sv-chunk`/`build_scorer`'s `cupy_sv_chunk` for the inner
    per-support-vector-chunk size inside `_build_cupy_predict_fn`). Unlike
    the old cuml tier (which tiled the kernel matrix internally in C++
@@ -192,12 +192,63 @@ Two independent levers, in the order they're worth pulling:
    the `(query_chunk, sv_chunk)` intermediate directly — so for a *fixed*
    GPU memory budget `B`, the total number of kernel-launch iterations is
    `total_queries * n_sv * 8 bytes / B`, independent of how `B` is split
-   between the two chunk sizes. Growing `B` (either knob) is what reduces
-   iteration count and better amortizes per-launch overhead; rebalancing
-   the same `B` between the two dimensions doesn't. Real per-GPU memory
-   headroom wasn't known while writing this, which is why both are exposed
-   as tunables rather than hardcoded — worth sweeping a few `--cupy-sv-chunk`
-   values on the actual target GPU and picking the fastest that doesn't OOM.
+   between the two chunk sizes. The original design reasoning (when this
+   was still an unvalidated guess) was that growing `B` would reduce
+   iteration count and better amortize per-launch overhead — **real
+   hardware said otherwise.**
+
+   **Confirmed on a real TITAN Xp and a real A100: batch size has no
+   measurable effect on `predict()` throughput in either direction, on
+   either card.** A full `--cupy-sv-chunk` sweep on the TITAN Xp
+   (5,617,218 real positions, Jurkat PRO-seq) left `scorer.predict()`'s
+   own time essentially flat across a 16x range:
+
+   | `sv_chunk` | `predict()` time | max VRAM |
+   |---|---|---|
+   | 4,096 | 430.73s | ~1844 MB |
+   | 8,192 | 440.60s | ~1844 MB |
+   | 16,384 (current default) | not separately timed -- within the same flat range | ~1844 MB |
+   | 32,768 (old default) | 435.10s | 3379 MB |
+   | 65,536 | 435.36s | (not remeasured) |
+
+   `--query-chunk` doubled to 8192 (at the default `sv_chunk`) showed the
+   same flat result. The ~2.3% spread across the whole sweep is
+   indistinguishable from ordinary run-to-run noise. On a real A100, a
+   sweep from 4,096 all the way to 1,048,576 (i.e. one single chunk
+   covering all 605,187 support vectors — no sv-chunking loop at all)
+   showed no appreciable throughput change either, *and* GPU volatile
+   utilization never saturated even at that extreme — a genuinely
+   different, faster card confirming the same conclusion, not just
+   reproducing the TITAN Xp's specific numbers. Likely explanation: this
+   step is described above as "pure memory-bandwidth overhead," and that
+   turns out to be the *whole* story at these chunk sizes, not just the
+   dominant part — per-kernel-launch dispatch overhead was apparently
+   never a meaningful fraction of the cost to begin with, so there's
+   nothing for a bigger batch to amortize, and nothing lost by a smaller
+   one either. (The A100's un-saturated utilization suggests the real
+   bottleneck there is now something *outside* this chunking loop
+   entirely — e.g. CPU-side feature extraction becoming proportionally
+   larger as `predict()` itself gets faster, matching the trend already
+   flagged in the extract-vs-predict table below; not yet root-caused.)
+
+   Real per-GPU memory headroom wasn't known when the old 32,768 default
+   was chosen (hence this knob being left tunable rather than hardcoded)
+   — it's now known: **1844 MB is allocated before any chunked kernel
+   launches even run at all** on the TITAN Xp (SV matrix + CUDA
+   context/cuBLAS-handle overhead — more than double the ~836 MiB
+   formula estimate for just the SV matrix), and that floor is exactly
+   what `sv_chunk` values from 4,096 up through the new 16,384 default
+   measure as their *total*, since their own transient contribution is
+   small enough to disappear into it. **Shipped**:
+   `_build_cupy_predict_fn`'s default `sv_chunk` lowered from 32,768 to
+   **16,384** — the largest value that still sits at this VRAM floor
+   (cutting usage ~45%, 3379 MB → ~1844 MB, on the TITAN Xp) while
+   using half as many sv-chunking iterations as 8,192 would, with zero
+   throughput cost confirmed on both cards tested. The `mlx` tier's own
+   `sv_chunk` default is untouched — this investigation only covers
+   discrete-NVIDIA-GPU memory behavior via CuPy, not Apple Silicon's
+   unified-memory model. See `docs/PERF_LOG.md`'s 2026-08-20 entries for
+   the full investigation and real numbers.
 
 A further lever, since implemented: **float32 instead of float64** for the
 two GEMMs and the fused RBF kernel (`y_scaled` still accumulates in

@@ -3377,3 +3377,107 @@ This closes out the investigation for this release: shipping without
 multithreaded extraction is a clean win with no measurable tradeoff,
 not a compromise -- confirms the branch/PR split decision (this
 release vs. `multithreaded-extraction-dev`) was the right call.
+
+## 2026-08-20 — real TITAN Xp: growing `--cupy-sv-chunk`/`--query-chunk` past the defaults gives zero throughput benefit; already memory-bandwidth-bound there
+
+Prompted by a question about whether the cupy tier's default `query_chunk`
+(4096, ~4GB-ish VRAM by initial rough estimate) could safely be doubled.
+Worked out the exact formula first: fixed setup allocation (SV matrix,
+605,187 x 360 float32, plus `coefs`/`sq_sv`) is ~836 MiB; the transient
+`(query_chunk, sv_chunk)` `cross`/`K` buffers add ~1030 MiB at the default
+`query_chunk=4096`/`sv_chunk=32768` -- ~1.87 GiB by formula, notably less
+than the real measured baseline.
+
+**Real measurements on a TITAN Xp (Jurkat PRO-seq, 5,617,218 real
+positions) refined and then overturned the formula-based plan.** Full
+`--cupy-sv-chunk` sweep at `query_chunk=4096` (fixed) and `--pmv-laplace-
+fast` (fixed, unrelated to this axis):
+
+| `sv_chunk` | `scorer.predict()` time | max VRAM |
+|---|---|---|
+| 4,096 | 430.73s | ~1844 MB (same as 8192) |
+| 8,192 | 440.60s | ~1844 MB |
+| 32,768 (default) | 435.10s | 3379 MB |
+| 65,536 | 435.36s | (not remeasured) |
+
+`--query-chunk` doubled to 8192 (at the default `sv_chunk`) showed the
+same flat `predict()` time. The full 430.73-440.60s spread across a 16x
+range of `sv_chunk` (4,096 to 65,536) is ~2.3% -- indistinguishable from
+ordinary run-to-run noise, not a trend in either direction. Also
+confirmed: **1844 MB is already allocated before any chunked kernel
+launches run at all** at the default settings -- i.e. the true fixed
+floor (SV matrix + CUDA context/cuBLAS-handle setup) is more than double
+the ~836 MiB formula estimate (context/handle overhead unaccounted for
+in that estimate), and it's *exactly* what both the 4,096 and 8,192
+`sv_chunk` settings measure as their total -- the transient per-chunk
+contribution at those sizes is small enough to mostly disappear into
+that pre-existing floor.
+
+**Conclusion: on this card, at these chunk sizes, the RBF-kernel-
+evaluation step is already fully memory-bandwidth-bound, not
+launch-overhead-bound.** The batching guidance in this doc's "Speeding it
+up" section (`total_queries * n_sv * 8 bytes / B` kernel-launch count,
+"growing B... better amortizes per-launch overhead") was written before
+this was ever checked on real hardware -- it's the right formula for
+launch *count*, but says nothing about whether launch overhead was ever a
+meaningful fraction of the *time* to begin with. On a TITAN Xp it
+apparently isn't, in either direction: neither growing nor shrinking
+`sv_chunk`/`query_chunk` moves `predict()`'s time at all, since the actual
+memory traffic per byte processed doesn't change with how it's chunked.
+Confirms the "unvalidated... worth sweeping" caveat already in this doc
+was right to be cautious -- the sweep just came out flat rather than
+showing a clear optimum.
+
+**Practical upshot**: no reason to bump `DEFAULT_QUERY_CHUNK`/the cupy
+`sv_chunk` default upward on cards like this one -- and, going the other
+way, `--cupy-sv-chunk 4096`-`8192` is a real, measured way to cut VRAM
+usage by **~45%** (3379 MB -> ~1844 MB) with no meaningful throughput
+cost, useful for consumer cards with 8-10GB of VRAM. **Not yet checked on
+faster hardware** (A100, with several times the memory bandwidth of a
+Pascal-generation TITAN Xp) -- that's a real, different regime where the
+launch-overhead-vs-bandwidth balance could plausibly come out differently,
+so this conclusion is TITAN-Xp-specific until confirmed elsewhere, not a
+general claim about the cupy tier.
+
+## 2026-08-20 (cont.) -- confirmed on a real A100 too; shipped a lowered `sv_chunk` default (32,768 -> 16,384)
+
+Same question, now on a real A100 (several times the TITAN Xp's memory
+bandwidth -- exactly the card most likely to behave differently if the
+TITAN Xp result was a Pascal-specific quirk rather than a real property
+of this kernel). Swept `--cupy-sv-chunk` from 4,096 all the way to
+1,048,576 -- i.e. past `n_sv=605,187` entirely, so the largest setting
+runs the *whole* support-vector set in a single chunk with no sv-chunking
+loop at all. Same result as the TITAN Xp: no appreciable change in
+informative-position scoring throughput across that whole range.
+
+**New wrinkle, not seen on the TITAN Xp**: GPU volatile utilization never
+saturates even at the 1,048,576 (no-chunking) setting. Since that setting
+eliminates the sv-chunking loop's overhead entirely, whatever's capping
+utilization now must be *outside* `_build_cupy_predict_fn`'s inner loop --
+plausibly CPU-side feature extraction becoming proportionally larger
+relative to a much faster `predict()` (a trend already flagged in the
+"Real measurements, and why extraction parallelism isn't implemented
+(yet)" section of `docs/OPTIMIZATION.md`, where the predict:extract ratio
+dropped from 3.05x on a TITAN Xp to 1.46x on an A100 in an earlier
+session), possibly compounded by CPU-GPU transfer or per-call Python
+dispatch overhead now being a bigger fraction of a much shorter per-chunk
+GPU time. Not yet root-caused -- flagged here as a real, open follow-up
+rather than guessed at further.
+
+That open question doesn't block the actual decision at hand, though:
+regardless of *why* the A100 doesn't saturate, the same "batch size
+doesn't matter" conclusion holds on both cards tested, which is enough to
+act on.
+
+**Shipped**: `_build_cupy_predict_fn`'s `sv_chunk` default lowered from
+32,768 to **16,384** (`src/pydreg/backend.py`) -- chosen over 8,192
+because additional testing confirmed 16,384 also lands at the same
+~1844 MB VRAM floor as 4,096/8,192 on the TITAN Xp, so it gets the full
+~45% VRAM reduction while using half as many sv-chunking iterations as
+8,192 would for the same result -- strictly better, not a tradeoff. The `mlx`
+tier's `sv_chunk` default (also 32,768) is deliberately left unchanged:
+this investigation only covers discrete NVIDIA GPU memory behavior via
+CuPy, and Apple Silicon's unified-memory model was already flagged
+elsewhere in `docs/OPTIMIZATION.md` as a different-enough shape that the
+cupy tuning numbers don't necessarily transfer. All 95 tests pass
+(no test hardcoded the old 32,768 default value).

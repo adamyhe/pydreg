@@ -271,7 +271,7 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name, rtol=1e-4, atol=1e-
     return predict_fn
 
 
-def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
+def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     """Returns predict_fn(X_scaled) -> y_scaled (both host NumPy arrays --
     matching _wrap_sklearn_like's expected interface, so it composes with
     the same scaling/unscaling wrapper and smoke test as the sklearn tier)
@@ -315,10 +315,21 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=32_768):
     entirely (the old separate `sqdist` intermediate no longer exists) --
     two live buffers of that shape per iteration (`cross`, `K`) instead of
     three, which is why sv_chunk's default could grow here without
-    exceeding the original tier's peak memory footprint. Still a
-    conservative starting point (unvalidated on real GPU memory beyond
-    "didn't OOM") -- tune via build_scorer's cupy_sv_chunk / --cupy-sv-chunk
-    once you have real headroom numbers for your GPU.
+    exceeding the original tier's peak memory footprint.
+
+    sv_chunk's default (16,384, lowered from an earlier, unvalidated
+    32,768) is chosen from real measurements, not a guess: a full sweep
+    on a real TITAN Xp (4,096 through 65,536) and a real A100 (4,096
+    through 1,048,576, i.e. one single sv-chunk covering all 605,187
+    support vectors) found `predict()`'s own time completely flat across
+    the whole range on both cards -- this step is memory-bandwidth-bound,
+    not launch-overhead-bound, so growing sv_chunk buys nothing, while
+    16,384 (like 4,096-8,192 below it) already sits at the fixed
+    pre-kernel-launch VRAM floor (~1844 MB measured on the TITAN Xp,
+    vs. 3379 MB at the old 32,768 default) with no throughput cost -- see
+    docs/PERF_LOG.md's 2026-08-20 entry for the full investigation. Still
+    tunable via build_scorer's cupy_sv_chunk / --cupy-sv-chunk if your
+    card's real headroom or bandwidth profile differs.
 
     The two GEMMs (X @ SV.T, K @ coefs) and the fused RBF kernel run in
     float32, not float64 -- deliberately, not a shortcut. The current
