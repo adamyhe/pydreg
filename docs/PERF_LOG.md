@@ -3494,6 +3494,39 @@ reduction/error-direction behavior, 1 in `test_peaks.py` confirming
 for the `--pmv-laplace-fast`/`--pmv-laplace-tail-tol` precedence logic --
 this repo previously had no CLI-level tests at all).
 
+## 2026-08-19 (cont.) — real production validation of `--pmv-laplace-fast` against real dREG, on a full Jurkat PRO-seq run
+
+Ran the full pipeline twice on the same real Jurkat PRO-seq bigWig pair
+(`--cores 16`, cupy backend, real pretrained models), once at the exact
+default (`pmv_laplace_tail_tol=0`) and once with `--pmv-laplace-fast`
+(`tail_tol=1e-6`), then compared both against real dREG's own output on
+the same input via `bedtools jaccard`:
+
+| | exact (`tail_tol=0`) | fast (`tail_tol=1e-6`) |
+|---|---|---|
+| `pmv_laplace` block CPU (`pmv_seconds`) | 7735.58s | 4240.99s |
+| CDF evaluations (59559 `pmv_laplace` calls) | 10,998,315 | 5,518,634 |
+| "calling peaks" step wall time | 509.31s | 289.05s |
+| total pipeline wall time | 20m22.6s | 16m49.4s |
+| significant peaks | 33350 | 33350 |
+| Jaccard vs. real dREG | 0.999317 | 0.999344 |
+
+**Speedup**: `pmv_seconds` 1.82x, CDF evals 1.99x (matches the earlier
+synthetic prediction almost exactly -- `tail_tol=1e-6` truncates to ~99 of
+the ~271 non-zero-weight grid points per full-grid call, i.e. close to a
+real 2x), peak-calling step wall time 1.76x, total pipeline wall time
+1.21x (17.4% faster overall -- peak calling is a large but not dominant
+share of total runtime on this run, most of the rest being scoring).
+
+**Fidelity**: identical significant-peak count (33350) in both runs, and
+Jaccard-vs-real-dREG for the fast run (0.999344) is not just
+indistinguishable from the exact run's (0.999317) but nominally *higher*
+-- both differences are well inside this comparison's ordinary run-to-run
+noise (pmv_laplace's QMC randomization, plus real dREG's own R-side
+noise), not a real directional effect. No measurable fidelity cost from
+`--pmv-laplace-fast` at real production scale, on top of the
+provable-worst-case-bound argument from the entry above.
+
 ## 2026-08-20 — real TITAN Xp: growing `--cupy-sv-chunk`/`--query-chunk` past the defaults gives zero throughput benefit; already memory-bandwidth-bound there
 
 Prompted by a question about whether the cupy tier's default `query_chunk`

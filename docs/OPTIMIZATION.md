@@ -756,13 +756,24 @@ because the boundary stress test showed no measurable effect at all at
 that tolerance (well inside ordinary QMC noise), while still capturing
 most of the truncation's available win (tighter tolerances buy little
 extra speed; looser ones start trading away real headroom for a bound
-you're not using). Measured effect: ~2.5-3x fewer QMC evaluations on an
-isolated benchmark sweep, ~2x observed wall-clock reduction in
-`pmv_seconds` on a realistic synthetic multi-peak pipeline run (smaller
-than the isolated ratio since fixed per-call overhead outside the z-grid
-loop doesn't shrink) — see `docs/PERF_LOG.md`'s 2026-08-19 entry for the
-full numbers, including the rejected grid-thinning attempt's numbers for
-comparison.
+you're not using).
+
+**Confirmed on a full real production run** (Jurkat PRO-seq, `--cores
+16`, cupy backend, real pretrained models), comparing exact
+(`tail_tol=0`) against `--pmv-laplace-fast` on the same input: `pmv_
+laplace`'s own block-CPU time dropped 7735.58s → 4240.99s (**1.82x**),
+CDF evaluations 10,998,315 → 5,518,634 (**1.99x**, matching the earlier
+isolated-benchmark prediction almost exactly), the "calling peaks" step's
+wall time 509.31s → 289.05s (**1.76x**), and total pipeline wall time
+20m22.6s → 16m49.4s (**1.21x**, 17.4% faster overall — peak calling is a
+large but not dominant share of this run's total time, most of the rest
+being scoring). Both runs called the exact same number of significant
+peaks (33350), and `bedtools jaccard` against real dREG's own output on
+the same input gave 0.999317 (exact) vs. 0.999344 (fast) — indistinguishable
+from (if anything, nominally better than) the exact run's own agreement
+with dREG, confirming no measurable fidelity cost at real scale. See
+`docs/PERF_LOG.md`'s 2026-08-19 entries for the full numbers, including
+the rejected grid-thinning attempt's numbers for comparison.
 
 ## The random-forest peak splitter: numba, not scikit-learn
 
