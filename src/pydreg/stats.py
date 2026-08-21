@@ -99,6 +99,12 @@ _Z_WIDTHS = None
 _Z_WEIGHTS = None
 _Z_TAIL_BOUND = None
 _PMV_TAIL_TOL = 0.0
+# The validated default fast-mode tolerance -- pipeline.run/peaks.call_peaks/
+# pydreg.cli all default to this rather than exact (0.0) as of the real
+# production validation recorded in docs/PERF_LOG.md's 2026-08-19 (cont.)
+# entry and re-confirmed against real dREG peak calls; see
+# docs/OPTIMIZATION.md for the measured speed/fidelity numbers.
+PMV_LAPLACE_FAST_TAIL_TOL = 1e-6
 # R's mvtnorm::pmvnorm() (called with no `algorithm=` override by peak_calling.R's
 # pmvLaplace()) runs on mvtnorm's own GenzBretz(maxpts=25000, abseps=1e-3, releps=0)
 # default -- confirmed from mvtnorm's R source (R/mvt.R) and its algorithms.Rd doc.
@@ -165,7 +171,8 @@ def set_pmv_laplace_tail_tol(tol=0.0):
 
     Only ever meant to be loosened (tol > 0) deliberately, in an explicit
     "fast mode" -- see peaks.call_peaks's pmv_laplace_tail_tol parameter and
-    pydreg.cli's --pmv-laplace-fast flag."""
+    PMV_LAPLACE_FAST_TAIL_TOL, which pydreg.cli now defaults to (pass
+    --pmv-laplace-exact for the old exact-by-default behavior)."""
     global _PMV_TAIL_TOL
     tol = float(tol)
     if tol < 0:

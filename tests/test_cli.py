@@ -1,4 +1,4 @@
-from pydreg import cli
+from pydreg import cli, stats
 
 
 def _run_and_capture(monkeypatch, argv):
@@ -10,26 +10,26 @@ def _run_and_capture(monkeypatch, argv):
     return calls[0]
 
 
-def test_pmv_laplace_tail_tol_defaults_to_exact(monkeypatch):
+def test_pmv_laplace_tail_tol_defaults_to_fast(monkeypatch):
     kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out"])
+    assert kwargs["pmv_laplace_tail_tol"] == stats.PMV_LAPLACE_FAST_TAIL_TOL
+
+
+def test_pmv_laplace_exact_sets_zero_tail_tol(monkeypatch):
+    kwargs = _run_and_capture(
+        monkeypatch, ["plus.bw", "minus.bw", "out", "--pmv-laplace-exact"]
+    )
     assert kwargs["pmv_laplace_tail_tol"] == 0.0
 
 
-def test_pmv_laplace_fast_sets_recommended_tail_tol(monkeypatch):
-    kwargs = _run_and_capture(
-        monkeypatch, ["plus.bw", "minus.bw", "out", "--pmv-laplace-fast"]
-    )
-    assert kwargs["pmv_laplace_tail_tol"] == 1e-6
-
-
-def test_explicit_pmv_laplace_tail_tol_overrides_fast_default(monkeypatch):
+def test_explicit_pmv_laplace_tail_tol_overrides_exact_flag(monkeypatch):
     kwargs = _run_and_capture(
         monkeypatch,
         [
             "plus.bw",
             "minus.bw",
             "out",
-            "--pmv-laplace-fast",
+            "--pmv-laplace-exact",
             "--pmv-laplace-tail-tol",
             "1e-3",
         ],
@@ -37,7 +37,7 @@ def test_explicit_pmv_laplace_tail_tol_overrides_fast_default(monkeypatch):
     assert kwargs["pmv_laplace_tail_tol"] == 1e-3
 
 
-def test_explicit_pmv_laplace_tail_tol_without_fast_flag(monkeypatch):
+def test_explicit_pmv_laplace_tail_tol_without_exact_flag(monkeypatch):
     kwargs = _run_and_capture(
         monkeypatch,
         ["plus.bw", "minus.bw", "out", "--pmv-laplace-tail-tol", "2e-5"],

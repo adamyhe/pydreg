@@ -3630,3 +3630,39 @@ CuPy, and Apple Silicon's unified-memory model was already flagged
 elsewhere in `docs/OPTIMIZATION.md` as a different-enough shape that the
 cupy tuning numbers don't necessarily transfer. All 95 tests pass
 (no test hardcoded the old 32,768 default value).
+
+## 2026-08-21 -- `pmv_laplace`'s fast tail-truncation mode promoted from opt-in to the default
+
+The 2026-08-19 (cont.) entry's real production validation against real
+dREG (same 33,350 significant peaks called either way; `bedtools jaccard`
+0.999317 exact vs. 0.999344 fast against dREG's own output -- no
+measurable fidelity cost) was the bar this project holds every
+default-affecting change to (matching the 12-library validation bar
+documented in `CLAUDE.md`). With that validation in hand, the user
+directed promoting the tail-truncation fast mode from opt-in to the new
+default, since further testing (informal, on a TITAN Xp) turned up no
+regressions beyond what was already recorded.
+
+**Shipped**: `stats.PMV_LAPLACE_FAST_TAIL_TOL = 1e-6` is now the default
+`pmv_laplace_tail_tol` threaded through `peaks.call_peaks`,
+`peaks._init_peak_worker`, and `pipeline.run` (previously all defaulted
+to `0.0`, exact). `pydreg.cli`'s old `--pmv-laplace-fast` store-true flag
+(shorthand for setting `--pmv-laplace-tail-tol` to `1e-6`) is replaced
+with `--pmv-laplace-exact` (shorthand for `--pmv-laplace-tail-tol 0.0`),
+matching the new default's direction -- the explicit
+`--pmv-laplace-tail-tol` flag is unchanged and still overrides either.
+`stats.set_pmv_laplace_tail_tol`'s own default parameter (`0.0`) and the
+module-level `_PMV_TAIL_TOL` sentinel before any run configures it are
+deliberately left at `0.0` -- those are the low-level primitive's "no
+truncation configured yet" sentinel, not the pipeline-wide default users
+actually see, and every real run's worker init still calls
+`set_pmv_laplace_tail_tol` explicitly with the resolved value either way.
+Updated `docs/OPTIMIZATION.md`'s fast-mode section and the relevant
+docstrings to describe the new default/flag name; did not edit this
+log's own historical 2026-08-19 entries (their `--pmv-laplace-fast`
+references describe the flag as it existed at the time).
+`tests/test_stats.py`'s tests all drive `stats.set_pmv_laplace_tail_tol`
+directly and needed no changes -- they were never coupled to
+`pydreg.cli`'s or `pipeline.run`'s own default. `tests/test_cli.py`'s
+flag-precedence tests were updated for the new default/flag name. All 95
+tests pass.

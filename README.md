@@ -83,6 +83,8 @@ Options:
 | `--smoothwidth N`            | `4`     | Smoothing window used during peak-splitting; matches legacy dREG's own hardcoded `smoothwidth=4` in `find_rf_peaks`.                                                                                            |
 | `--pmv-laplace-cdf-maxpts N` | `25000` | Max integration points for the per-summit p-value's quasi-Monte-Carlo integral; matches R's `mvtnorm::pmvnorm()`/`GenzBretz()` default. Only lower this if you want to trade fidelity with R for further speed. |
 | `--pmv-laplace-cdf-eps EPS`  | `0.001` | Absolute/relative tolerance for the same integral; also matches R's default. Only lower this (i.e. tighten precision) if you specifically want to exceed R's own reference precision, at real speed cost.       |
+| `--pmv-laplace-tail-tol TOL` | `1e-6`  | Stops the per-summit p-value's z-grid integration early once the remaining tail's provable worst-case error falls below `TOL`, trading a bounded amount of fidelity for speed — unlike the two rows above, this changes *how much* of the integral is evaluated, not just how precisely. The `1e-6` default was validated on a full real production run against real dREG with no measurable fidelity cost (same peaks called, indistinguishable Jaccard agreement — see `docs/OPTIMIZATION.md`). Pass `0.0` for exact, bit-for-bit-with-R behavior. |
+| `--pmv-laplace-exact`        | off     | Shorthand for `--pmv-laplace-tail-tol 0.0` (exact, slower). Ignored if `--pmv-laplace-tail-tol` is also given.                                                                                                    |
 
 ### Python API
 
