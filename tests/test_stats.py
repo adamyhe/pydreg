@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from scipy.stats import _qmvnt
 
 from pydreg import stats
@@ -7,10 +8,12 @@ from pydreg.stats import (
     get_laplace_quantile,
     get_laplace_sigma,
     get_pmv_laplace_profile,
+    get_pmv_laplace_tail_tol,
     pmv_laplace,
     qlaplace,
     reset_pmv_laplace_profile,
     set_pmv_laplace_cdf_options,
+    set_pmv_laplace_tail_tol,
 )
 
 
@@ -72,6 +75,73 @@ def test_pmv_laplace_cdf_options_keep_result_in_unit_interval():
     finally:
         set_pmv_laplace_cdf_options()
     assert 0.0 <= p <= 1.0
+
+
+def test_pmv_laplace_tail_tol_rejects_negative():
+    try:
+        with pytest.raises(ValueError):
+            set_pmv_laplace_tail_tol(-1e-6)
+    finally:
+        set_pmv_laplace_tail_tol(0.0)
+
+
+def test_pmv_laplace_tail_tol_default_is_zero_and_unchanged_by_prior_state():
+    assert get_pmv_laplace_tail_tol() == 0.0
+
+
+def test_pmv_laplace_tail_tol_zero_matches_long_standing_eval_count():
+    # tol=0.0 (the default) must skip exactly the 19 provably-zero-weight
+    # z-grid points already documented in pmv_laplace's own docstring, no
+    # more and no fewer -- i.e. up to 272 cdf_evals (1 for the initial
+    # p_norm check + up to 271 grid points), matching long-standing exact
+    # behavior bit-for-bit in eval count (the QMC draws themselves are
+    # randomized regardless, so only the *count* is checked here).
+    cor_mat = np.eye(5) * 0.3 + 0.1
+    x = np.array([0.8, 0.5, 0.9, 0.3, 0.6])
+    reset_pmv_laplace_profile()
+    pmv_laplace(x, cor_mat)
+    n_evals = get_pmv_laplace_profile()["cdf_evals"]
+    reset_pmv_laplace_profile()
+    assert n_evals == 272
+
+
+def test_pmv_laplace_tail_tol_reduces_cdf_evals():
+    cor_mat = np.eye(5) * 0.3 + 0.1
+    x = np.array([0.8, 0.5, 0.9, 0.3, 0.6])
+    try:
+        set_pmv_laplace_tail_tol(1e-6)
+        reset_pmv_laplace_profile()
+        pmv_laplace(x, cor_mat)
+        n_evals = get_pmv_laplace_profile()["cdf_evals"]
+    finally:
+        set_pmv_laplace_tail_tol(0.0)
+        reset_pmv_laplace_profile()
+    assert 1 < n_evals < 272
+
+
+def test_pmv_laplace_tail_tol_error_is_bounded_and_conservative():
+    # The tail-truncation bound only ever OMITS terms that could have made
+    # p_max bigger (each p0[i] >= 0), so the approximate p_max can only be
+    # smaller than (or within QMC noise of) the exact one -- i.e. the
+    # resulting `prob = 1 - p_max` can only drift toward LESS significant,
+    # never toward a false positive. This is the opposite of the rejected
+    # uniform z-grid-thinning approach, which showed a large, systematic
+    # bias toward false positives right at the FDR decision boundary (see
+    # docs/PERF_LOG.md).
+    rng = np.random.default_rng(3)
+    cor_mat = np.eye(5) * 0.3 + 0.1 * (1 - np.eye(5))
+    for _ in range(10):
+        x = rng.uniform(0.3, 3.0, size=5)
+        set_pmv_laplace_tail_tol(0.0)
+        p_exact = pmv_laplace(x, cor_mat)
+        set_pmv_laplace_tail_tol(1e-4)
+        try:
+            p_approx = pmv_laplace(x, cor_mat)
+        finally:
+            set_pmv_laplace_tail_tol(0.0)
+        # Generous slack for ordinary QMC run-to-run noise on top of the
+        # deterministic tail bound itself.
+        assert p_approx <= p_exact + 5e-3
 
 
 def test_pmv_laplace_reuses_cbc_lattice_across_z_grid():

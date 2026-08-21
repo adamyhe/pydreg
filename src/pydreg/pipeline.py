@@ -17,7 +17,7 @@ import pybigtools
 import threadpoolctl
 from tqdm.auto import tqdm
 
-from . import backend, features, infp, io, peaks
+from . import backend, features, infp, io, peaks, stats
 from .models import DREGModel, DREGPeakSplitForest
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,7 @@ def run(
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
+    pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
     write_outputs=True,
     progress=False,
 ):
@@ -294,6 +295,7 @@ def run(
             peak_calling_block_width=peak_calling_block_width,
             pmv_laplace_cdf_maxpts=pmv_laplace_cdf_maxpts,
             pmv_laplace_cdf_eps=pmv_laplace_cdf_eps,
+            pmv_laplace_tail_tol=pmv_laplace_tail_tol,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",

@@ -5,7 +5,7 @@ selection and pv/smoothing overrides."""
 import argparse
 import logging
 
-from . import pipeline
+from . import pipeline, stats
 
 
 def main(argv=None):
@@ -101,6 +101,31 @@ def main(argv=None):
         "GenzBretz() default. Lower values increase precision beyond R's own "
         "reference implementation, at a large speed cost",
     )
+    parser.add_argument(
+        "--pmv-laplace-tail-tol",
+        type=float,
+        default=None,
+        help="stop pmv_laplace's z-grid integration loop once the "
+        f"remaining tail's provable upper bound falls below this "
+        f"tolerance, instead of evaluating the full grid. Defaults (with "
+        f"this flag omitted) to {stats.PMV_LAPLACE_FAST_TAIL_TOL:g} -- a "
+        "validated fast-but-approximate mode; see docs/OPTIMIZATION.md for "
+        "the measured speed/fidelity numbers behind this value. Pass 0.0 "
+        "for exact -- identical to R. Unlike --pmv-laplace-cdf-maxpts/-eps "
+        "(which only change how precisely a fixed integral is evaluated), "
+        "this changes how much of the integral is evaluated at all, "
+        "bounded by this tolerance regardless of the actual peak's "
+        "cor_mat/x -- see stats.set_pmv_laplace_tail_tol's docstring. "
+        "Overrides --pmv-laplace-exact if both are given",
+    )
+    parser.add_argument(
+        "--pmv-laplace-exact",
+        action="store_true",
+        help="use exact z-grid integration (identical to R) instead of "
+        "the default fast-but-approximate tail-truncated mode -- slower; "
+        "pass --pmv-laplace-tail-tol explicitly to use some other "
+        "tolerance instead",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--no-progress",
@@ -114,6 +139,13 @@ def main(argv=None):
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.pmv_laplace_tail_tol is not None:
+        pmv_laplace_tail_tol = args.pmv_laplace_tail_tol
+    elif args.pmv_laplace_exact:
+        pmv_laplace_tail_tol = 0.0
+    else:
+        pmv_laplace_tail_tol = stats.PMV_LAPLACE_FAST_TAIL_TOL
 
     backend_name = None if args.backend == "auto" else args.backend
     pipeline.run(
@@ -133,6 +165,7 @@ def main(argv=None):
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
+        pmv_laplace_tail_tol=pmv_laplace_tail_tol,
         progress=not args.no_progress,
     )
 

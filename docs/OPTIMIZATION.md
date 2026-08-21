@@ -707,6 +707,78 @@ production, while still substantial, are smaller than the gains measured on
 faster/uncontended dev hardware, since a lot of this is raw per-core
 throughput sensitive work).
 
+### A fast-by-default, approximate mode: `--pmv-laplace-tail-tol` / `--pmv-laplace-exact`
+
+Everything above stays exact (identical, within ordinary QMC noise, to
+R's own output). `--pmv-laplace-tail-tol` (defaulted, as of real
+production validation below, to `1e-6` rather than `0.0`) is different:
+it deliberately breaks that equivalence for more speed, on top of an
+already fast default path. Pass `--pmv-laplace-exact` (or
+`--pmv-laplace-tail-tol 0.0` explicitly) to fall back to the old
+exact-by-default behavior.
+
+`pmv_laplace`'s remaining cost is a 290-point z-grid loop, each point
+requiring its own QMC box-probability evaluation. The obvious lever —
+evaluate fewer of those 290 points — was tried the naive way first
+(uniformly subsample the grid) and **rejected**: it introduced a large,
+systematic bias concentrated exactly at the FDR significance boundary
+(`prob = 0.05`), not just ordinary noise. A boundary-focused stress test
+(60 cases constructed so R's exact computation lands right at `prob =
+0.05`) showed even the mildest thinning collapsing `prob` toward 0 in
+*every* case — i.e. every one of those borderline calls would flip from
+non-significant to significant. The failure mode is the same one that
+sank an earlier Gauss-Laguerre-quadrature attempt (see
+`docs/PERF_LOG.md`'s 2026-07-21 and 2026-08-19 entries): the grid's fixed
+nodes aren't adapted to where a *given* peak's box probability actually
+transitions from ~1 to ~0, and naive thinning removes points from exactly
+that transition region.
+
+What shipped instead is a **provably-bounded tail truncation**: each
+z-grid point's contribution to the final sum has a hard, data-independent
+upper bound (`width × exp(-z)`, computable from the grid alone, before
+ever looking at a specific peak's `cor_mat`/`x`). Summing that bound over
+the grid's tail gives an exact, case-independent guarantee on how much
+stopping the loop early could possibly change the result — so
+`--pmv-laplace-tail-tol` sets a real, honored worst-case error bound, not
+a heuristic. Two things make this safe where uniform thinning wasn't:
+
+- **The bound holds uniformly**, including at the exact FDR boundary —
+  confirmed on the same 60 constructed boundary cases: `prob`'s deviation
+  from 0.05 tracks the configured tolerance directly, with no case showing
+  a false-positive flip until the tolerance itself is loosened well past
+  the recommended default.
+- **The bias, when the tolerance is loosened enough to matter, runs
+  conservative, not liberal** — truncated terms are dropped to 0, and
+  every dropped term could only have been >= 0, so `p_max` can only be
+  pushed down (never up) by truncation. That makes `prob = 1 - p_max`
+  drift toward *less* significant, the opposite of a false-positive risk.
+
+The default `--pmv-laplace-tail-tol` of `1e-6` was chosen because the
+boundary stress test showed no measurable effect at all at that
+tolerance (well inside ordinary QMC noise), while still capturing most
+of the truncation's available win (tighter tolerances buy little extra
+speed; looser ones start trading away real headroom for a bound you're
+not using).
+
+**Confirmed on a full real production run** (Jurkat PRO-seq, `--cores
+16`, cupy backend, real pretrained models), comparing exact
+(`--pmv-laplace-exact`, i.e. `tail_tol=0`) against the fast default
+(`tail_tol=1e-6`) on the same input: `pmv_laplace`'s own block-CPU time
+dropped 7735.58s → 4240.99s (**1.82x**), CDF evaluations 10,998,315 →
+5,518,634 (**1.99x**, matching the earlier isolated-benchmark prediction
+almost exactly), the "calling peaks" step's wall time 509.31s → 289.05s
+(**1.76x**), and total pipeline wall time 20m22.6s → 16m49.4s (**1.21x**,
+17.4% faster overall — peak calling is a large but not dominant share of
+this run's total time, most of the rest being scoring). Both runs called
+the exact same number of significant peaks (33350), and `bedtools
+jaccard` against real dREG's own output on the same input gave 0.999317
+(exact) vs. 0.999344 (fast) — indistinguishable from (if anything,
+nominally better than) the exact run's own agreement with dREG,
+confirming no measurable fidelity cost at real scale. This validation is
+why the fast tolerance became the default rather than staying opt-in.
+See `docs/PERF_LOG.md`'s 2026-08-19 entries for the full numbers,
+including the rejected grid-thinning attempt's numbers for comparison.
+
 ## The random-forest peak splitter: numba, not scikit-learn
 
 The small random-forest model used to decide whether adjacent local maxima

@@ -3378,6 +3378,155 @@ multithreaded extraction is a clean win with no measurable tradeoff,
 not a compromise -- confirms the branch/PR split decision (this
 release vs. `multithreaded-extraction-dev`) was the right call.
 
+## 2026-08-19 — an opt-in, fidelity-breaking "fast mode" for `pmv_laplace`: uniform z-grid thinning rejected (real false-positive bias at the FDR boundary), a provably-bounded tail-truncation shipped instead
+
+Asked directly for a further, explicitly-approximate speedup on top of
+everything in the 2026-07/08 entries above (`pmv_laplace` was still ~96% of
+block CPU on the last real production profile, per the 2026-07-21 entry) --
+this time allowed to break bit-for-bit equivalence with R, as an opt-in
+mode, unlike every prior `pmv_laplace` change in this log.
+
+**First attempt (uniform z-grid thinning): implemented, measured, and
+rejected.** The obvious lever left on the table is the 290-point z-grid
+itself -- every other `_qmvn_adaptive`-level knob (maxpts/eps, the
+small-start schedule, the lattice/Cholesky caching) was already exhausted
+in earlier sessions. Subsampling R's own grid uniformly by index (e.g. keep
+every 2nd/3rd/Nth point, recomputing widths between kept points -- still a
+left-endpoint Riemann sum of the same integral, just coarser) looked safe
+at first: a 400kbp synthetic multi-peak pipeline run (7 peaks of varying
+strength, real pretrained models, `--cores 1`) showed the exact same 19
+significant peaks at every stride from 2 to 8, with `pmv_seconds` dropping
+from 0.225s to 0.027s (~8x) at stride=8.
+
+That test just didn't happen to contain a peak sitting near the actual FDR
+decision boundary. Constructing cases specifically at that boundary (via
+bisection on `|x|`'s overall scale until `pmv_laplace`'s exact box
+probability crosses 0.95, i.e. `prob = 1 - pv` sits at exactly 0.05, the
+`pv_threshold` most runs actually use) exposed a large, systematic,
+*directional* bias: stride=2 alone collapsed `prob` from 0.050 to ~0.005 in
+every one of 60 constructed boundary cases; stride>=3 collapsed it to
+0.000. All 60 would flip from non-significant to significant under this
+approximation. Trying a composite trapezoidal rule instead of left-endpoint
+Riemann on the same thinned grid didn't fix it -- it flipped the bias the
+other direction instead (0.050 -> ~0.09, i.e. false negatives), and by a
+comparable magnitude.
+
+**Root cause: the same failure mode that already killed the
+Gauss-Laguerre attempt in the 2026-07-21 entry above.** The z-grid's nodes
+aren't adapted to where a *given* box's probability actually transitions
+from ~1 to ~0 (that transition point depends on `|x|`/`cor_mat`, and varies
+per peak). Uniform index-thinning removes points from exactly that
+transition "shoulder" region as readily as anywhere else, and the
+resulting bias is concentrated exactly at the decision boundary rather than
+being ordinary QMC-style noise. This is a correctness risk specific to
+*where* accuracy is needed for peak calling, not just an aggregate fidelity
+number -- confirmed via a proper boundary-focused stress test, not just the
+happy-path multi-peak run that initially looked fine. Not shipped;
+`set_pmv_laplace_grid_stride()` (the prototype built for this) was removed
+before merging, in favor of the approach below.
+
+**What's actually safe: truncating the z-grid's tail using a
+data-independent, provable upper bound.** `pmv_laplace`'s z-grid loop sums
+`widths[i] * p0[i]`, where `p0[i] = weights[i] * (a box probability in
+[0, 1])` -- so `widths[i] * weights[i]` is a hard per-point upper bound on
+that term, computable in advance from the grid alone (`weights = exp(-z)`),
+with zero dependence on the actual `cor_mat`/`x` being evaluated. Summing
+that bound over the grid's tail from any index `i` to the end gives a hard
+bound on how much skipping the rest of the loop from `i` onward could
+possibly change the final `p_max`, in the worst case -- computed once via a
+reverse cumulative sum and cached alongside the grid. This is a strict
+generalization of the "skip 19 provably-zero z-grid evals" optimization
+already shipped (2026-07-21 entry above): that one only ever skipped points
+whose bound was *exactly* 0.0; this one skips everything past the first
+index whose *remaining* bound already falls below a configurable tolerance
+`tail_tol`.
+
+Two properties fall directly out of the bound's construction, both
+confirmed empirically:
+
+1. **The error is hard-bounded, uniformly, independent of the case.**
+   Re-running the exact boundary-stress test above (60 cases constructed at
+   `prob=0.05` by bisection) at `tail_tol` in `{0, 1e-8, 1e-6, 1e-5, 1e-4,
+   1e-3}` showed `prob`'s max deviation from 0.05 tracking the configured
+   tolerance directly -- e.g. max `prob` of 0.0501 at `tol=1e-4` (unmeasurable
+   against ordinary QMC noise), rising to 0.0503 only at `tol=1e-3` -- with
+   `n_below_0.05` (the flip count) never inflating in the false-positive
+   direction the way uniform thinning did.
+2. **The bias, when it does appear, is in the *safe* (conservative)
+   direction.** Since the truncated terms are dropped to 0 rather than to
+   an unknown value, and each term can only be >= 0, `p_max` can only be
+   pushed down (never up) by truncation -- so `prob = 1 - p_max` can only be
+   pushed toward *less* significant, never toward a false positive. This is
+   the exact opposite failure mode from uniform grid-thinning above, and
+   it's why this lever is safe to expose as a real "fast mode" default
+   where thinning wasn't.
+
+**Measured speed.** On the exact 290-point grid, the tail bound already
+drops below `1e-6` at grid index 99 (z=14.5) and below `1e-4` at index 87
+(z=9.4) -- vs. the ~271 points (19 already known to be exactly zero-weight)
+that the exact path evaluates. On a 40-case random `cor_mat`/`x` sweep
+(uniform x in [0.01, 3.0], matching earlier sessions' benchmark shape):
+`cdf_evals` drops from 10364 (tol=0) to 4164 at `tol=1e-8` (~2.5x) and 3362
+at `tol=1e-4` (~3.1x); wall time drops correspondingly (649ms -> 254ms at
+`tol=1e-6`). On the 400kbp synthetic multi-peak pipeline run (real
+pretrained models, `--cores 1`), `pmv_seconds` dropped from 0.222s (tol=0)
+to 0.111s at `tol=1e-6` (~2x -- smaller ratio than the isolated sweep since
+fixed per-call overhead outside the z-grid loop is proportionally larger
+here), with the exact same 19 significant peaks at every tolerance tested
+up to `1e-4`.
+
+**Shipped**: `stats.set_pmv_laplace_tail_tol(tol)`/`get_pmv_laplace_tail_tol()`
+(default `0.0`, i.e. exact -- verified to produce identical `cdf_evals`
+counts, 272 or 1 depending on the early-exit, to the pre-change
+implementation on the same cases). `peaks.call_peaks`/`pipeline.run` gained
+a `pmv_laplace_tail_tol` parameter threaded through
+`_init_peak_worker`/`ProcessPoolExecutor`'s initializer the same way
+`pmv_laplace_cdf_maxpts`/`eps` already were. `pydreg.cli` gained
+`--pmv-laplace-tail-tol` (raw knob, explicit value always wins) and
+`--pmv-laplace-fast` (shorthand for the validated `1e-6` default above --
+chosen as the tolerance where the boundary-stress test showed no
+measurable effect at all, well inside ordinary QMC noise, while still
+capturing most of the truncation's available speedup: the marginal gain
+from `1e-6` to `1e-4` is small, ~15%, for a real jump in worst-case bound).
+All 95 tests pass (10 new: 5 in `test_stats.py` for the tail-tol bound/
+reduction/error-direction behavior, 1 in `test_peaks.py` confirming
+`call_peaks` threads the parameter to workers, 4 new in `test_cli.py`
+for the `--pmv-laplace-fast`/`--pmv-laplace-tail-tol` precedence logic --
+this repo previously had no CLI-level tests at all).
+
+## 2026-08-19 (cont.) — real production validation of `--pmv-laplace-fast` against real dREG, on a full Jurkat PRO-seq run
+
+Ran the full pipeline twice on the same real Jurkat PRO-seq bigWig pair
+(`--cores 16`, cupy backend, real pretrained models), once at the exact
+default (`pmv_laplace_tail_tol=0`) and once with `--pmv-laplace-fast`
+(`tail_tol=1e-6`), then compared both against real dREG's own output on
+the same input via `bedtools jaccard`:
+
+| | exact (`tail_tol=0`) | fast (`tail_tol=1e-6`) |
+|---|---|---|
+| `pmv_laplace` block CPU (`pmv_seconds`) | 7735.58s | 4240.99s |
+| CDF evaluations (59559 `pmv_laplace` calls) | 10,998,315 | 5,518,634 |
+| "calling peaks" step wall time | 509.31s | 289.05s |
+| total pipeline wall time | 20m22.6s | 16m49.4s |
+| significant peaks | 33350 | 33350 |
+| Jaccard vs. real dREG | 0.999317 | 0.999344 |
+
+**Speedup**: `pmv_seconds` 1.82x, CDF evals 1.99x (matches the earlier
+synthetic prediction almost exactly -- `tail_tol=1e-6` truncates to ~99 of
+the ~271 non-zero-weight grid points per full-grid call, i.e. close to a
+real 2x), peak-calling step wall time 1.76x, total pipeline wall time
+1.21x (17.4% faster overall -- peak calling is a large but not dominant
+share of total runtime on this run, most of the rest being scoring).
+
+**Fidelity**: identical significant-peak count (33350) in both runs, and
+Jaccard-vs-real-dREG for the fast run (0.999344) is not just
+indistinguishable from the exact run's (0.999317) but nominally *higher*
+-- both differences are well inside this comparison's ordinary run-to-run
+noise (pmv_laplace's QMC randomization, plus real dREG's own R-side
+noise), not a real directional effect. No measurable fidelity cost from
+`--pmv-laplace-fast` at real production scale, on top of the
+provable-worst-case-bound argument from the entry above.
+
 ## 2026-08-20 — real TITAN Xp: growing `--cupy-sv-chunk`/`--query-chunk` past the defaults gives zero throughput benefit; already memory-bandwidth-bound there
 
 Prompted by a question about whether the cupy tier's default `query_chunk`
@@ -3481,3 +3630,39 @@ CuPy, and Apple Silicon's unified-memory model was already flagged
 elsewhere in `docs/OPTIMIZATION.md` as a different-enough shape that the
 cupy tuning numbers don't necessarily transfer. All 95 tests pass
 (no test hardcoded the old 32,768 default value).
+
+## 2026-08-21 -- `pmv_laplace`'s fast tail-truncation mode promoted from opt-in to the default
+
+The 2026-08-19 (cont.) entry's real production validation against real
+dREG (same 33,350 significant peaks called either way; `bedtools jaccard`
+0.999317 exact vs. 0.999344 fast against dREG's own output -- no
+measurable fidelity cost) was the bar this project holds every
+default-affecting change to (matching the 12-library validation bar
+documented in `CLAUDE.md`). With that validation in hand, the user
+directed promoting the tail-truncation fast mode from opt-in to the new
+default, since further testing (informal, on a TITAN Xp) turned up no
+regressions beyond what was already recorded.
+
+**Shipped**: `stats.PMV_LAPLACE_FAST_TAIL_TOL = 1e-6` is now the default
+`pmv_laplace_tail_tol` threaded through `peaks.call_peaks`,
+`peaks._init_peak_worker`, and `pipeline.run` (previously all defaulted
+to `0.0`, exact). `pydreg.cli`'s old `--pmv-laplace-fast` store-true flag
+(shorthand for setting `--pmv-laplace-tail-tol` to `1e-6`) is replaced
+with `--pmv-laplace-exact` (shorthand for `--pmv-laplace-tail-tol 0.0`),
+matching the new default's direction -- the explicit
+`--pmv-laplace-tail-tol` flag is unchanged and still overrides either.
+`stats.set_pmv_laplace_tail_tol`'s own default parameter (`0.0`) and the
+module-level `_PMV_TAIL_TOL` sentinel before any run configures it are
+deliberately left at `0.0` -- those are the low-level primitive's "no
+truncation configured yet" sentinel, not the pipeline-wide default users
+actually see, and every real run's worker init still calls
+`set_pmv_laplace_tail_tol` explicitly with the resolved value either way.
+Updated `docs/OPTIMIZATION.md`'s fast-mode section and the relevant
+docstrings to describe the new default/flag name; did not edit this
+log's own historical 2026-08-19 entries (their `--pmv-laplace-fast`
+references describe the flag as it existed at the time).
+`tests/test_stats.py`'s tests all drive `stats.set_pmv_laplace_tail_tol`
+directly and needed no changes -- they were never coupled to
+`pydreg.cli`'s or `pipeline.run`'s own default. `tests/test_cli.py`'s
+flag-precedence tests were updated for the new default/flag name. All 95
+tests pass.

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from pydreg import peaks
+from pydreg import peaks, stats
 from pydreg.peaks import _r_colon, call_peaks, find_gap_infp, get_dense_infp, merge_broad_peak
 
 
@@ -134,3 +134,43 @@ def test_call_peaks_parallel_matches_serial(monkeypatch, rf_model):
         serial_bed.drop(columns=["prob"]).reset_index(drop=True),
         parallel_bed.drop(columns=["prob"]).reset_index(drop=True),
     )
+
+
+def test_call_peaks_threads_pmv_laplace_tail_tol_to_workers(monkeypatch, rf_model):
+    x = np.arange(0, 2000, 10)
+    y = 0.8 * np.exp(-((x - 500) ** 2) / (2 * 80**2))
+    y += 0.9 * np.exp(-((x - 1500) ** 2) / (2 * 80**2))
+
+    dense_infp = pd.DataFrame(
+        {"chrom": "chr1", "start": x, "end": x + 1, "score": y, "infp": 1}
+    )
+    peak_broad = pd.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "start": [0],
+            "end": [1990],
+            "min": [0.0],
+            "max": [float(y.max())],
+            "mean": [float(y.mean())],
+            "sum": [float(y.sum())],
+            "stdev": [float(y.std(ddof=1))],
+            "count": [len(y)],
+        }
+    )
+
+    monkeypatch.setattr(peaks, "PEAK_CALLING_BLOCK_WIDTH", 1)
+    monkeypatch.setattr(peaks.stats, "build_cormat", lambda starts, scores: np.eye(5) * 0.01)
+    try:
+        call_peaks(
+            dense_infp, peak_broad, 0.05, rf_model,
+            pv_adjust="none", pv_threshold=1.0, cores=1,
+            pmv_laplace_tail_tol=1e-6,
+        )
+        # call_peaks's own serial-path _init_peak_worker call runs in this
+        # (main) process regardless of `cores`, so the global set there is
+        # observable afterward -- the real signal that the parameter
+        # actually reached stats.set_pmv_laplace_tail_tol() rather than
+        # being silently dropped somewhere in call_peaks's plumbing.
+        assert stats.get_pmv_laplace_tail_tol() == 1e-6
+    finally:
+        stats.set_pmv_laplace_tail_tol(0.0)

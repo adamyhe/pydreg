@@ -319,6 +319,7 @@ def _init_peak_worker(
     cor_mat,
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
+    pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
 ):
     # Each pmv_laplace call does a handful of tiny (order-5) Cholesky
     # decompositions inside SciPy's Genz-Bretz CDF integration -- far too
@@ -336,6 +337,7 @@ def _init_peak_worker(
     _WORKER_STATE["smoothwidth"] = smoothwidth
     _WORKER_STATE["cor_mat"] = cor_mat
     stats.set_pmv_laplace_cdf_options(pmv_laplace_cdf_maxpts, pmv_laplace_cdf_eps)
+    stats.set_pmv_laplace_tail_tol(pmv_laplace_tail_tol)
 
 
 def _call_peak_block(task):
@@ -429,6 +431,7 @@ def call_peaks(
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
+    pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
@@ -453,7 +456,15 @@ def call_peaks(
     pre-FDR-filter (columns chrom, start, end, score, prob, smooth_mode,
     original_mode, centroid); peak_bed is raw_peak filtered/BH-adjusted to
     significant peaks only (columns chrom, start, end, score, prob,
-    center)."""
+    center).
+
+    pmv_laplace_tail_tol: "fast mode" for stats.pmv_laplace's z-grid
+    integration -- >0.0 stops the z-grid loop early once the remaining
+    tail's provable upper bound falls below this tolerance, trading a
+    bounded amount of fidelity for speed; 0.0 is exact (identical to R).
+    Defaults to stats.PMV_LAPLACE_FAST_TAIL_TOL (validated against real
+    dREG peak calls -- see docs/OPTIMIZATION.md for measured numbers);
+    pass 0.0 explicitly for the old exact-by-default behavior."""
     chrom_col, start_col, end_col, score_col = dense_infp.columns[:4]
     if not np.isfinite(min_score):
         raise ValueError(
@@ -475,6 +486,7 @@ def call_peaks(
     if pmv_laplace_cdf_maxpts is not None:
         pmv_laplace_cdf_maxpts = int(pmv_laplace_cdf_maxpts)
     pmv_laplace_cdf_eps = float(pmv_laplace_cdf_eps)
+    pmv_laplace_tail_tol = float(pmv_laplace_tail_tol)
     tasks = list(
         _peak_calling_tasks(
             dense_sorted, candidates, chrom_col, start_col, end_col, block_width
@@ -482,13 +494,14 @@ def call_peaks(
     )
     logger.info(
         "calling %d broad peaks in %d blocks of up to %d with %d peak-calling process(es) "
-        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g)",
+        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g, pmv_laplace_tail_tol=%g)",
         len(candidates),
         len(tasks),
         block_width,
         cores,
         pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps,
+        pmv_laplace_tail_tol,
     )
     raw_rows = []
     completed_results = [None] * len(tasks)
@@ -515,6 +528,7 @@ def call_peaks(
         cor_mat,
         pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps,
+        pmv_laplace_tail_tol,
     )
     stats.reset_pmv_laplace_profile()
 
@@ -575,6 +589,7 @@ def call_peaks(
                     cor_mat,
                     pmv_laplace_cdf_maxpts,
                     pmv_laplace_cdf_eps,
+                    pmv_laplace_tail_tol,
                 ),
             ) as pool:
                 futures = {
