@@ -391,7 +391,7 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     return predict
 
 
-def _build_mlx_predict_fn(dreg_model, sv_chunk=32_768):
+def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
     """Apple Silicon counterpart to _build_cupy_predict_fn -- same near-
     verbatim port of DREGModel.predict's chunked RBF dual-sum formula (same
     expanded squared-distance trick, same chunking over support vectors),
@@ -443,7 +443,22 @@ def _build_mlx_predict_fn(dreg_model, sv_chunk=32_768):
     shape, comfortably inside MLX_SMOKE_TEST_ATOL, and ~22x faster
     wall-clock than the NumPy tier at that same size once mx.compile has
     warmed up (first call per distinct chunk shape pays a one-time Metal
-    shader compile cost). See docs/OPTIMIZATION.md and docs/PERF_LOG.md."""
+    shader compile cost).
+
+    sv_chunk's default (16,384, lowered from an earlier, unvalidated
+    32,768 once a real `--mlx-sv-chunk` sweep confirmed it) sits in the
+    same flat/cheap throughput region as every value from 4,096 up through
+    32,768 (~1140-1165ms/call on a real M4, ordinary run-to-run noise) while
+    using ~19% less peak Metal memory than 32,768 did. Unlike the `cupy`
+    tier, growing `sv_chunk` much further genuinely costs throughput here
+    (up to ~2x slower by 524,288) rather than being a pure memory-vs-launch-
+    count tradeoff -- and an unchunked call (sv_chunk >= n_sv) can crash
+    outright: Metal enforces a hard per-buffer allocation ceiling
+    (`mx.device_info()["max_buffer_length"]`, ~9.53GB on this M4,
+    independent of total unified memory) that a `(query_chunk=4096,
+    sv_chunk=605_187)` float32 `cross` buffer (~9.92GB) exceeds. See
+    docs/OPTIMIZATION.md and docs/PERF_LOG.md's 2026-08-22 entry for the
+    full sweep."""
     import mlx.core as mx
 
     SV = mx.array(dreg_model.SV, dtype=mx.float32)

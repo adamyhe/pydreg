@@ -3666,3 +3666,104 @@ directly and needed no changes -- they were never coupled to
 `pydreg.cli`'s or `pipeline.run`'s own default. `tests/test_cli.py`'s
 flag-precedence tests were updated for the new default/flag name. All 95
 tests pass.
+
+## 2026-08-22 -- real Apple Silicon (M4): `--mlx-sv-chunk` sweep, and why the `cupy` conclusion doesn't transfer
+
+The 2026-08-20 (cont.) entry's `cupy` investigation left `mlx`'s own
+`sv_chunk` explicitly untouched, flagging real per-`mlx`-tier memory
+headroom as "not yet investigated" (`docs/OPTIMIZATION.md`) since MLX's
+unified-memory model (shared with the whole OS, not a dedicated VRAM pool)
+is a different shape than a discrete NVIDIA GPU's. Investigated now on a
+real Apple M4 (16GB unified memory) using the real pretrained model
+(605,187 SVs x 360 features, 4096-query batches, matching
+`_build_mlx_predict_fn`'s own validated benchmark shape):
+
+| `sv_chunk` | `predict()` time | peak Metal memory |
+|---|---|---|
+| 4,096 | 1163.8 ms/call | 969.4 MB |
+| 8,192 | 1147.8 ms/call | 1097.4 MB |
+| 16,384 | 1141.6 ms/call | 1103.0 MB |
+| 32,768 (old default) | 1146.9 ms/call | 1359.0 MB |
+| 65,536 | 1156.3 ms/call | 1871.0 MB |
+| 131,072 | 1228.2 ms/call | 2895.0 MB |
+| 262,144 | 1390.6 ms/call | 4943.0 MB |
+| 524,288 | 2286.4 ms/call | 9039.0 MB |
+| 605,187 (no chunking) | crashed | see below |
+
+Each `sv_chunk` was run in its own subprocess (not a single long-lived
+sweep process) specifically because the largest value was expected to be
+risky -- confirmed necessary: the unchunked (`sv_chunk == n_sv`) case
+crashed the process outright (`libc++abi`/`std::runtime_error:
+[metal::malloc] Attempting to allocate 9915383808 bytes which is greater
+than the maximum allowed buffer size of 9534832640 bytes`), which would
+have taken the rest of the sweep down with it in a single-process loop.
+`mx.device_info()["max_buffer_length"]` on this card is exactly that
+9,534,832,640-byte figure -- a hard per-buffer ceiling Metal enforces
+independent of total unified memory (16GB here, well above what the
+9.92GB `(query_chunk=4096, sv_chunk=605_187)` float32 `cross` buffer
+alone would need), so this failure mode has no `cupy`-tier analogue: a
+discrete NVIDIA GPU's VRAM is a single flat budget, not split into a
+per-buffer sub-limit like this.
+
+Two conclusions, both different from the `cupy` finding:
+
+- **Throughput is flat only up to a point, then genuinely degrades.**
+  4,096 through 32,768 are all within ~2% of each other (ordinary
+  run-to-run noise), but growing further costs real throughput -- 131,072
+  is ~7% slower, 262,144 ~21% slower, 524,288 ~2x slower. Unlike `cupy`
+  (confirmed memory-bandwidth-bound with zero throughput sensitivity to
+  chunk size across a 16x-256x range on two real GPUs), this tier's
+  per-launch dispatch overhead (or some other per-chunk fixed cost) *is*
+  a real, measurable fraction of total cost once chunks get large enough.
+- **Peak memory is a real, deterministic buffer-size effect, not noise**
+  (unlike the timing numbers, which carry ordinary run-to-run variance) --
+  it scales cleanly with `sv_chunk` since the `(query_chunk, sv_chunk)`
+  `cross`/kernel buffers are the dominant transient allocation, same
+  shape as `cupy`'s own tier.
+
+**Shipped**: `_build_mlx_predict_fn`'s default `sv_chunk` lowered from
+32,768 to **16,384** -- sits in the same flat/cheap throughput region as
+32,768 (1141.6ms vs 1146.9ms, indistinguishable) while using ~19% less
+peak memory (1103MB vs 1359MB, a real reduction, not noise). Chosen
+rather than something smaller (e.g. 4,096) because 16,384 already
+captures nearly all the available memory savings in this flat region
+while running the sv-chunking loop half as many times as 8,192 would --
+the same reasoning already used for `cupy`'s own default. Unlike the
+`cupy` default change (confirmed on two independent real GPUs, TITAN Xp
+and A100), this is validated on a single machine (one Apple M4) -- the
+underlying mechanism (materializing the same `(query_chunk, sv_chunk)`
+buffer `cupy` does) is close enough to `cupy`'s own validated tier that
+this is still a low-risk change, but the smaller validation set is worth
+flagging explicitly rather than silently treating it as equally
+confirmed. Updated `docs/OPTIMIZATION.md` and the relevant docstrings in
+`src/pydreg/backend.py`. No test hardcoded the old 32,768 default value;
+all 95 tests pass.
+
+Separately, the user asked whether the CPU (`numpy` backend) tier's own
+`DREGModel.predict(chunk=20_000)` default should also move to 16,384 for
+consistency with the now-converged `cupy`/`mlx` value. Investigated but
+**not changed**: `docs/PLANNING.md`'s original rationale for `20_000`
+(bound three same-shaped `(query_chunk, sv_chunk)` float64 temporaries to
+~2GB at `query_chunk~4096`) is stale -- `_rbf_accumulate` (added after
+that plan was written) fuses `sqdist`/`exp`/`K @ coefs` into one numba
+loop that never materializes those two as full arrays, so only `cross`
+is actually a full transient array today (~655MB at the current
+defaults, not ~2GB), and there's no discrete-VRAM-style hard budget on
+CPU host RAM the way there is on `cupy`/`mlx`, so the memory argument for
+matching 16,384 doesn't hold. A first attempt at an empirical check (10
+cores, the full real model, 9 chunk sizes x 10 iterations) was correctly
+flagged by the user as too disruptive to run on their actively-used local
+machine and was stopped before completion -- see this repo's Claude Code
+memory entry on local benchmark resource use. A deliberately lighter
+re-run (2 cores, niced, 1,024-row query batches, 4 chunk sizes, 2
+iterations each) gave: 4,096 -> 1917.7ms/call, 16,384 -> 2106.5ms/call,
+20,000 (current default) -> 2448.1ms/call, 32,768 -> 2240.9ms/call, with
+peak RSS flat (~3.1-3.4GB) across all four, confirming the memory
+reasoning above (the ~605,187x360 SV/coef matrices themselves dominate
+RSS, not the per-chunk temporary). The smaller chunk being fastest here
+is a real, if unconfirmed, directional signal against the *current*
+default, but it's a single trial per size under an artificially
+constrained core count -- not something to act on without repeated
+trials at a normal core count, the same bar every other default change
+in this log was held to. Left as an open, flagged-but-not-investigated
+question rather than changed on this evidence.

@@ -410,12 +410,53 @@ bench_backends.py` after the NumPy tier's own numba-fusion speedup below
 single-threaded; `mlx` itself hasn't changed). See `docs/PERF_LOG.md`'s 2026-08-10
 entry for the full numbers.
 
-Not yet investigated: real `--mlx-sv-chunk` memory-headroom tuning. MLX's
-unified memory means its actual constraint (shared with the whole OS, not a
-dedicated VRAM pool the way a discrete NVIDIA GPU has) is a different shape
-than `cupy`'s, so the sv_chunk tuning guidance in "Speeding it up" above
-doesn't necessarily transfer as-is — worth its own investigation if this
-tier's real-world memory behavior ever becomes a practical concern.
+**`--mlx-sv-chunk` memory-headroom tuning, now investigated on real Apple
+Silicon (M4, 16GB unified memory).** MLX's unified memory means its actual
+constraint (shared with the whole OS, not a dedicated VRAM pool the way a
+discrete NVIDIA GPU has) is a different shape than `cupy`'s, so the
+`cupy`-tier sv_chunk conclusion ("batch size doesn't matter, it's purely
+memory-bandwidth-bound") does **not** transfer as-is here. A full
+`--mlx-sv-chunk` sweep (real pretrained model, 605,187 SVs x 360 features,
+4096-query batches) found a genuinely different shape:
+
+| `sv_chunk` | `predict()` time | peak Metal memory |
+|---|---|---|
+| 4,096 | 1163.8 ms/call | 969.4 MB |
+| 8,192 | 1147.8 ms/call | 1097.4 MB |
+| 16,384 | 1141.6 ms/call | 1103.0 MB |
+| 32,768 (old default) | 1146.9 ms/call | 1359.0 MB |
+| 65,536 | 1156.3 ms/call | 1871.0 MB |
+| 131,072 | 1228.2 ms/call | 2895.0 MB |
+| 262,144 | 1390.6 ms/call | 4943.0 MB |
+| 524,288 | 2286.4 ms/call | 9039.0 MB |
+| 605,187 (no chunking) | **crashes** | exceeds Metal's hard 9,534,832,640-byte max single-buffer allocation (`mx.device_info()["max_buffer_length"]` on this card) |
+
+Two real differences from the `cupy` tier's own sweep:
+
+- **Throughput is flat only up to a point, then genuinely degrades** —
+  4,096 through 32,768 are all within ~2% of each other (ordinary run-to-run
+  noise), but 131,072 onward is measurably slower (up to ~2x at 524,288),
+  not just a memory cost with zero throughput effect the way growing
+  `cupy_sv_chunk` was.
+- **An unchunked call (`sv_chunk >= n_sv`) doesn't just use more memory —
+  it can crash outright.** Metal enforces a hard per-buffer allocation
+  ceiling (`max_buffer_length`, ~9.53 GB on this M4) independent of total
+  unified memory (16 GB here); the `(query_chunk=4096, sv_chunk=605187)`
+  float32 `cross` buffer alone (~9.92 GB) exceeds it. `cupy`'s discrete-VRAM
+  model has no equivalent single-buffer cap at this scale, so this failure
+  mode has no `cupy`-tier analogue.
+
+**Shipped**: `_build_mlx_predict_fn`'s default `sv_chunk` lowered from
+32,768 to **16,384** — sits in the same flat/cheap throughput region as
+32,768 (1141.6ms vs 1146.9ms, indistinguishable) while using ~19% less
+peak memory (1103 MB vs 1359 MB, a real, deterministic buffer-size
+difference, not measurement noise). Unlike the `cupy` default change,
+this is validated on a single machine (one Apple M4) rather than two
+independent real GPUs — the underlying mechanism (materializing the same
+`(query_chunk, sv_chunk)` buffer `cupy` does) is identical enough that this
+is a low-risk change regardless, but flagging the smaller validation set
+explicitly. See `docs/PERF_LOG.md`'s 2026-08-22 entry for the full
+investigation.
 
 ## Batching
 
