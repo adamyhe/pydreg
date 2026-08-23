@@ -33,18 +33,18 @@ text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
 <text x="487.4" y="492" class="tick" text-anchor="middle">32</text>
 <text x="80" y="99.2" class="tick" text-anchor="end">32</text>
 <line x1="90.0" y1="470.0" x2="530.0" y2="55.0" class="diagonal"/>
-<circle cx="515.6" cy="306.0" r="7" class="mark"><title>G1: dREG 37.10 GiB, pydreg 9.94 GiB</title></circle>
-<circle cx="509.1" cy="366.8" r="7" class="mark"><title>G3: dREG 35.85 GiB, pydreg 7.09 GiB</title></circle>
-<circle cx="508.5" cy="371.2" r="7" class="mark"><title>G5: dREG 35.75 GiB, pydreg 6.92 GiB</title></circle>
-<circle cx="510.3" cy="384.6" r="7" class="mark"><title>G6: dREG 36.08 GiB, pydreg 6.42 GiB</title></circle>
-<circle cx="509.0" cy="385.5" r="7" class="mark"><title>G7: dREG 35.84 GiB, pydreg 6.39 GiB</title></circle>
-<circle cx="510.0" cy="355.0" r="7" class="mark"><title>GM12878_groseq: dREG 36.03 GiB, pydreg 7.57 GiB</title></circle>
-<circle cx="511.2" cy="422.9" r="7" class="mark"><title>K562_groseq: dREG 36.25 GiB, pydreg 5.19 GiB</title></circle>
-<circle cx="510.4" cy="390.3" r="7" class="mark"><title>Jurkat_PROseq: dREG 36.10 GiB, pydreg 6.22 GiB</title></circle>
-<circle cx="510.6" cy="404.2" r="7" class="mark"><title>Jurkat_ChROseq_1: dREG 36.14 GiB, pydreg 5.76 GiB</title></circle>
-<circle cx="510.9" cy="396.5" r="7" class="mark"><title>Jurkat_ChROseq_2: dREG 36.19 GiB, pydreg 6.01 GiB</title></circle>
-<circle cx="513.7" cy="375.1" r="7" class="mark"><title>Jurkat_ChROseq: dREG 36.72 GiB, pydreg 6.77 GiB</title></circle>
-<circle cx="511.6" cy="377.4" r="7" class="mark"><title>Jurkat_leChROseq: dREG 36.33 GiB, pydreg 6.69 GiB</title></circle>
+<circle cx="519.8" cy="304.0" r="7" class="mark"><title>G1: dREG 37.93 GiB, pydreg 10.05 GiB</title></circle>
+<circle cx="511.9" cy="364.7" r="7" class="mark"><title>G3: dREG 36.39 GiB, pydreg 7.17 GiB</title></circle>
+<circle cx="507.6" cy="366.4" r="7" class="mark"><title>G5: dREG 35.58 GiB, pydreg 7.11 GiB</title></circle>
+<circle cx="508.4" cy="382.1" r="7" class="mark"><title>G6: dREG 35.72 GiB, pydreg 6.52 GiB</title></circle>
+<circle cx="506.5" cy="381.9" r="7" class="mark"><title>G7: dREG 35.37 GiB, pydreg 6.52 GiB</title></circle>
+<circle cx="512.4" cy="351.0" r="7" class="mark"><title>GM12878_groseq: dREG 36.48 GiB, pydreg 7.74 GiB</title></circle>
+<circle cx="511.2" cy="417.0" r="7" class="mark"><title>K562_groseq: dREG 36.26 GiB, pydreg 5.37 GiB</title></circle>
+<circle cx="512.3" cy="387.0" r="7" class="mark"><title>Jurkat_PROseq: dREG 36.46 GiB, pydreg 6.34 GiB</title></circle>
+<circle cx="510.6" cy="399.8" r="7" class="mark"><title>Jurkat_ChROseq_1: dREG 36.15 GiB, pydreg 5.91 GiB</title></circle>
+<circle cx="510.4" cy="392.0" r="7" class="mark"><title>Jurkat_ChROseq_2: dREG 36.11 GiB, pydreg 6.17 GiB</title></circle>
+<circle cx="511.9" cy="373.6" r="7" class="mark"><title>Jurkat_ChROseq: dREG 36.39 GiB, pydreg 6.83 GiB</title></circle>
+<circle cx="513.0" cy="371.6" r="7" class="mark"><title>Jurkat_leChROseq: dREG 36.59 GiB, pydreg 6.90 GiB</title></circle>
 <text x="310.0" y="525" class="axis" text-anchor="middle">dREG maximum RSS (GiB, log scale)</text>
 <text x="28" y="262.5" class="axis" text-anchor="middle" transform="rotate(-90 28 262.5)">pydreg maximum RSS (GiB, log scale)</text>
 <text x="98" y="75" class="note" text-anchor="start">Below diagonal favors pydreg</text>

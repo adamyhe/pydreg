@@ -19,6 +19,11 @@ from pathlib import Path
 
 HF_REPO = "adamyhe/pydreg-supporting-data"
 
+# Local override: a benchmark_data/<tool>/<name> file, if present, is used
+# in place of the HF dataset -- lets a fresh local benchmark run (e.g. one
+# not yet uploaded to HF) feed the figures without touching the network.
+BENCHMARK_DATA_DIR = Path(__file__).parent / "benchmark_data"
+
 # The 12 unique libraries in the finalized 0.2.7 benchmark (see
 # figures/timing_scripts_pydreg_only.sh). G2 was a duplicate upload of
 # K562_groseq (same underlying library, uploaded under two names by
@@ -65,9 +70,14 @@ def fetch(tool: str, lib: str, suffix: str) -> Path:
     copied into this repo. `suffix` is e.g. "infp.bw" or
     "peak.prob.bed.gz" for the ".dREG."-infixed outputs, or the literal
     "time.log" for the benchmark logs (which aren't dREG-infixed)."""
+    name = f"{lib}.time.log" if suffix == "time.log" else f"{lib}.dREG.{suffix}"
+
+    local = BENCHMARK_DATA_DIR / tool / name
+    if local.exists():
+        return local
+
     from huggingface_hub import hf_hub_download
 
-    name = f"{lib}.time.log" if suffix == "time.log" else f"{lib}.dREG.{suffix}"
     return Path(hf_hub_download(repo_id=HF_REPO, repo_type="dataset", filename=f"{tool}/{name}"))
 
 

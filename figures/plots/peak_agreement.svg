@@ -17,35 +17,35 @@ text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
 <text x="10" y="34" class="title">Agreement</text>
 <rect x="150" y="75" width="110" height="445" class="plot"/>
 <line x1="150" y1="520.0" x2="260" y2="520.0" class="grid"/>
-<text x="140" y="528.0" class="tick" text-anchor="end">0.9972</text>
-<line x1="150" y1="408.7" x2="260" y2="408.7" class="grid"/>
-<text x="140" y="416.7" class="tick" text-anchor="end">0.9979</text>
+<text x="140" y="528.0" class="tick" text-anchor="end">0.9975</text>
+<line x1="150" y1="408.8" x2="260" y2="408.8" class="grid"/>
+<text x="140" y="416.8" class="tick" text-anchor="end">0.9981</text>
 <line x1="150" y1="297.5" x2="260" y2="297.5" class="grid"/>
-<text x="140" y="305.5" class="tick" text-anchor="end">0.9986</text>
-<line x1="150" y1="186.3" x2="260" y2="186.3" class="grid"/>
-<text x="140" y="194.3" class="tick" text-anchor="end">0.9993</text>
+<text x="140" y="305.5" class="tick" text-anchor="end">0.9988</text>
+<line x1="150" y1="186.2" x2="260" y2="186.2" class="grid"/>
+<text x="140" y="194.2" class="tick" text-anchor="end">0.9994</text>
 <line x1="150" y1="75.0" x2="260" y2="75.0" class="grid"/>
 <text x="140" y="83.0" class="tick" text-anchor="end">1.0000</text>
 <line x1="150" y1="75.0" x2="260" y2="75.0" class="ref"/>
-<line x1="205.0" y1="265.1" x2="205.0" y2="240.8" class="stem"/>
-<line x1="205.0" y1="196.9" x2="205.0" y2="170.2" class="stem"/>
-<line x1="185.0" y1="265.1" x2="225.0" y2="265.1" class="stem"/>
-<line x1="185.0" y1="170.2" x2="225.0" y2="170.2" class="stem"/>
-<rect x="165.0" y="196.9" width="80.0" height="43.8" fill="#dce9f8" stroke="#174a6e" stroke-width="1.5"/>
-<line x1="165.0" y1="221.8" x2="245.0" y2="221.8" stroke="#174a6e" stroke-width="2"/>
-<circle cx="193.0" cy="439.9" r="7" class="mark"><title>G7: 0.997723</title></circle>
-<circle cx="181.0" cy="400.6" r="7" class="mark"><title>G6: 0.997968</title></circle>
-<circle cx="229.0" cy="265.1" r="7" class="mark"><title>K562_groseq: 0.998814</title></circle>
-<circle cx="181.0" cy="232.7" r="7" class="mark"><title>Jurkat_leChROseq: 0.999016</title></circle>
-<circle cx="193.0" cy="226.4" r="7" class="mark"><title>GM12878_groseq: 0.999055</title></circle>
-<circle cx="181.0" cy="226.1" r="7" class="mark"><title>G1: 0.999057</title></circle>
-<circle cx="229.0" cy="217.5" r="7" class="mark"><title>G5: 0.999111</title></circle>
-<circle cx="181.0" cy="206.2" r="7" class="mark"><title>Jurkat_ChROseq_1: 0.999181</title></circle>
-<circle cx="205.0" cy="197.7" r="7" class="mark"><title>G3: 0.999234</title></circle>
-<circle cx="193.0" cy="194.5" r="7" class="mark"><title>Jurkat_ChROseq: 0.999254</title></circle>
-<circle cx="181.0" cy="184.4" r="7" class="mark"><title>Jurkat_PROseq: 0.999317</title></circle>
-<circle cx="193.0" cy="170.2" r="7" class="mark"><title>Jurkat_ChROseq_2: 0.999406</title></circle>
+<line x1="205.0" y1="209.0" x2="205.0" y2="204.4" class="stem"/>
+<line x1="205.0" y1="176.5" x2="205.0" y2="158.8" class="stem"/>
+<line x1="185.0" y1="209.0" x2="225.0" y2="209.0" class="stem"/>
+<line x1="185.0" y1="158.8" x2="225.0" y2="158.8" class="stem"/>
+<rect x="165.0" y="176.5" width="80.0" height="27.9" fill="#dce9f8" stroke="#174a6e" stroke-width="1.5"/>
+<line x1="165.0" y1="189.5" x2="245.0" y2="189.5" stroke="#174a6e" stroke-width="2"/>
+<circle cx="193.0" cy="430.3" r="7" class="mark"><title>G7: 0.998019</title></circle>
+<circle cx="181.0" cy="422.8" r="7" class="mark"><title>G6: 0.998061</title></circle>
+<circle cx="229.0" cy="209.0" r="7" class="mark"><title>K562_groseq: 0.999253</title></circle>
+<circle cx="193.0" cy="202.9" r="7" class="mark"><title>GM12878_groseq: 0.999287</title></circle>
+<circle cx="205.0" cy="192.1" r="7" class="mark"><title>G3: 0.999347</title></circle>
+<circle cx="181.0" cy="189.8" r="7" class="mark"><title>G1: 0.999360</title></circle>
+<circle cx="181.0" cy="189.3" r="7" class="mark"><title>Jurkat_ChROseq_1: 0.999363</title></circle>
+<circle cx="181.0" cy="182.8" r="7" class="mark"><title>Jurkat_leChROseq: 0.999399</title></circle>
+<circle cx="229.0" cy="179.0" r="7" class="mark"><title>G5: 0.999420</title></circle>
+<circle cx="181.0" cy="168.8" r="7" class="mark"><title>Jurkat_PROseq: 0.999477</title></circle>
+<circle cx="193.0" cy="158.8" r="7" class="mark"><title>Jurkat_ChROseq: 0.999533</title></circle>
+<circle cx="193.0" cy="127.4" r="7" class="mark"><title>Jurkat_ChROseq_2: 0.999708</title></circle>
 <text x="30" y="297.5" class="axis" text-anchor="middle" transform="rotate(-90 30 297.5)">Jaccard index</text>
 <text x="205.0" y="575" class="axis" text-anchor="middle">pydreg/dREG</text>
-<text x="10" y="60" class="note" text-anchor="start">n=12 median=0.9991</text>
+<text x="10" y="60" class="note" text-anchor="start">n=12 median=0.9994</text>
 </svg>
