@@ -23,7 +23,9 @@ def main() -> None:
         dreg = parse_time_log(fetch("dreg", lib, "time.log"))
         pyd = parse_time_log(fetch("pydreg", lib, "time.log"))
         if dreg is None or pyd is None:
-            print(f"Skipping {lib}: dREG or pydreg run did not complete (see its time.log)")
+            print(
+                f"Skipping {lib}: dREG or pydreg run did not complete (see its time.log)"
+            )
             continue
         rows.append(
             {
@@ -46,7 +48,9 @@ def main() -> None:
         y_label="pydreg maximum RSS (GiB, log scale)",
         title="Peak memory",
         note="Below diagonal favors pydreg",
-        tooltip_fmt=lambda r: f'{r["library"]}: dREG {r["dreg_gib"]:.2f} GiB, pydreg {r["pydreg_gib"]:.2f} GiB',
+        tooltip_fmt=lambda r: (
+            f"{r['library']}: dREG {r['dreg_gib']:.2f} GiB, pydreg {r['pydreg_gib']:.2f} GiB"
+        ),
     )
     out = PLOTS_DIR / "memory.svg"
     out.write_text(svg + "\n")

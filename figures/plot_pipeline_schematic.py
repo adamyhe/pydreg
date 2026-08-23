@@ -37,8 +37,12 @@ LIGHT_GRAY = "#ededed"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent / "plots")
-    parser.add_argument("--formats", nargs="+", default=["svg", "pdf"], choices=["svg", "pdf"])
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path(__file__).parent / "plots"
+    )
+    parser.add_argument(
+        "--formats", nargs="+", default=["svg", "pdf"], choices=["svg", "pdf"]
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,10 +175,14 @@ def mini_infp(x: float, y: float, width: float, height: float) -> str:
             )
         for frac in plus_reads:
             rx = x + width * frac
-            parts.append(f'<path class="mini-thin" d="M {rx:g} {plus_y - tick:g} L {rx:g} {plus_y:g}"/>')
+            parts.append(
+                f'<path class="mini-thin" d="M {rx:g} {plus_y - tick:g} L {rx:g} {plus_y:g}"/>'
+            )
         for frac in minus_reads:
             rx = x + width * frac
-            parts.append(f'<path class="mini-thin" d="M {rx:g} {minus_y:g} L {rx:g} {minus_y + tick:g}"/>')
+            parts.append(
+                f'<path class="mini-thin" d="M {rx:g} {minus_y:g} L {rx:g} {minus_y + tick:g}"/>'
+            )
         if kept:
             parts.append(
                 f'<circle cx="{bx + bw / 2:g}" cy="{(plus_y + minus_y) / 2:g}" r="{height * 0.06:g}" fill="{RED}"/>'
@@ -198,12 +206,16 @@ def draw_feature_vector(x: float, y: float, width: float, height: float) -> str:
     bar_gap = bar_w * 0.3
     max_bar = height * 0.72
     baseline = y + height * 0.5 + max_bar / 2
-    parts = [f'<path class="mini-thin" d="M {x:g} {baseline:g} L {x + width:g} {baseline:g}"/>']
+    parts = [
+        f'<path class="mini-thin" d="M {x:g} {baseline:g} L {x + width:g} {baseline:g}"/>'
+    ]
     for i, color in enumerate(colors):
         gx = x + i * group_w + (group_w - (2 * bar_w + bar_gap)) / 2
         ph = max_bar * plus_hs[i]
         mh = max_bar * minus_hs[i]
-        parts.append(f'<rect x="{gx:g}" y="{baseline - ph:g}" width="{bar_w:g}" height="{ph:g}" fill="{color}"/>')
+        parts.append(
+            f'<rect x="{gx:g}" y="{baseline - ph:g}" width="{bar_w:g}" height="{ph:g}" fill="{color}"/>'
+        )
         parts.append(
             f'<rect x="{gx + bar_w + bar_gap:g}" y="{baseline - mh:g}" width="{bar_w:g}" height="{mh:g}" '
             f'fill="{color}" opacity="0.55"/>'
@@ -242,7 +254,9 @@ def mini_features(x: float, y: float, width: float, height: float) -> str:
                 f'stroke="{color}" stroke-width="1.4" fill="none"/>'
             )
 
-    parts.append(f'<path class="step-arrow" d="M {x + left_w + 3:g} {mid_y:g} L {right_x - 3:g} {mid_y:g}"/>')
+    parts.append(
+        f'<path class="step-arrow" d="M {x + left_w + 3:g} {mid_y:g} L {right_x - 3:g} {mid_y:g}"/>'
+    )
     parts.append(draw_feature_vector(right_x, y, right_w, height))
     return "\n".join(parts)
 
@@ -260,22 +274,36 @@ def mini_svr(x: float, y: float, width: float, height: float) -> str:
     plot_y = y + height * 0.15
     plot_h = height * 0.70
 
-    parts.append(f'<path class="step-arrow" d="M {vec_x + vec_w + 3:g} {mid_y:g} L {plot_x - 3:g} {mid_y:g}"/>')
+    parts.append(
+        f'<path class="step-arrow" d="M {vec_x + vec_w + 3:g} {mid_y:g} L {plot_x - 3:g} {mid_y:g}"/>'
+    )
     parts.append(
         f'<rect x="{plot_x:g}" y="{plot_y:g}" width="{plot_w:g}" height="{plot_h:g}" '
         f'fill="#ffffff" opacity="0.6" stroke="{DARK}" stroke-width="0.6"/>'
     )
-    pts = [(0.0, 0.55), (0.20, 0.62), (0.40, 0.50), (0.55, 0.15), (0.70, 0.55), (0.85, 0.45), (1.0, 0.50)]
+    pts = [
+        (0.0, 0.55),
+        (0.20, 0.62),
+        (0.40, 0.50),
+        (0.55, 0.15),
+        (0.70, 0.55),
+        (0.85, 0.45),
+        (1.0, 0.50),
+    ]
     d = " ".join(
         ("M" if i == 0 else "L") + f" {plot_x + plot_w * px:g} {plot_y + plot_h * py:g}"
         for i, (px, py) in enumerate(pts)
     )
     parts.append(f'<path d="{d}" fill="none" stroke="{BLUE}" stroke-width="1.3"/>')
     thresh_y = plot_y + plot_h * 0.28
-    parts.append(f'<path class="mini-dashed" d="M {plot_x:g} {thresh_y:g} L {plot_x + plot_w:g} {thresh_y:g}"/>')
+    parts.append(
+        f'<path class="mini-dashed" d="M {plot_x:g} {thresh_y:g} L {plot_x + plot_w:g} {thresh_y:g}"/>'
+    )
     peak_x = plot_x + plot_w * 0.55
     peak_y = plot_y + plot_h * 0.10
-    parts.append(f'<circle cx="{peak_x:g}" cy="{peak_y:g}" r="{height * 0.06:g}" fill="{RED}"/>')
+    parts.append(
+        f'<circle cx="{peak_x:g}" cy="{peak_y:g}" r="{height * 0.06:g}" fill="{RED}"/>'
+    )
     return "\n".join(parts)
 
 
@@ -307,7 +335,9 @@ def mini_rf_split(x: float, y: float, width: float, height: float) -> str:
         f'<rect x="{split:g}" y="{before_y:g}" width="{after_x + after_w - split:g}" height="{box_h:g}" '
         f'fill="{LIGHT_BLUE}" stroke="{DARK}" stroke-width="0.9"/>'
     )
-    parts.append(f'<path class="mini-red" d="M {split:g} {before_y - 3:g} L {split:g} {before_y + box_h + 3:g}"/>')
+    parts.append(
+        f'<path class="mini-red" d="M {split:g} {before_y - 3:g} L {split:g} {before_y + box_h + 3:g}"/>'
+    )
     parts.append(
         f'<text class="step-subtitle" x="{after_x + after_w / 2:g}" y="{before_y + box_h + height * 0.18:g}" text-anchor="middle">split</text>'
     )
@@ -320,7 +350,9 @@ def mini_output(x: float, y: float, width: float, height: float) -> str:
     axis_x0 = x
     axis_x1 = x + width * 0.56
     block_h = height * 0.30
-    parts = [f'<path class="mini-line" d="M {axis_x0:g} {mid_y:g} L {axis_x1:g} {mid_y:g}"/>']
+    parts = [
+        f'<path class="mini-line" d="M {axis_x0:g} {mid_y:g} L {axis_x1:g} {mid_y:g}"/>'
+    ]
     blocks = [(0.02, 0.16, True), (0.24, 0.34, False), (0.42, 0.54, True)]
     for start, end, kept in blocks:
         bx = axis_x0 + (axis_x1 - axis_x0) * start
@@ -336,7 +368,9 @@ def mini_output(x: float, y: float, width: float, height: float) -> str:
                 f'<path class="mini-thin" d="M {bx:g} {mid_y - block_h / 2:g} L {bx + bw:g} {mid_y + block_h / 2:g} '
                 f'M {bx:g} {mid_y + block_h / 2:g} L {bx + bw:g} {mid_y - block_h / 2:g}"/>'
             )
-    parts.append(f'<path class="step-arrow" d="M {axis_x1 + 3:g} {mid_y:g} L {x + width * 0.76:g} {mid_y:g}"/>')
+    parts.append(
+        f'<path class="step-arrow" d="M {axis_x1 + 3:g} {mid_y:g} L {x + width * 0.76:g} {mid_y:g}"/>'
+    )
     doc_x = x + width * 0.80
     doc_w = width * 0.18
     doc_h = height * 0.85
@@ -347,13 +381,18 @@ def mini_output(x: float, y: float, width: float, height: float) -> str:
     )
     for i in range(3):
         ly = doc_y + doc_h * (0.3 + 0.25 * i)
-        parts.append(f'<path class="mini-thin" d="M {doc_x + 2:g} {ly:g} L {doc_x + doc_w - 2:g} {ly:g}"/>')
+        parts.append(
+            f'<path class="mini-thin" d="M {doc_x + 2:g} {ly:g} L {doc_x + doc_w - 2:g} {ly:g}"/>'
+        )
     return "\n".join(parts)
 
 
 def write_pdf(svg_path: Path, pdf_path: Path) -> None:
     try:
-        subprocess.run(["rsvg-convert", "-f", "pdf", "-o", str(pdf_path), str(svg_path)], check=True)
+        subprocess.run(
+            ["rsvg-convert", "-f", "pdf", "-o", str(pdf_path), str(svg_path)],
+            check=True,
+        )
     except FileNotFoundError:
         print("Skipped PDF: rsvg-convert is not installed")
         return
@@ -361,7 +400,12 @@ def write_pdf(svg_path: Path, pdf_path: Path) -> None:
 
 
 def escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 if __name__ == "__main__":

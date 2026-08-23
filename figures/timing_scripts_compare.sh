@@ -2,7 +2,7 @@
 # Reports per-library peak agreement between real dREG and pydreg via
 # `bedtools jaccard` on their *.dREG.peak.prob.bed.gz outputs. Run
 # figures/timing_scripts_dreg_apptainer.sh and
-# figures/timing_scripts_pydreg_only.sh first.
+# figures/timing_scripts_pydreg.sh first.
 #
 # Requires: bedtools on PATH.
 #

@@ -78,7 +78,9 @@ def fetch(tool: str, lib: str, suffix: str) -> Path:
 
     from huggingface_hub import hf_hub_download
 
-    return Path(hf_hub_download(repo_id=HF_REPO, repo_type="dataset", filename=f"{tool}/{name}"))
+    return Path(
+        hf_hub_download(repo_id=HF_REPO, repo_type="dataset", filename=f"{tool}/{name}")
+    )
 
 
 def parse_elapsed(value: str) -> float:
@@ -93,14 +95,23 @@ def parse_time_log(path: Path) -> dict | None:
     complete (e.g. a run interrupted by SIGINT) so callers can skip it
     rather than plot garbage."""
     text = path.read_text()
-    if re.search(r"^Command (?:exited with non-zero status|terminated by signal)", text, re.MULTILINE):
+    if re.search(
+        r"^Command (?:exited with non-zero status|terminated by signal)",
+        text,
+        re.MULTILINE,
+    ):
         return None
     status = re.search(r"Exit status:\s*(\d+)", text)
-    elapsed = re.search(r"Elapsed \(wall clock\) time \(h:mm:ss or m:ss\):\s*(\S+)", text)
+    elapsed = re.search(
+        r"Elapsed \(wall clock\) time \(h:mm:ss or m:ss\):\s*(\S+)", text
+    )
     rss = re.search(r"Maximum resident set size \(kbytes\):\s*(\d+)", text)
     if not (status and status.group(1) == "0" and elapsed and rss):
         return None
-    return {"wall_seconds": parse_elapsed(elapsed.group(1)), "rss_kb": int(rss.group(1))}
+    return {
+        "wall_seconds": parse_elapsed(elapsed.group(1)),
+        "rss_kb": int(rss.group(1)),
+    }
 
 
 def escape(value: str) -> str:
@@ -121,7 +132,20 @@ def nice_ticks(lo: float, hi: float, n: int = 5) -> list[float]:
     return [lo + i * step for i in range(n)]
 
 
-def scatter_panel_svg(rows, x_key, y_key, bounds, ticks, x_label, y_label, title, note, tooltip_fmt, width=560, height=560):
+def scatter_panel_svg(
+    rows,
+    x_key,
+    y_key,
+    bounds,
+    ticks,
+    x_label,
+    y_label,
+    title,
+    note,
+    tooltip_fmt,
+    width=560,
+    height=560,
+):
     """One self-contained log-log scatter SVG: an equality diagonal plus one
     point per row, styled identically to the original combined
     dreg-vs-pydreg comparison (figures/legacy/plot_timing_comparison.py),
@@ -158,7 +182,9 @@ def scatter_panel_svg(rows, x_key, y_key, bounds, ticks, x_label, y_label, title
     y1 = log_point(low, low, high, margin_top, plot_h, invert=True)
     x2 = log_point(high, low, high, margin_left, plot_w)
     y2 = log_point(high, low, high, margin_top, plot_h, invert=True)
-    parts.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" class="diagonal"/>')
+    parts.append(
+        f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" class="diagonal"/>'
+    )
 
     for row in rows:
         x = log_point(row[x_key], low, high, margin_left, plot_w)

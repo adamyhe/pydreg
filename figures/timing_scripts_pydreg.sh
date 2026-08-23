@@ -3,7 +3,7 @@
 # across the 12-library benchmark set. Run figures/timing_scripts_download.sh
 # first to fetch the bigWigs.
 #
-# Usage: bash figures/timing_scripts_pydreg_only.sh
+# Usage: bash figures/timing_scripts_pydreg.sh
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/timing_scripts_common.sh"

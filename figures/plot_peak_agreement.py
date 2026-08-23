@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from _common import LIBRARIES, PLOTS_DIR, escape, fetch, nice_ticks, SVG_STYLE
+from _common import LIBRARIES, PLOTS_DIR, SVG_STYLE, escape, fetch, nice_ticks
 
 
 def sorted_bed(path: Path) -> str:
@@ -96,17 +96,23 @@ def box_whisker_svg(rows: list[dict]) -> str:
         "<title>pydreg vs dREG called-peak agreement (Jaccard index)</title>",
         SVG_STYLE,
         f'<rect width="{width}" height="{height}" fill="#fff"/>',
-        f'<text x="10" y="34" class="title">Agreement</text>',
+        '<text x="10" y="34" class="title">Agreement</text>',
         f'<rect x="{margin_left}" y="{margin_top}" width="{plot_w}" height="{plot_h}" class="plot"/>',
     ]
 
     for tick in nice_ticks(lo, hi, 5):
         ty = sy(tick)
-        parts.append(f'<line x1="{margin_left}" y1="{ty:.1f}" x2="{right}" y2="{ty:.1f}" class="grid"/>')
-        parts.append(f'<text x="{margin_left - 10}" y="{ty + 8:.1f}" class="tick" text-anchor="end">{tick:.4f}</text>')
+        parts.append(
+            f'<line x1="{margin_left}" y1="{ty:.1f}" x2="{right}" y2="{ty:.1f}" class="grid"/>'
+        )
+        parts.append(
+            f'<text x="{margin_left - 10}" y="{ty + 8:.1f}" class="tick" text-anchor="end">{tick:.4f}</text>'
+        )
 
     ref_y = sy(1.0)
-    parts.append(f'<line x1="{margin_left}" y1="{ref_y:.1f}" x2="{right}" y2="{ref_y:.1f}" class="ref"/>')
+    parts.append(
+        f'<line x1="{margin_left}" y1="{ref_y:.1f}" x2="{right}" y2="{ref_y:.1f}" class="ref"/>'
+    )
 
     y_lo_w, y_hi_w = sy(whisker_lo), sy(whisker_hi)
     y_q1, y_q3, y_med = sy(q1), sy(q3), sy(med)
@@ -134,7 +140,7 @@ def box_whisker_svg(rows: list[dict]) -> str:
         x = cx + jitter
         parts.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" class="mark">'
-            f'<title>{escape(row["library"])}: {row["jaccard"]:.6f}</title></circle>'
+            f"<title>{escape(row['library'])}: {row['jaccard']:.6f}</title></circle>"
         )
 
     parts.extend(

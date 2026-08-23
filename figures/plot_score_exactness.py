@@ -35,8 +35,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-
-from _common import LIBRARIES, PLOTS_DIR, escape, fetch, nice_ticks, SVG_STYLE
+from _common import LIBRARIES, PLOTS_DIR, SVG_STYLE, escape, fetch, nice_ticks
 
 
 def paired_scores(lib: str) -> tuple[np.ndarray, np.ndarray]:
@@ -146,10 +145,14 @@ def density_heatmap_svg(
 
     for tick in nice_ticks(x_lo, x_hi, 5):
         tx = sx(tick)
-        parts.append(f'<text x="{tx:.1f}" y="{bottom + 22}" class="tick" text-anchor="middle">{x_tick_fmt.format(tick)}</text>')
+        parts.append(
+            f'<text x="{tx:.1f}" y="{bottom + 22}" class="tick" text-anchor="middle">{x_tick_fmt.format(tick)}</text>'
+        )
     for tick in nice_ticks(y_lo, y_hi, 5):
         ty = sy(tick)
-        parts.append(f'<text x="{margin_left - 10}" y="{ty + 4:.1f}" class="tick" text-anchor="end">{y_tick_fmt.format(tick)}</text>')
+        parts.append(
+            f'<text x="{margin_left - 10}" y="{ty + 4:.1f}" class="tick" text-anchor="end">{y_tick_fmt.format(tick)}</text>'
+        )
 
     parts.extend(
         [
@@ -163,7 +166,9 @@ def density_heatmap_svg(
     return "\n".join(parts)
 
 
-def scatter_view(x: np.ndarray, y: np.ndarray, n: int, r: float, max_abs_diff: float, bins: int = 400) -> str:
+def scatter_view(
+    x: np.ndarray, y: np.ndarray, n: int, r: float, max_abs_diff: float, bins: int = 400
+) -> str:
     """Joint density scatter, dREG score vs pydreg score, against the y=x
     diagonal. At fine bin resolution to minimize (not eliminate) the
     staircase artifact described in this module's docstring."""
@@ -186,7 +191,14 @@ def scatter_view(x: np.ndarray, y: np.ndarray, n: int, r: float, max_abs_diff: f
     )
 
 
-def residual_view(x: np.ndarray, diff: np.ndarray, n: int, r: float, max_abs_diff: float, bins: int = 200) -> str:
+def residual_view(
+    x: np.ndarray,
+    diff: np.ndarray,
+    n: int,
+    r: float,
+    max_abs_diff: float,
+    bins: int = 200,
+) -> str:
     """Bland-Altman-style residual plot: dREG score vs (pydreg - dREG).
     Zoomed to the true max|diff| (not a tight percentile) so the plot shows
     the actual shape of the distribution -- dense near zero, tapering
@@ -235,10 +247,14 @@ def main() -> None:
     median_abs_diff = float(np.median(np.abs(diff)))
     r = float(np.corrcoef(dreg_scores, pydreg_scores)[0, 1])
     print(f"n={n:,} pooled positions across {len(LIBRARIES)} libraries")
-    print(f"Pearson r={r:.6f}, max|diff|={max_abs_diff:.6g}, median|diff|={median_abs_diff:.6g}")
+    print(
+        f"Pearson r={r:.6f}, max|diff|={max_abs_diff:.6g}, median|diff|={median_abs_diff:.6g}"
+    )
 
     scatter_out = PLOTS_DIR / "score_exactness_scatter.svg"
-    scatter_out.write_text(scatter_view(dreg_scores, pydreg_scores, n, r, max_abs_diff) + "\n")
+    scatter_out.write_text(
+        scatter_view(dreg_scores, pydreg_scores, n, r, max_abs_diff) + "\n"
+    )
     print(f"Wrote {scatter_out}")
 
     residual_out = PLOTS_DIR / "score_exactness_residual.svg"
