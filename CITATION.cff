@@ -6,7 +6,7 @@ message: >-
   the README's "Citation" section) to credit the underlying method.
 type: software
 title: pydreg
-version: 0.3.0
+version: 0.3.1
 date-released: '2026-08-23'
 abstract: >-
   An inference-only Python port of dREG (Danko Lab) for detecting active
