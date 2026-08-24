@@ -156,18 +156,18 @@ def detect_backend():
     required for it, and as the input to _sklearn_cross_check_detail's
     cupy-smoke-test diagnostic."""
     if not _cupy_installed():
-        logger.info("cupy not installed -- install pydreg[gpu] for GPU scoring")
+        logger.debug("cupy not installed -- install pydreg[gpu] for GPU scoring")
     elif not _cuda_runtime_available():
-        logger.info(
+        logger.warning(
             "cupy installed but no usable CUDA GPU detected at runtime -- falling back to CPU"
         )
     else:
         return "cupy"
 
     if not _mlx_installed():
-        logger.info("mlx not installed -- install pydreg[mlx] for Apple Silicon GPU scoring")
+        logger.debug("mlx not installed -- install pydreg[mlx] for Apple Silicon GPU scoring")
     elif not _mlx_gpu_available():
-        logger.info(
+        logger.warning(
             "mlx installed but no usable Metal GPU detected at runtime -- falling back to CPU"
         )
     else:

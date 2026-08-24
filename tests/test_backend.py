@@ -16,7 +16,7 @@ def test_detect_backend_reports_missing_cupy(monkeypatch, caplog):
     # machine running this test (e.g. a real Apple Silicon dev box).
     monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
 
-    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+    with caplog.at_level(logging.DEBUG, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
     assert "cupy not installed" in caplog.text
@@ -50,7 +50,7 @@ def test_detect_backend_reports_no_cuda_without_probe_details(monkeypatch, caplo
     # machine running this test (e.g. a real Apple Silicon dev box).
     monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
 
-    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+    with caplog.at_level(logging.WARNING, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
     assert "cupy installed but no usable CUDA GPU detected at runtime -- falling back to CPU" in caplog.text
@@ -61,7 +61,7 @@ def test_detect_backend_reports_missing_mlx(monkeypatch, caplog):
     monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
     monkeypatch.setattr(backend, "_mlx_installed", lambda: False)
 
-    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+    with caplog.at_level(logging.DEBUG, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
     assert "mlx not installed" in caplog.text
@@ -73,7 +73,7 @@ def test_detect_backend_reports_no_metal_gpu_without_probe_details(monkeypatch, 
     monkeypatch.setattr(backend, "_mlx_installed", lambda: True)
     monkeypatch.setattr(backend, "_mlx_gpu_available", lambda: False)
 
-    with caplog.at_level(logging.INFO, logger="pydreg.backend"):
+    with caplog.at_level(logging.WARNING, logger="pydreg.backend"):
         assert backend.detect_backend() == "numpy"
 
     assert "mlx installed but no usable Metal GPU detected at runtime -- falling back to CPU" in caplog.text
