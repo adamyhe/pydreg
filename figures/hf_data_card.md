@@ -71,9 +71,9 @@ All 12 are published PRO-seq/GRO-seq/ChRO-seq libraries from GEO:
   (a bare `run_dREG.bsh` call), not the container described below.
 - **pydreg**: this repo's Python port, same model weights (converted to
   safetensors, see `adamyhe/pydreg` on the Hub), run with `--cores 16`.
-- Both tools ran on the same machine (NVIDIA P100 GPU + 16 Intel Xeon Silver
-  4108 CPU cores), same bigWig inputs, one library at a time, wrapped in
-  `/usr/bin/time -v` for wall-clock and peak-RSS logging.
+- Both tools ran on the same machine (NVIDIA Titan Xp GPU + 16 CPU cores),
+  same bigWig inputs, one library at a time, wrapped in `/usr/bin/time -v`
+  for wall-clock and peak-RSS logging.
 
 Exact invocations: [`figures/timing_scripts_download.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_download.sh)
 (fetches/rebuilds the 12 input bigWigs from GEO) and
