@@ -1,4 +1,4 @@
-"""Tiered cupy -> scikit-learn -> NumPy scoring backend dispatch (see
+"""Tiered cupy/mlx -> NumPy scoring backend dispatch (see
 docs/PLANNING.md "Backend dispatch" / "Batching"). pydreg.pipeline never
 branches on backend -- it only ever calls a Scorer's uniform .predict().
 
