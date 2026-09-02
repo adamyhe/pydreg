@@ -3917,3 +3917,89 @@ constrained core count -- not something to act on without repeated
 trials at a normal core count, the same bar every other default change
 in this log was held to. Left as an open, flagged-but-not-investigated
 question rather than changed on this evidence.
+
+## 2026-09-02 -- generalized the GPU-profiling harness from one library to the whole 12-library sweep
+
+Tooling/figure change, not a pydreg change: the 2026-08-18 entries above
+profiled exactly one library (Jurkat_PROseq), and every conclusion in
+them rests on that single pair. Extending the same measurement across
+all 12 benchmark libraries turned out to need more than a shell loop,
+because the capture side generalized for free but the analysis and
+figure side did not.
+
+**What was already fine.** `profile_gpu.sh` takes an arbitrary
+`OUTDIR LABEL -- COMMAND`, so per-library labels (`dreg_<LIB>` /
+`pydreg_<LIB>`) needed no change at all, and `analyze_gpu_profile.py`
+already accepted arbitrary label sets. Running the analyzer once per
+library rather than once over all 24 labels was a deliberate choice, not
+a limitation: its output filename is `summary_{'_vs_'.join(labels)}.json`,
+which for 24 labels would be one ~250-character filename instead of 12
+tidy per-library ones.
+
+**What was hardcoded to the single capture.** All three plot scripts
+read a literal `gpu_out/summary_dreg_vs_pydreg2.json` and the literal
+labels `dreg`/`pydreg2`, and `plot_gpu_efficiency.py` additionally
+hardcoded `POSITIONS = 5_617_218` -- the informative-position count of
+that one library, the denominator of every per-operation number the
+panel draws. Pointing those at a 12-library sweep without changing them
+would have divided each library's operation counts by another library's
+position count. Both tools already print their own count unprompted
+(dREG's `Genome Loci=`, pydreg's `N informative positions found`), so
+the analyzer now parses it into `summary["positions"]` and the figures
+use each library's own value.
+
+**A check added while doing it**: the analyzer now errors if a pair's
+two runs report *different* position counts. Every ratio in these
+figures (positions per kernel launch, per memcpy call, busy-time
+ratios) is only meaningful if both sides scored the identical position
+set -- the 2026-08-18 comparison confirmed that by hand from the two
+logs, and there was nothing stopping a mispaired sweep from silently
+producing a plausible-looking dumbbell instead of an obvious error.
+
+**Figure redesign, one row per library.** `plot_gpu_utilization.py` now
+draws a separate track per library per tool, each keeping its own
+x-axis (dREG's phase runs ~6.5x longer than pydreg's on the same
+library, and libraries differ again on top of that -- a shared axis
+would crush the short tracks into slivers and destroy the
+sawtooth-vs-plateau shape the panel exists to show).
+`plot_gpu_time_breakdown.py` switched from vertical to horizontal bars,
+a pair per library on one shared time axis: with 12 libraries the
+category axis carries names like `Jurkat_ChROseq_1`, which read across
+as row labels but would need rotating as vertical-bar x-labels. Its
+per-bar kernel/memcpy count annotations moved into tooltips (24 bars'
+worth would swamp the figure; `plot_gpu_efficiency.py` is the panel
+that turns those counts into a claim anyway).
+`plot_gpu_efficiency.py` keeps its dumbbell-on-log-axis form, one
+dumbbell per library per operation type.
+
+**Verification.** No new real data was captured -- the 12-library sweep
+is the user's to run on the GPU host. Against the one real capture, all
+three regenerated figures reproduce the numbers already written into
+the entries above exactly: 8.6 vs. 213.7 positions/launch (24.9x), 4.2
+vs. 4,058.7 positions/memcpy-call (972.0x), dREG idle 659.8s + kernel
+1,767.1s + memcpy 3.9s vs. pydreg 23.9s/414.5s/0.7s, busy-only ratio
+4.27x. The 12-row layouts were checked by rasterizing them against a
+synthetic 12-library fixture built by rescaling the real capture (a
+layout test only, kept in a scratch directory, never committed and not
+a result) -- which is how two real layout bugs were caught before
+shipping: the efficiency panel's legend overlapped its subtitle, and
+the breakdown panel legended a memcpy color whose segment is sub-pixel
+at any sane figure width (now labeled "<1% of every bar" when that
+holds). All three degrade gracefully to a single library.
+
+**Sweep driver**: `figures/gpu_profiling/profile_gpu_all.sh` runs both
+tools across all 12 libraries strictly sequentially (two profiled jobs
+on one node would contaminate each other's dmon samples and idle-gap
+analysis, which is the whole measurement), preflights every bigWig and
+model path up front rather than discovering a missing input eleven
+hours in, and skips already-captured libraries so an interrupted sweep
+resumes. Budget ~8-15 hours of exclusive GPU time: the Jurkat_PROseq
+pair was ~43min dREG + ~22min pydreg, and pydreg has no score-only mode,
+so each of its runs also carries ~8-9min of CPU peak-calling that the
+analyzer then windows back out.
+
+Also fixed while here: this README documented `run_predict.bsh`'s
+arguments as plus, minus, *model, out-prefix*, cores, gpu. The real
+capture's own `dreg.log` records the actual order as plus, minus,
+*out-prefix, model*, cores, gpu -- the README example, had anyone run it
+verbatim, would have swapped the two.

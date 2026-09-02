@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """Panel: per-operation efficiency -- positions processed per GPU kernel
-launch and per Host-to-Device memcpy call, dREG vs pydreg, same
-5,617,218-position phase. This is the direct "inefficiency" chart the
-other two panels don't make explicit: plot_gpu_utilization.py shows the
-GPU sitting idle (a scheduling symptom), plot_gpu_time_breakdown.py shows
-totals and raw counts side by side, but neither computes the number that
-actually says "each individual dREG operation does far less useful work
-than pydreg's" -- this does.
+launch and per Host-to-Device memcpy call, dREG vs pydreg, one row per
+library across the full 12-library benchmark. This is the direct
+"inefficiency" chart the other two panels don't make explicit:
+plot_gpu_utilization.py shows the GPU sitting idle (a scheduling
+symptom), plot_gpu_time_breakdown.py shows totals and raw counts side by
+side, but neither computes the number that actually says "each individual
+dREG operation does far less useful work than pydreg's" -- this does.
 
-A dot plot on a log-scale axis, not a bar chart: the two tools differ by
-~25x (kernel) and ~972x (memcpy), and bar *length* under a log scale no
+Dot plots on a log-scale axis, not bar charts: the two tools differ by
+one-to-three orders of magnitude, and bar *length* under a log scale no
 longer represents proportional magnitude the way position along a log
 axis does -- the same reason figures/_common.py's scatter panels use
 log-scale point marks rather than log-scale bars.
 
-Reads gpu_out/summary_dreg_vs_pydreg2.json (produced by
-analyze_gpu_profile.py against real profiling data) -- run that first if
-this file doesn't exist.
+Each library's position count is read from its own runs (the analyzer
+parses it out of both tools' logs and cross-checks the two agree), so the
+per-operation numbers are per-library rather than divided by one
+hardcoded constant.
+
+Reads gpu_out/summary_dreg_<LIB>_vs_pydreg_<LIB>.json, as produced by
+analyze_gpu_profile.py -- run that first.
 
 Usage:
     python3 figures/gpu_profiling/plot_gpu_efficiency.py
@@ -24,41 +28,30 @@ Usage:
 
 from __future__ import annotations
 
-import html
-import json
+import argparse
 import math
+import statistics
+import sys
 from pathlib import Path
 
-HERE = Path(__file__).parent
-PLOTS_DIR = HERE.parent / "plots"
-SUMMARY_PATH = HERE / "gpu_out" / "summary_dreg_vs_pydreg2.json"
-POSITIONS = 5_617_218  # confirmed identical both sides -- see docs/PERF_LOG.md
+sys.path.insert(0, str(Path(__file__).parent))
+from _gpu_common import (  # noqa: E402
+    COLOR_DREG,
+    COLOR_PYDREG,
+    SVG_STYLE,
+    add_common_args,
+    escape,
+    resolve_pairs,
+    write_svg,
+)
 
-# Same tool-identity colors as plot_gpu_utilization.py (this panel is
-# also a dREG-vs-pydreg comparison, not a time-type breakdown like
-# plot_gpu_time_breakdown.py's gray/aqua/violet) -- validated together
-# via the dataviz skill's validate_palette.js.
-COLOR_DREG = "#eb6834"
-COLOR_PYDREG = "#2a78d6"
+ROW_H = 26
+PANEL_GAP = 78
 
-SVG_STYLE = """
-<style>
-text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
-.title { font-size: 26px; font-weight: 600; }
-.subtitle { font-size: 17px; fill: #5f6368; }
-.rowlabel { font-size: 19px; font-weight: 600; }
-.tick { font-size: 15px; fill: #5f6368; }
-.value { font-size: 16px; font-weight: 600; }
-.gap { font-size: 16px; fill: #5f6368; }
-.legend { font-size: 17px; }
-.grid { stroke: #e3e6e8; stroke-width: 1; }
-.connector { stroke: #c7c6bd; stroke-width: 2; }
-</style>
-""".strip()
-
-
-def escape(value):
-    return html.escape(str(value))
+PANELS = [
+    ("Positions per kernel launch", "kernel", "positions/launch"),
+    ("Positions per H2D memcpy call", "memcpy", "positions/call"),
+]
 
 
 def log_x(value, low, high, x0, w):
@@ -66,116 +59,174 @@ def log_x(value, low, high, x0, w):
     return x0 + frac * w
 
 
-def load_metrics(summary):
-    by_label = {s["label"]: s for s in summary}
-    out = {}
-    for label in ("dreg", "pydreg2"):
+def load_metrics(pair):
+    """Per-operation efficiency for one library's two runs.
+
+    The dominant kernel (rows are pre-sorted by total time descending, so
+    index 0) and the Host-to-Device memcpy specifically -- matching exactly
+    the statistic already vetted into docs/PERF_LOG.md and README.md, not a
+    sum across every kernel/memcpy type, which would be a different and
+    un-vetted number that silently disagreed with the prose.
+    """
+    by_label = pair.load_summary()
+    positions = pair.positions(by_label)
+    if positions is None:
+        print(
+            f"note: [{pair.library}] neither log states an informative-position "
+            "count -- skipping (per-operation efficiency needs it)"
+        )
+        return None
+
+    out = {"positions": positions}
+    for tool, label in (("dreg", pair.dreg_label), ("pydreg", pair.pydreg_label)):
         s = by_label[label]
+        if not s.get("nsys_cuda_gpu_kern_sum"):
+            print(
+                f"note: [{pair.library}] {label} has no nsys kernel data "
+                "(captured without nsys on PATH?) -- skipping library"
+            )
+            return None
         kern = s["nsys_cuda_gpu_kern_sum"][0]
-        h2d = next(r for r in s["nsys_cuda_gpu_mem_time_sum"] if "Host-to-Device" in r["Name"])
-        out[label] = {
-            "kernel_pos_per_op": POSITIONS / kern["Instances"],
-            "kernel_ns_per_op": kern["Avg (ns)"],
-            "memcpy_pos_per_op": POSITIONS / h2d["Instances"],
-            "memcpy_ns_per_op": h2d["Avg (ns)"],
+        h2d = next(
+            (r for r in s["nsys_cuda_gpu_mem_time_sum"] if "Host-to-Device" in r["Name"]),
+            None,
+        )
+        if h2d is None:
+            print(f"note: [{pair.library}] {label} has no H2D memcpy rows -- skipping")
+            return None
+        out[tool] = {
+            "kernel": positions / kern["Instances"],
+            "kernel_ns": kern["Avg (ns)"],
+            "kernel_name": kern["Name"],
+            "memcpy": positions / h2d["Instances"],
+            "memcpy_ns": h2d["Avg (ns)"],
         }
     return out
 
 
+def axis_bounds(values):
+    """Decade-aligned log-axis bounds enclosing every plotted value, with
+    a half-decade of breathing room so no dot lands on the frame."""
+    low = 10 ** math.floor(math.log10(min(values)) - 0.15)
+    high = 10 ** math.ceil(math.log10(max(values)) + 0.15)
+    return low, high
+
+
 def main():
-    summary = json.loads(SUMMARY_PATH.read_text())
-    m = load_metrics(summary)
-    dreg, pydreg = m["dreg"], m["pydreg2"]
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_common_args(parser)
+    args = parser.parse_args()
 
-    rows = [
-        ("Kernel launch", "kernel_pos_per_op", "kernel_ns_per_op", "positions/launch"),
-        ("H2D memcpy call", "memcpy_pos_per_op", "memcpy_ns_per_op", "positions/call"),
-    ]
+    pairs = resolve_pairs(args, require="summary")
+    rows = [(p.library, m) for p in pairs if (m := load_metrics(p))]
+    if not rows:
+        raise SystemExit("no library had usable nsys kernel/memcpy data to plot")
 
-    width, height = 720, 380
-    margin_left, margin_top, margin_right, margin_bottom = 210, 110, 60, 60
+    keys = [key for _, key, _ in PANELS]
+    low, high = axis_bounds(
+        [m[tool][key] for _, m in rows for tool in ("dreg", "pydreg") for key in keys]
+    )
+    ticks = [10 ** e for e in range(int(math.log10(low)), int(math.log10(high)) + 1)]
+
+    width = 960
+    margin_left, margin_right = 196, 122
+    top_margin, bottom_margin = 136, 56
+    legend_y = 86  # below the subtitle (y=58), above the first panel title
     plot_w = width - margin_left - margin_right
-    plot_h = height - margin_top - margin_bottom
-    row_h = plot_h / len(rows)
+    panel_h = len(rows) * ROW_H
+    height = top_margin + 2 * panel_h + PANEL_GAP + bottom_margin
 
-    low, high = 1, 10000
-    ticks = [1, 10, 100, 1000, 10000]
+    median_gaps = {
+        key: statistics.median(m["pydreg"][key] / m["dreg"][key] for _, m in rows)
+        for _, key, _ in PANELS
+    }
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img">',
-        "<title>Positions processed per GPU operation: dREG vs pydreg, log scale</title>",
+        "<title>Positions processed per GPU operation: dREG vs pydreg, per library, "
+        "log scale</title>",
         SVG_STYLE,
         f'<rect width="{width}" height="{height}" fill="#fff"/>',
         f'<text x="{margin_left}" y="34" class="title">Work done per GPU operation</text>',
-        f'<text x="{margin_left}" y="58" class="subtitle">Same 5,617,218-position phase '
-        "-- log scale, higher = more efficient</text>",
+        f'<text x="{margin_left}" y="58" class="subtitle">'
+        f"{len(rows)} librar{'y' if len(rows) == 1 else 'ies'}, log scale, higher = "
+        f"more efficient -- median gap {median_gaps['kernel']:,.0f}x per kernel launch, "
+        f"{median_gaps['memcpy']:,.0f}x per memcpy call</text>",
     ]
 
-    for tick in ticks:
-        x = log_x(tick, low, high, margin_left, plot_w)
-        parts.append(
-            f'<line x1="{x:.1f}" y1="{margin_top}" x2="{x:.1f}" y2="{margin_top + plot_h}" '
-            'class="grid"/>'
-        )
-        parts.append(
-            f'<text x="{x:.1f}" y="{margin_top + plot_h + 24}" class="tick" '
-            f'text-anchor="middle">{tick:g}</text>'
-        )
-
-    for i, (row_label, pos_key, ns_key, unit) in enumerate(rows):
-        y = margin_top + (i + 0.5) * row_h
-        parts.append(f'<text x="{margin_left - 20}" y="{y - 10:.1f}" class="rowlabel" text-anchor="end">{escape(row_label)}</text>')
-
-        x_dreg = log_x(dreg[pos_key], low, high, margin_left, plot_w)
-        x_pydreg = log_x(pydreg[pos_key], low, high, margin_left, plot_w)
-        parts.append(f'<line x1="{x_dreg:.1f}" y1="{y:.1f}" x2="{x_pydreg:.1f}" y2="{y:.1f}" class="connector"/>')
-
-        for x, val, color, name, ns_val in (
-            (x_dreg, dreg[pos_key], COLOR_DREG, "dREG", dreg[ns_key]),
-            (x_pydreg, pydreg[pos_key], COLOR_PYDREG, "pydreg", pydreg[ns_key]),
-        ):
-            parts.append(
-                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="9" fill="{color}" stroke="#fff" stroke-width="2">'
-                f"<title>{escape(name)}: {val:.1f} {unit}, {ns_val / 1e3:.2f}us avg per op</title></circle>"
-            )
-            label_above = val < math.sqrt(dreg[pos_key] * pydreg[pos_key])
-            ly = y - 16 if label_above else y + 26
-            parts.append(
-                f'<text x="{x:.1f}" y="{ly:.1f}" class="value" text-anchor="middle" fill="{color}">'
-                f"{val:,.1f}</text>"
-            )
-
-        gap = pydreg[pos_key] / dreg[pos_key]
-        mid_x = (x_dreg + x_pydreg) / 2
-        parts.append(
-            f'<text x="{mid_x:.1f}" y="{y - 30:.1f}" class="gap" text-anchor="middle">{gap:,.0f}x</text>'
-        )
-
-    parts.append(
-        f'<text x="{margin_left + plot_w / 2}" y="{height - 8}" class="tick" text-anchor="middle">'
-        "Positions processed per operation (log scale)</text>"
-    )
-
-    legend_x = margin_left
-    legend_y = margin_top - 34
     for i, (color, label) in enumerate([(COLOR_DREG, "dREG"), (COLOR_PYDREG, "pydreg")]):
-        lx = legend_x + i * 100
+        lx = margin_left + i * 104
         parts.append(f'<circle cx="{lx}" cy="{legend_y}" r="7" fill="{color}"/>')
-        parts.append(f'<text x="{lx + 14}" y="{legend_y + 5}" class="legend">{escape(label)}</text>')
+        parts.append(
+            f'<text x="{lx + 14}" y="{legend_y + 5}" class="legend">{escape(label)}</text>'
+        )
+
+    for panel_i, (panel_title, key, unit) in enumerate(PANELS):
+        y_top = top_margin + panel_i * (panel_h + PANEL_GAP)
+        parts.append(
+            f'<text x="{margin_left}" y="{y_top - 12}" class="colhead">'
+            f"{escape(panel_title)}</text>"
+        )
+        for tick in ticks:
+            x = log_x(tick, low, high, margin_left, plot_w)
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{y_top}" x2="{x:.1f}" y2="{y_top + panel_h}" '
+                'class="grid"/>'
+            )
+            parts.append(
+                f'<text x="{x:.1f}" y="{y_top + panel_h + 22}" class="tick" '
+                f'text-anchor="middle">{tick:,g}</text>'
+            )
+        parts.append(
+            f'<text x="{margin_left + plot_w / 2:.1f}" y="{y_top + panel_h + 44}" '
+            f'class="axis" text-anchor="middle">{escape(unit)} (log scale)</text>'
+        )
+
+        for row_i, (library, m) in enumerate(rows):
+            y = y_top + (row_i + 0.5) * ROW_H
+            parts.append(
+                f'<text x="{margin_left - 18}" y="{y + 5:.1f}" class="rowlabel" '
+                f'text-anchor="end">{escape(library)}</text>'
+            )
+            xd = log_x(m["dreg"][key], low, high, margin_left, plot_w)
+            xp = log_x(m["pydreg"][key], low, high, margin_left, plot_w)
+            parts.append(
+                f'<line x1="{xd:.1f}" y1="{y:.1f}" x2="{xp:.1f}" y2="{y:.1f}" '
+                'class="connector"/>'
+            )
+            for x, tool, color, name in (
+                (xd, "dreg", COLOR_DREG, "dREG"),
+                (xp, "pydreg", COLOR_PYDREG, "pydreg"),
+            ):
+                val = m[tool][key]
+                ns = m[tool][f"{key}_ns"]
+                parts.append(
+                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="{color}" '
+                    f'stroke="#fff" stroke-width="1.5">'
+                    f"<title>{escape(library)} {escape(name)}: {val:,.1f} {unit}, "
+                    f"{ns / 1e3:,.2f}us avg per op, {m['positions']:,} positions"
+                    "</title></circle>"
+                )
+            gap = m["pydreg"][key] / m["dreg"][key]
+            parts.append(
+                f'<text x="{margin_left + plot_w + 16}" y="{y + 5:.1f}" class="gap">'
+                f"{gap:,.0f}x</text>"
+            )
 
     parts.append("</svg>")
+    write_svg(parts, "gpu_efficiency.svg")
 
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    out = PLOTS_DIR / "gpu_efficiency.svg"
-    out.write_text("\n".join(parts) + "\n")
-    print(f"Wrote {out}")
-    for row_label, pos_key, ns_key, unit in rows:
-        print(
-            f"{row_label}: dREG {dreg[pos_key]:.2f} {unit} ({dreg[ns_key]/1e3:.2f}us/op), "
-            f"pydreg {pydreg[pos_key]:.2f} {unit} ({pydreg[ns_key]/1e3:.2f}us/op), "
-            f"gap {pydreg[pos_key]/dreg[pos_key]:.1f}x"
-        )
+    for _, key, unit in PANELS:
+        print(f"\n{unit}:")
+        for library, m in rows:
+            print(
+                f"  {library}: dREG {m['dreg'][key]:,.1f} "
+                f"({m['dreg'][f'{key}_ns'] / 1e3:,.2f}us/op), "
+                f"pydreg {m['pydreg'][key]:,.1f} "
+                f"({m['pydreg'][f'{key}_ns'] / 1e3:,.2f}us/op), "
+                f"gap {m['pydreg'][key] / m['dreg'][key]:,.1f}x"
+            )
 
 
 if __name__ == "__main__":

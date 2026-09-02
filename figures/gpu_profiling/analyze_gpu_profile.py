@@ -41,6 +41,18 @@ DEFAULT_PHASE_END_RE = r"scoring informative positions done in"
 # Python logging's default asctime format: "2026-08-17 14:32:01,123"
 LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 
+# The informative-position count, read back out of each tool's own log so
+# per-operation efficiency (positions per kernel launch / per memcpy call)
+# can be computed per library instead of hardcoded to one capture. Both
+# tools print it unprompted: dREG's run_predict.bsh as "Genome Loci=",
+# pydreg's -v log as "N informative positions found". These must agree
+# between a library's two runs -- if they don't, the two sides scored
+# different position sets and no ratio between them means anything.
+POSITIONS_RES = (
+    re.compile(r"Genome Loci=\s*(\d+)"),          # dREG
+    re.compile(r"(\d+) informative positions found"),  # pydreg
+)
+
 
 def parse_log_window(log_path, start_re, end_re):
     """Returns (start, end) pandas Timestamps bracketing the named phase by
@@ -65,6 +77,20 @@ def parse_log_window(log_path, start_re, end_re):
         return None
     fmt = "%Y-%m-%d %H:%M:%S,%f"
     return pd.to_datetime(start, format=fmt), pd.to_datetime(end, format=fmt)
+
+
+def parse_positions(log_path):
+    """Returns the informative-position count this run scored, read from
+    the tool's own log, or None if the log is missing or doesn't state one
+    (e.g. a run that died before the scan finished)."""
+    if not log_path.exists():
+        return None
+    text = log_path.read_text(errors="replace")
+    for pattern in POSITIONS_RES:
+        m = pattern.search(text)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def parse_dmon(dmon_path):
@@ -347,7 +373,11 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_inde
     rep_path = outdir / f"{label}.nsys-rep"
 
     window = None if force_whole_trace else parse_log_window(log_path, start_re, end_re)
-    summary = {"label": label, "windowed": window is not None}
+    summary = {
+        "label": label,
+        "windowed": window is not None,
+        "positions": parse_positions(log_path),
+    }
 
     if dmon_path.exists():
         df = select_active_gpu(parse_dmon(dmon_path), label, gpu_index)
@@ -407,6 +437,8 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_inde
 
 def print_summary(summary):
     print(f"\n=== {summary['label']} (windowed={summary['windowed']}) ===")
+    if summary.get("positions"):
+        print(f"  positions: {summary['positions']:,}")
     dmon = summary.get("dmon")
     if dmon:
         span = dmon.get("span_seconds")
@@ -432,6 +464,32 @@ def print_summary(summary):
             "    low gap cv -> regular periodic stalls (host round-trip per "
             "chunk); high cv -> occasional large stalls instead"
         )
+
+
+def parse_gpu_index(spec, labels):
+    """Parses a --gpu-index spec into (per_label_dict, default_index).
+
+    Accepts either a bare int (single-GPU host: applies to every label) or
+    comma-separated label=index pairs. Shared with the plot scripts so the
+    spec format and its validation can't drift between them.
+
+    A key naming no known label is a hard error, not a warning: silently
+    falling back to the unreliable auto-detect for a label you thought
+    you'd pinned is exactly the failure mode that profiled the wrong
+    (idle) card on real hardware -- see README.md."""
+    if spec is None:
+        return {}, None
+    if "=" not in spec:
+        return {}, int(spec)
+    by_label = {k: int(v) for k, v in (pair.split("=") for pair in spec.split(","))}
+    unknown_keys = set(by_label) - set(labels)
+    if unknown_keys:
+        raise SystemExit(
+            f"--gpu-index key(s) {sorted(unknown_keys)} don't match any "
+            f"label in {sorted(labels)} -- typo? Refusing to silently fall "
+            "back to auto-detect for a label you thought you'd pinned."
+        )
+    return by_label, None
 
 
 def main():
@@ -465,24 +523,7 @@ def main():
     )
     args = parser.parse_args()
     whole_trace_labels = set(args.whole_trace.split(",")) if args.whole_trace else set()
-    gpu_index_by_label = {}
-    default_gpu_index = None
-    if args.gpu_index is not None:
-        if "=" in args.gpu_index:
-            gpu_index_by_label = {
-                k: int(v)
-                for k, v in (pair.split("=") for pair in args.gpu_index.split(","))
-            }
-        else:
-            default_gpu_index = int(args.gpu_index)
-
-    unknown_keys = set(gpu_index_by_label) - set(args.labels)
-    if unknown_keys:
-        raise SystemExit(
-            f"--gpu-index key(s) {sorted(unknown_keys)} don't match any "
-            f"label in {args.labels} -- typo? Refusing to silently fall "
-            "back to auto-detect for a label you thought you'd pinned."
-        )
+    gpu_index_by_label, default_gpu_index = parse_gpu_index(args.gpu_index, args.labels)
 
     summaries = []
     for label in args.labels:
@@ -496,6 +537,25 @@ def main():
         )
         summaries.append(summary)
         print_summary(summary)
+
+    # Every cross-tool ratio these summaries feed (positions per kernel
+    # launch, per memcpy call, busy-time ratios) is only meaningful if both
+    # sides scored the identical position set -- the 2026-08-18 comparison
+    # confirmed that by hand from the two logs. Now that the count is
+    # parsed, check it rather than trusting it.
+    counts = {s["label"]: s["positions"] for s in summaries if s.get("positions")}
+    if len(set(counts.values())) > 1:
+        print(
+            "\nWARNING: labels scored DIFFERENT position counts "
+            f"({counts}) -- these runs aren't comparable; any ratio between "
+            "them is meaningless. Check you paired the right runs/libraries."
+        )
+    missing = [s["label"] for s in summaries if not s.get("positions")]
+    if missing:
+        print(
+            f"\nNOTE: no position count found in the log(s) for {missing} -- "
+            "per-operation efficiency can't be computed for them."
+        )
 
     out_path = args.outdir / f"summary_{'_vs_'.join(args.labels)}.json"
     out_path.write_text(json.dumps(summaries, indent=2, default=str))

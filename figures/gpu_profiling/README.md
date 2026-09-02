@@ -64,25 +64,46 @@ run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
 number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
 entries for the full before/after.)
 
-Three figures, all regenerable from the real profiling data in `gpu_out/`:
+**Scope**: the numbers above are one library (Jurkat_PROseq), the
+original capture. `profile_gpu_all.sh` extends the same measurement across
+all 12 benchmark libraries -- see "Running" below; until that sweep has
+been run, the figures below are drawn from this single pair.
+
+Three figures, all regenerable from the real profiling data in `gpu_out/`,
+each drawing **one row per library** across whatever the sweep has
+captured.
+
 `plot_gpu_utilization.py` (`figures/plots/gpu_utilization.svg`) is the
 qualitative one -- dREG's sawtooth vs. pydreg's plateau, real dmon data,
-own x-axis per panel since the phases differ ~6.5x in duration.
-`plot_gpu_time_breakdown.py` (`figures/plots/gpu_time_breakdown.svg`) shows
-totals -- stacked idle/kernel/memcpy time per tool, with kernel-launch and
-H2D-memcpy call counts as direct text annotations (their *time* is too
-small a fraction of either bar to encode by height, even though their
-*count* is one of the two headline findings). Neither of those two
-actually states an inefficiency, though -- a symptom (idle GPU) and raw
-counts/totals side by side both still require the reader to do the
-division themselves. `plot_gpu_efficiency.py`
+as a separate track per library per tool. Every track keeps its own
+x-axis: dREG's phase runs several times longer than pydreg's on the same
+library (~6.5x on Jurkat_PROseq) and libraries differ again on top of
+that, so one shared axis would crush the short tracks into slivers and
+destroy the very shape the panel exists to show. Each track states its own
+duration and mean utilization instead.
+
+`plot_gpu_time_breakdown.py` (`figures/plots/gpu_time_breakdown.svg`) is
+the quantitative counterpart -- stacked idle/kernel/memcpy time, a bar
+pair per library, on one shared time axis so both the within-library
+dREG-vs-pydreg gap and the between-library size differences read directly.
+Horizontal bars, because the category axis carries names like
+`Jurkat_ChROseq_1` that would need rotating as vertical-bar x-labels.
+Kernel-launch and memcpy call counts live in the tooltips rather than as
+annotations here: memcpy's *time* is a sliver of every bar (well under
+1%), and 24 bars' worth of count labels would swamp the figure.
+
+Neither of those two actually states an inefficiency, though -- a symptom
+(idle GPU) and raw totals side by side both still require the reader to do
+the division themselves. `plot_gpu_efficiency.py`
 (`figures/plots/gpu_efficiency.svg`) is that division, done for them: a
-log-scale dot plot of *positions processed per GPU operation*
-(kernel launch, H2D memcpy call) -- dREG does ~25x/~972x less useful work
-per individual operation than pydreg, which is the actual "inefficient"
-claim, not just "the GPU is idle a lot" or "there are more calls." Built
-as a dumbbell dot plot rather than a bar chart specifically because a
-log-scale axis distorts bar *length* perceptually (the same reason
+log-scale dot plot of *positions processed per GPU operation* (kernel
+launch, H2D memcpy call), one dumbbell per library, with each library's
+own informative-position count read from its own logs rather than divided
+by a single hardcoded constant. dREG does ~25x/~972x less useful work per
+individual operation than pydreg, which is the actual "inefficient" claim,
+not just "the GPU is idle a lot" or "there are more calls." Built as a
+dumbbell dot plot rather than a bar chart specifically because a log-scale
+axis distorts bar *length* perceptually (the same reason
 `figures/_common.py`'s scatter panels use log-scale point marks, not bars).
 
 ## Isolating the right process/phase, with zero source modification
@@ -109,16 +130,77 @@ do the same here if hardware access allows it).
 
 ## Running
 
+### The whole 12-library sweep
+
+`profile_gpu_all.sh` drives the full benchmark -- both tools, all 12
+libraries, plus the per-library analyzer pass -- and produces exactly the
+label convention the figure scripts discover on their own:
+
 ```
-./profile_gpu.sh OUTDIR dreg   -- bash run_predict.bsh plus.bw minus.bw dreg_model.RData out_prefix 16 0
-./profile_gpu.sh OUTDIR pydreg -- pydreg plus.bw minus.bw out_prefix --backend cupy -v
-python3 analyze_gpu_profile.py OUTDIR dreg pydreg --whole-trace dreg --gpu-index dreg=1,pydreg=0
+BW_DIR=/path/to/bigwigs DREG_DIR=/path/to/dREG \
+  NVSMI_DREG=1 NVSMI_PYDREG=0 ./profile_gpu_all.sh
 ```
 
-(`--whole-trace dreg` tells the analyzer not to look for pydreg-style log
-markers in dREG's log -- there aren't any, and there don't need to be, since
-the whole process already is the target phase. `--gpu-index` is explained
-below -- don't skip it on a multi-GPU host.)
+It runs strictly sequentially, which is not incidental: two profiled jobs
+sharing a node contaminate each other's dmon samples and idle-gap
+analysis, which is the entire measurement. Budget roughly **8-15 hours of
+exclusive GPU time** for all 12 -- the Jurkat_PROseq reference pair was
+~43min (dREG) + ~22min (pydreg) -- and check free disk first, since each
+dREG capture traces hundreds of thousands of kernel launches and over a
+million memcpys. The sweep is resumable: a library whose artifacts already
+exist is skipped, so an interrupted run can just be re-invoked. Pass
+library names as arguments to do a subset.
+
+Set `NVSMI_DREG`/`NVSMI_PYDREG` only after confirming which physical card
+each job lands on -- see the gotcha section below, and prefer running one
+library first to check. Leaving them unset falls back to the analyzer's
+auto-detect, which is unreliable on a shared node.
+
+Then draw the figures (each writes its own standalone SVG to
+`figures/plots/`, per this repo's one-script-per-panel convention):
+
+```
+python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index dreg_G1=1,pydreg_G1=0,...
+python3 plot_gpu_time_breakdown.py --outdir gpu_out
+python3 plot_gpu_efficiency.py     --outdir gpu_out
+```
+
+All three discover libraries by globbing for the
+`dreg_<LIB>`/`pydreg_<LIB>` labels and skip (with a note) any library not
+captured yet, so a partially-finished sweep still plots what it has.
+`--libraries` restricts them to a subset.
+
+### One library at a time
+
+The sweep script is a loop around these three commands; run them directly
+to profile a single library:
+
+```
+./profile_gpu.sh OUTDIR dreg_LIB   -- bash run_predict.bsh plus.bw minus.bw out_prefix dreg_model.RData 16 0
+./profile_gpu.sh OUTDIR pydreg_LIB -- pydreg plus.bw minus.bw out_prefix --backend cupy -v
+python3 analyze_gpu_profile.py OUTDIR dreg_LIB pydreg_LIB \
+    --whole-trace dreg_LIB --gpu-index dreg_LIB=1,pydreg_LIB=0
+```
+
+(`--whole-trace dreg_LIB` tells the analyzer not to look for pydreg-style
+log markers in dREG's log -- there aren't any, and there don't need to be,
+since the whole process already is the target phase. `--gpu-index` is
+explained below -- don't skip it on a multi-GPU host.)
+
+Note `run_predict.bsh`'s argument order: **plus, minus, out-prefix, model,
+cores, gpu**. An earlier version of this README listed the model before the
+out-prefix, which does not match what the real capture actually ran; verify
+against your own checkout regardless.
+
+### Captures that predate the label convention
+
+The original 2026-08-18 capture used bare `dreg`/`pydreg2` labels, from
+before the sweep existed. All three figure scripts can still read it by
+naming the pair explicitly:
+
+```
+python3 plot_gpu_efficiency.py --pair Jurkat_PROseq=dreg:pydreg2
+```
 
 ### A real gotcha: CUDA's GPU index isn't nvidia-smi's GPU index
 
@@ -142,10 +224,13 @@ actual job's `fb` total and got auto-selected instead. Always pass
 the argument you *passed* to the job, and don't rely on auto-detect on a
 shared host.
 
-Verify `run_predict.bsh`'s actual argument order/model path against your
-checkout before running -- `_reference/dREG` isn't available in this sandbox
-to confirm exact CLI syntax, only the documented pipeline structure in
-`CLAUDE.md`/`docs/PLANNING.md`.
+`run_predict.bsh`'s argument order is **plus, minus, out-prefix, model,
+cores, gpu** -- confirmed from the real 2026-08-18 capture's own
+`dreg.log`, which records the exact invocation, rather than inferred from
+the pipeline structure documented in `CLAUDE.md`/`docs/PLANNING.md`. Verify
+against your own checkout anyway before starting a multi-hour sweep;
+`profile_gpu_all.sh` preflights the model/bigWig paths but can't check
+dREG's own argument order for you.
 
 Each run produces, under `OUTDIR`:
 - `LABEL.dmon.csv` -- `nvidia-smi dmon` samples (1 Hz, wall-clock timestamped):
