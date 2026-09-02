@@ -499,6 +499,41 @@ def print_summary(summary):
         )
 
 
+def report_gpus(outdir, start_re, end_re):
+    """Prints, for every capture in `outdir`, mean utilization per
+    nvidia-smi GPU index and which index the job actually ran on.
+
+    `nvidia-smi dmon` samples every GPU into the csv, so which card a run
+    used is recoverable from the capture after the fact -- `--gpu-index` is
+    an analysis-time selection, not a capture-time one. That makes this the
+    cheap way to settle the CUDA-index-vs-nvidia-smi-index question (see
+    README.md) without re-running anything on the GPU.
+    """
+    paths = sorted(outdir.glob("*.dmon.csv"))
+    if not paths:
+        raise SystemExit(f"no *.dmon.csv captures found in {outdir}")
+    print(f"{'label':28s} {'mean sm% per nvidia-smi GPU':38s} busiest")
+    for path in paths:
+        label = path.name[: -len(".dmon.csv")]
+        df = parse_dmon(path)
+        # Window pydreg-style runs to their scoring phase; a run with no
+        # phase markers (dREG) is already exactly the phase of interest.
+        window = parse_log_window(outdir / f"{label}.log", start_re, end_re)
+        if window is not None:
+            df = window_df(df, window)
+        if "sm" not in df.columns or df.empty:
+            print(f"{label:28s} (no usable sm data)")
+            continue
+        means = df.groupby("gpu")["sm"].mean().round(1).to_dict()
+        busiest = max(means, key=means.get)
+        flag = "" if means[busiest] >= 1 else "   <- ALL GPUs look idle!"
+        print(f"{label:28s} {str(means):38s} {busiest}{flag}")
+    print(
+        "\nPass the busiest index as --gpu-index (bare int if it's the same "
+        "for every label, which it should be -- both tools must share a card)."
+    )
+
+
 def parse_gpu_index(spec, labels):
     """Parses a --gpu-index spec into (per_label_dict, default_index).
 
@@ -528,9 +563,16 @@ def parse_gpu_index(spec, labels):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("outdir", type=Path)
-    parser.add_argument("labels", nargs="+")
+    parser.add_argument("labels", nargs="*")
     parser.add_argument("--phase-start-regex", default=DEFAULT_PHASE_START_RE)
     parser.add_argument("--phase-end-regex", default=DEFAULT_PHASE_END_RE)
+    parser.add_argument(
+        "--report-gpus",
+        action="store_true",
+        help="print which nvidia-smi GPU index each capture in OUTDIR "
+        "actually ran on, then exit -- the cheap way to pin --gpu-index "
+        "correctly without re-capturing anything. Takes no labels.",
+    )
     parser.add_argument(
         "--whole-trace",
         default="",
@@ -555,6 +597,11 @@ def main():
         "another user's job may dominate that metric on an unrelated card.",
     )
     args = parser.parse_args()
+    if args.report_gpus:
+        report_gpus(args.outdir, args.phase_start_regex, args.phase_end_regex)
+        return
+    if not args.labels:
+        parser.error("at least one label is required (or pass --report-gpus)")
     whole_trace_labels = set(args.whole_trace.split(",")) if args.whole_trace else set()
     gpu_index_by_label, default_gpu_index = parse_gpu_index(args.gpu_index, args.labels)
 

@@ -152,8 +152,17 @@ exist is skipped, so an interrupted run can just be re-invoked. Pass
 library names as arguments to do a subset.
 
 Set `NVSMI_GPU` only after confirming which physical card the jobs land
-on -- see the gotcha section below, and prefer running one library first
-to check. Leaving it unset falls back to the analyzer's auto-detect, which
+on -- see the gotcha section below. The cheapest way to confirm it is
+after the fact, from a capture you already have:
+
+```
+python3 analyze_gpu_profile.py gpu_out --report-gpus
+```
+
+`nvidia-smi dmon` samples *every* GPU into the csv, so which card a run
+used is recoverable from the capture -- `--gpu-index` is an analysis-time
+selection, not a capture-time one, and getting it wrong never costs you a
+re-capture. Leaving it unset falls back to the analyzer's auto-detect, which
 is unreliable on a shared node.
 
 It's a *single* value because this comparison requires both tools on the

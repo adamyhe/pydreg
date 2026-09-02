@@ -4064,3 +4064,13 @@ after the print loop -- the captures themselves were never at risk.
    shell is bash 3.2 while the capture host is bash 4/5 -- the earlier
    passing test had `NVSMI_GPU` set, which made the array non-empty and
    masked it.
+
+Follow-up: added `analyze_gpu_profile.py --report-gpus`, which prints
+mean utilization per nvidia-smi GPU index for every capture in a
+directory and names the busiest. The point worth recording is *why* it
+works: `nvidia-smi dmon -s um` samples every GPU into the csv, so
+`--gpu-index` is an analysis-time selection, not a capture-time one --
+a wrong index is always recoverable by re-running the analyzer, and
+never costs a re-capture. That reframes the whole CUDA-index trap from
+"can ruin a multi-hour capture" to "cheap to check afterward," which is
+worth knowing before anyone reflexively re-runs a sweep over it.
