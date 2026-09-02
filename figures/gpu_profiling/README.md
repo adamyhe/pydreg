@@ -138,7 +138,7 @@ label convention the figure scripts discover on their own:
 
 ```
 BW_DIR=/path/to/bigwigs DREG_DIR=/path/to/dREG \
-  NVSMI_GPU=1 ./profile_gpu_all.sh
+  NVSMI_GPU=$IDX ./profile_gpu_all.sh    # IDX from --report-gpus, see below
 ```
 
 It runs strictly sequentially, which is not incidental: two profiled jobs
@@ -165,21 +165,34 @@ selection, not a capture-time one, and getting it wrong never costs you a
 re-capture. Leaving it unset falls back to the analyzer's auto-detect, which
 is unreliable on a shared node.
 
-It's a *single* value because this comparison requires both tools on the
-same physical GPU; a cross-hardware ratio would be meaningless. On the
-original capture, both dREG and pydreg ran on nvidia-smi GPU 1 (mean `sm`
-61.8% and 93.7%, against ~1% on GPU 0). The reason the underlying
-`--gpu-index` spec is *per-label* at all is that CUDA's device index
-doesn't match nvidia-smi's -- not that the two tools use different cards.
-`NVSMI_DREG`/`NVSMI_PYDREG` override individually for a host where they
-genuinely do; setting them to different values otherwise means you're
-about to compare two different GPUs.
+**Don't copy an index out of this README.** The CUDA-to-nvidia-smi
+mapping is per-host, and two real hosts have now disagreed:
+
+| host | CUDA device passed to dREG | nvidia-smi index it actually was |
+|---|---|---|
+| original 2-GPU capture host | 0 | **1** (dREG 61.8% / pydreg 93.7% `sm`; GPU 0 ~1%) |
+| `cbsugpu01` | 0 | **0** (dREG 70.7% / pydreg 96.2% `sm`; GPU 1 at 0.0%) |
+
+Carrying the first host's `1` over to the second is exactly how you pin
+an idle card: every dmon stat then describes a GPU that did nothing, and
+before this was hardened it crashed the analyzer outright rather than
+saying so. Always derive `IDX` from `--report-gpus` on the host you're
+actually running on.
+
+`NVSMI_GPU` is a *single* value because this comparison requires both
+tools on the same physical GPU; a cross-hardware ratio would be
+meaningless. The reason the underlying `--gpu-index` spec is *per-label*
+at all is that CUDA's device index doesn't match nvidia-smi's -- not that
+the two tools use different cards. `NVSMI_DREG`/`NVSMI_PYDREG` override
+individually for a host where they genuinely do; setting them to
+different values otherwise means you're about to compare two different
+GPUs.
 
 Then draw the figures (each writes its own standalone SVG to
 `figures/plots/`, per this repo's one-script-per-panel convention):
 
 ```
-python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index 1
+python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index IDX
 python3 plot_gpu_time_breakdown.py --outdir gpu_out
 python3 plot_gpu_efficiency.py     --outdir gpu_out
 ```
@@ -198,7 +211,7 @@ to profile a single library:
 ./profile_gpu.sh OUTDIR dreg_LIB   -- bash run_predict.bsh plus.bw minus.bw out_prefix dreg_model.RData 16 0
 ./profile_gpu.sh OUTDIR pydreg_LIB -- pydreg plus.bw minus.bw out_prefix --backend cupy -v
 python3 analyze_gpu_profile.py OUTDIR dreg_LIB pydreg_LIB \
-    --whole-trace dreg_LIB --gpu-index 1
+    --whole-trace dreg_LIB --gpu-index IDX
 ```
 
 (`--whole-trace dreg_LIB` tells the analyzer not to look for pydreg-style
@@ -241,7 +254,8 @@ actual job's `fb` total and got auto-selected instead. Always pass
 `--gpu-index` explicitly once you know which physical
 (`nvidia-smi`-numbered) GPU the jobs actually landed on -- don't rely on
 the argument you *passed* to the job, and don't rely on auto-detect on a
-shared host. A bare `--gpu-index 1` pins every label to nvidia-smi GPU 1,
+shared host. A bare `--gpu-index IDX` pins every label to nvidia-smi GPU
+`IDX`,
 which is the normal case here since both tools must share a card; the
 `LABEL=INDEX` form is for the rarer host where they don't.
 

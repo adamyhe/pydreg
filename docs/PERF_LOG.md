@@ -4074,3 +4074,19 @@ a wrong index is always recoverable by re-running the analyzer, and
 never costs a re-capture. That reframes the whole CUDA-index trap from
 "can ruin a multi-hour capture" to "cheap to check afterward," which is
 worth knowing before anyone reflexively re-runs a sweep over it.
+
+Confirmed on the real host, and it closes the loop on the crash above:
+`--report-gpus` on `cbsugpu01` reports both tools busiest on nvidia-smi
+GPU **0** (dREG 70.7%, pydreg 96.2% mean `sm`) with GPU 1 at exactly
+0.0% -- the opposite mapping from the original capture host, where CUDA
+device 0 was nvidia-smi 1. The crash was therefore caused by carrying
+this README's own literal `NVSMI_GPU=1` example over from one host to
+the other: it pinned the idle card, whose mean utilization is exactly
+zero, which is precisely the undefined-`cv` path. Every literal GPU
+index has been removed from the docs in favor of a derived `IDX`
+placeholder plus the per-host mapping table, since an example index is
+actively harmful here -- it looks like a default and isn't one.
+
+Also worth recording for scope: that sweep captured only G1 before
+dying, so 11 libraries remain. G1's own artifacts are intact and just
+need re-analysis at the corrected index.
