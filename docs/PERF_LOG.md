@@ -3998,8 +3998,23 @@ pair was ~43min dREG + ~22min pydreg, and pydreg has no score-only mode,
 so each of its runs also carries ~8-9min of CPU peak-calling that the
 analyzer then windows back out.
 
-Also fixed while here: this README documented `run_predict.bsh`'s
-arguments as plus, minus, *model, out-prefix*, cores, gpu. The real
-capture's own `dreg.log` records the actual order as plus, minus,
-*out-prefix, model*, cores, gpu -- the README example, had anyone run it
-verbatim, would have swapped the two.
+Two doc errors fixed while here, both of the same kind -- an
+illustrative example that never matched the real capture:
+
+1. The README documented `run_predict.bsh`'s arguments as plus, minus,
+   *model, out-prefix*, cores, gpu. The real capture's own `dreg.log`
+   records the actual order as plus, minus, *out-prefix, model*, cores,
+   gpu -- the example, run verbatim, would have swapped the two.
+2. The README's `--gpu-index dreg=1,pydreg=0` example implied the two
+   tools land on different cards. They don't, and mustn't: this
+   comparison requires both on the same physical GPU or the ratio is
+   meaningless. Re-checked against the capture's dmon data -- both dREG
+   and pydreg ran on nvidia-smi GPU 1 (mean `sm` 61.8% and 93.7%,
+   vs. ~1% on GPU 0), and the old plot script hardcoded `gpu_index=1`
+   for both labels, so the figures were always right; only the example
+   was wrong. The per-label `--gpu-index` spec exists because CUDA's
+   device index doesn't match nvidia-smi's, not because the tools use
+   different cards. `profile_gpu_all.sh` accordingly takes a single
+   `NVSMI_GPU`, and refuses a half-pinned config (one side pinned, the
+   other left to the unreliable auto-detect) rather than silently
+   comparing two different GPUs.

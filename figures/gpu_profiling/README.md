@@ -138,7 +138,7 @@ label convention the figure scripts discover on their own:
 
 ```
 BW_DIR=/path/to/bigwigs DREG_DIR=/path/to/dREG \
-  NVSMI_DREG=1 NVSMI_PYDREG=0 ./profile_gpu_all.sh
+  NVSMI_GPU=1 ./profile_gpu_all.sh
 ```
 
 It runs strictly sequentially, which is not incidental: two profiled jobs
@@ -151,16 +151,26 @@ million memcpys. The sweep is resumable: a library whose artifacts already
 exist is skipped, so an interrupted run can just be re-invoked. Pass
 library names as arguments to do a subset.
 
-Set `NVSMI_DREG`/`NVSMI_PYDREG` only after confirming which physical card
-each job lands on -- see the gotcha section below, and prefer running one
-library first to check. Leaving them unset falls back to the analyzer's
-auto-detect, which is unreliable on a shared node.
+Set `NVSMI_GPU` only after confirming which physical card the jobs land
+on -- see the gotcha section below, and prefer running one library first
+to check. Leaving it unset falls back to the analyzer's auto-detect, which
+is unreliable on a shared node.
+
+It's a *single* value because this comparison requires both tools on the
+same physical GPU; a cross-hardware ratio would be meaningless. On the
+original capture, both dREG and pydreg ran on nvidia-smi GPU 1 (mean `sm`
+61.8% and 93.7%, against ~1% on GPU 0). The reason the underlying
+`--gpu-index` spec is *per-label* at all is that CUDA's device index
+doesn't match nvidia-smi's -- not that the two tools use different cards.
+`NVSMI_DREG`/`NVSMI_PYDREG` override individually for a host where they
+genuinely do; setting them to different values otherwise means you're
+about to compare two different GPUs.
 
 Then draw the figures (each writes its own standalone SVG to
 `figures/plots/`, per this repo's one-script-per-panel convention):
 
 ```
-python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index dreg_G1=1,pydreg_G1=0,...
+python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index 1
 python3 plot_gpu_time_breakdown.py --outdir gpu_out
 python3 plot_gpu_efficiency.py     --outdir gpu_out
 ```
@@ -179,7 +189,7 @@ to profile a single library:
 ./profile_gpu.sh OUTDIR dreg_LIB   -- bash run_predict.bsh plus.bw minus.bw out_prefix dreg_model.RData 16 0
 ./profile_gpu.sh OUTDIR pydreg_LIB -- pydreg plus.bw minus.bw out_prefix --backend cupy -v
 python3 analyze_gpu_profile.py OUTDIR dreg_LIB pydreg_LIB \
-    --whole-trace dreg_LIB --gpu-index dreg_LIB=1,pydreg_LIB=0
+    --whole-trace dreg_LIB --gpu-index 1
 ```
 
 (`--whole-trace dreg_LIB` tells the analyzer not to look for pydreg-style
@@ -219,10 +229,12 @@ with the most total `fb`/`sm` activity) is **only a fallback** and is
 unreliable on a shared multi-tenant node -- confirmed on the same run,
 where another process's memory footprint on an unrelated GPU outranked the
 actual job's `fb` total and got auto-selected instead. Always pass
-`--gpu-index LABEL=INDEX` pairs once you know which physical
-(`nvidia-smi`-numbered) GPU each job actually landed on -- don't rely on
+`--gpu-index` explicitly once you know which physical
+(`nvidia-smi`-numbered) GPU the jobs actually landed on -- don't rely on
 the argument you *passed* to the job, and don't rely on auto-detect on a
-shared host.
+shared host. A bare `--gpu-index 1` pins every label to nvidia-smi GPU 1,
+which is the normal case here since both tools must share a card; the
+`LABEL=INDEX` form is for the rarer host where they don't.
 
 `run_predict.bsh`'s argument order is **plus, minus, out-prefix, model,
 cores, gpu** -- confirmed from the real 2026-08-18 capture's own

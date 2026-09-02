@@ -15,16 +15,26 @@
 #   DREG_MODEL  asvm .rdata                                  (default: $DREG_DIR/asvm.gdm.6.6M.20170828.rdata)
 #   CORES       cores for both tools                         (default: 16)
 #   CUDA_GPU    CUDA device index passed to dREG             (default: 0)
-#   NVSMI_DREG  nvidia-smi index dREG actually lands on      (default: unset -> analyzer auto-detects)
-#   NVSMI_PYDREG  same, for pydreg                           (default: unset)
+#   NVSMI_GPU   nvidia-smi index BOTH tools land on          (default: unset -> analyzer auto-detects)
+#   NVSMI_DREG / NVSMI_PYDREG   per-tool override of NVSMI_GPU, for the
+#               unusual case where the two runs really are on different
+#               cards                                        (default: NVSMI_GPU)
 #
 # IMPORTANT -- read README.md's "A real gotcha" section before trusting
-# NVSMI_*: CUDA_GPU is a *CUDA* device index, which is not guaranteed to
+# these: CUDA_GPU is a *CUDA* device index, which is not guaranteed to
 # equal nvidia-smi's enumeration (on the original 2-GPU capture host,
 # CUDA 0 was nvidia-smi 1). Run one library, check `nvidia-smi` while it's
-# live, then set NVSMI_DREG/NVSMI_PYDREG for the rest. Leaving them unset
-# falls back to the analyzer's auto-detect, which is unreliable on a
-# shared multi-tenant node.
+# live, then set NVSMI_GPU for the rest. Leaving it unset falls back to
+# the analyzer's auto-detect, which is unreliable on a shared
+# multi-tenant node.
+#
+# NVSMI_GPU is ONE value because this comparison requires both tools on
+# the same physical card -- a cross-hardware ratio would be meaningless,
+# and on the original capture both dREG and pydreg were confirmed on
+# nvidia-smi GPU 1. The separate NVSMI_DREG/NVSMI_PYDREG overrides exist
+# only for a host where that genuinely isn't true; if you find yourself
+# setting them to different values, check that's really what you want
+# rather than an artifact of the CUDA-vs-nvidia-smi index gap above.
 #
 # Runs strictly sequentially, and that is not incidental: two profiled
 # jobs sharing a node would contaminate each other's dmon samples and
@@ -117,9 +127,14 @@ for lib in "${LIBRARIES[@]}"; do
         --backend cupy -v -p "$CORES"
   fi
 
+  nvsmi_dreg=${NVSMI_DREG:-${NVSMI_GPU:-}}
+  nvsmi_pydreg=${NVSMI_PYDREG:-${NVSMI_GPU:-}}
   gpu_index_args=()
-  if [[ -n "${NVSMI_DREG:-}" && -n "${NVSMI_PYDREG:-}" ]]; then
-    gpu_index_args=(--gpu-index "$dreg_label=$NVSMI_DREG,$pydreg_label=$NVSMI_PYDREG")
+  if [[ -n "$nvsmi_dreg" && -n "$nvsmi_pydreg" ]]; then
+    gpu_index_args=(--gpu-index "$dreg_label=$nvsmi_dreg,$pydreg_label=$nvsmi_pydreg")
+  elif [[ -n "$nvsmi_dreg" || -n "$nvsmi_pydreg" ]]; then
+    echo "set NVSMI_GPU (or both NVSMI_DREG and NVSMI_PYDREG) -- pinning one side and auto-detecting the other is how you end up comparing two different cards" >&2
+    exit 1
   fi
   python3 "$HERE/analyze_gpu_profile.py" "$OUTDIR" "$dreg_label" "$pydreg_label" \
     --whole-trace "$dreg_label" "${gpu_index_args[@]}"
@@ -127,6 +142,6 @@ done
 
 echo
 echo "[sweep] done. Now draw the figures:"
-echo "  python3 $HERE/plot_gpu_utilization.py --outdir $OUTDIR${NVSMI_DREG:+ --gpu-index <label=idx,...>}"
+echo "  python3 $HERE/plot_gpu_utilization.py --outdir $OUTDIR${NVSMI_GPU:+ --gpu-index $NVSMI_GPU}"
 echo "  python3 $HERE/plot_gpu_time_breakdown.py --outdir $OUTDIR"
 echo "  python3 $HERE/plot_gpu_efficiency.py --outdir $OUTDIR"
