@@ -4018,3 +4018,49 @@ illustrative example that never matched the real capture:
    `NVSMI_GPU`, and refuses a half-pinned config (one side pinned, the
    other left to the unreliable auto-detect) rather than silently
    comparing two different GPUs.
+
+## 2026-09-02 (cont.) -- first real sweep run crashed the analyzer on an all-idle GPU; the crash was hiding a wrong-card diagnostic
+
+Reported from the real GPU host: `print_summary` raised
+`TypeError: unsupported format string passed to NoneType.__format__` on
+`f"cv={d['coeff_of_variation']:.2f}"`.
+
+**Root cause** (pre-existing, not from the cross-library change, but the
+sweep makes it far more likely to be hit since the analyzer now runs 12
+times unattended): `summarize_util` stores
+`coeff_of_variation = (s.std() / s.mean()) if s.mean() else None` --
+`None` when the series mean is exactly 0 -- and the print formatted it
+unconditionally. Reproduced locally by zeroing one GPU's `sm`/`mem`
+columns in a copy of the real dmon capture and pinning `--gpu-index` to
+it, which gives the identical traceback.
+
+**The more interesting part**: a mean of *exactly* zero across a whole
+window means the selected GPU did nothing at all, which is almost never
+a real measurement -- it's the CUDA-index-vs-nvidia-smi-index trap this
+README already documents, i.e. the profile was pointed at an idle card.
+The undefined `cv` was a symptom of that, and crashing on it destroyed
+the very output that would have shown it. So the fix is two-part: `_fmt`
+prints legitimately-undefined stats as `n/a` (also covering pandas'
+NaN `std()` on a single-sample window), and `summarize_label` now warns
+explicitly when the selected GPU averaged under 1% utilization over the
+window, naming the likely cause.
+
+Note the crash also lost the summary JSON, since `main()` writes it only
+after the print loop -- the captures themselves were never at risk.
+
+**Two robustness fixes to `profile_gpu_all.sh` from the same report:**
+
+1. An analyzer failure no longer aborts the sweep. Captures are the
+   expensive, unrepeatable part (hours of exclusive GPU time); analysis
+   is cheap and re-runnable from artifacts already on disk. Losing a
+   night of captures to a summarizing bug is the worst available trade,
+   so failures are recorded, reported at the end, and the script exits
+   non-zero -- but capturing continues.
+2. Fixed a real bug introduced with the sweep script: expanding a
+   possibly-empty `"${gpu_index_args[@]}"` under `set -u` is an
+   "unbound variable" error on bash 3.2, so the *unpinned* (auto-detect)
+   path failed outright on older shells. The analyzer invocation is now
+   built as one never-empty array. Caught only because the local test
+   shell is bash 3.2 while the capture host is bash 4/5 -- the earlier
+   passing test had `NVSMI_GPU` set, which made the array non-empty and
+   masked it.

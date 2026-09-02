@@ -26,6 +26,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import re
 import shutil
 import statistics
@@ -382,6 +383,22 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_inde
     if dmon_path.exists():
         df = select_active_gpu(parse_dmon(dmon_path), label, gpu_index)
         summary["dmon"] = summarize_util(window_df(df, window))
+        # A selected GPU that never did anything across the whole window is
+        # almost always the wrong card, not a real measurement -- exactly
+        # the CUDA-index-vs-nvidia-smi-index trap README.md documents. It
+        # used to surface only as a None coefficient of variation (mean=0,
+        # so undefined), which then crashed the summary print; say it
+        # plainly instead.
+        sm = summary["dmon"].get("sm", {})
+        if sm and (sm.get("mean") or 0) < 1:
+            print(
+                f"[{label}] WARNING: the selected GPU averaged "
+                f"{sm.get('mean', 0):.2f}% utilization over this window -- it "
+                "looks idle, which usually means --gpu-index points at the "
+                "wrong card (CUDA's device index is NOT nvidia-smi's; see "
+                "README.md). Every dmon stat below describes an unused GPU "
+                "if so."
+            )
     else:
         print(f"[{label}] WARNING: {dmon_path} not found, skipping dmon summary")
 
@@ -435,6 +452,19 @@ def summarize_label(outdir, label, start_re, end_re, force_whole_trace, gpu_inde
     return summary
 
 
+def _fmt(value, spec=".1f", missing="n/a"):
+    """Formats a stat that can legitimately be undefined.
+
+    `coeff_of_variation` is None when the series mean is 0 (an entirely
+    idle GPU -- division by zero), and pandas' `std()` is NaN for a
+    single-sample window. Both are real states a short or mis-pinned
+    capture reaches, and neither should take down a summary of everything
+    else that parsed fine."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return missing
+    return format(value, spec)
+
+
 def print_summary(summary):
     print(f"\n=== {summary['label']} (windowed={summary['windowed']}) ===")
     if summary.get("positions"):
@@ -442,15 +472,18 @@ def print_summary(summary):
     dmon = summary.get("dmon")
     if dmon:
         span = dmon.get("span_seconds")
-        print(f"  dmon: {dmon.get('n_samples')} samples over {span:.1f}s" if span else "")
+        print(
+            f"  dmon: {dmon.get('n_samples')} samples"
+            + (f" over {span:.1f}s" if span else "")
+        )
         for col in ("sm", "mem"):
             if col in dmon:
                 d = dmon[col]
                 print(
-                    f"  {col}: mean={d['mean']:.1f}% median={d['median']:.1f}% "
-                    f"p10={d['p10']:.1f}% p90={d['p90']:.1f}% "
-                    f"cv={d['coeff_of_variation']:.2f} "
-                    f"idle<10%={d['pct_time_idle_below_10pct']:.1f}% of samples"
+                    f"  {col}: mean={_fmt(d['mean'])}% median={_fmt(d['median'])}% "
+                    f"p10={_fmt(d['p10'])}% p90={_fmt(d['p90'])}% "
+                    f"cv={_fmt(d['coeff_of_variation'], '.2f')} "
+                    f"idle<10%={_fmt(d['pct_time_idle_below_10pct'])}% of samples"
                 )
     gaps = summary.get("nsys_idle_gaps")
     if gaps:

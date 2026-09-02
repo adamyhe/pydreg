@@ -90,6 +90,7 @@ command -v nsys >/dev/null || echo "WARNING: nsys not on PATH -- dmon utilizatio
 
 mkdir -p "$OUTDIR"
 echo "[sweep] ${#LIBRARIES[@]} librar$([[ ${#LIBRARIES[@]} == 1 ]] && echo y || echo ies) -> $OUTDIR"
+failed_analysis=()
 
 already_captured() {  # $1 = label
   [[ -e "$OUTDIR/$1.nsys-rep" ]] || { ! command -v nsys >/dev/null && [[ -e "$OUTDIR/$1.log" ]]; }
@@ -129,19 +130,44 @@ for lib in "${LIBRARIES[@]}"; do
 
   nvsmi_dreg=${NVSMI_DREG:-${NVSMI_GPU:-}}
   nvsmi_pydreg=${NVSMI_PYDREG:-${NVSMI_GPU:-}}
-  gpu_index_args=()
-  if [[ -n "$nvsmi_dreg" && -n "$nvsmi_pydreg" ]]; then
-    gpu_index_args=(--gpu-index "$dreg_label=$nvsmi_dreg,$pydreg_label=$nvsmi_pydreg")
-  elif [[ -n "$nvsmi_dreg" || -n "$nvsmi_pydreg" ]]; then
+  if [[ -z "$nvsmi_dreg" && -n "$nvsmi_pydreg" ]] || [[ -n "$nvsmi_dreg" && -z "$nvsmi_pydreg" ]]; then
     echo "set NVSMI_GPU (or both NVSMI_DREG and NVSMI_PYDREG) -- pinning one side and auto-detecting the other is how you end up comparing two different cards" >&2
     exit 1
   fi
-  python3 "$HERE/analyze_gpu_profile.py" "$OUTDIR" "$dreg_label" "$pydreg_label" \
-    --whole-trace "$dreg_label" "${gpu_index_args[@]}"
+  # An analyzer failure must NOT abort the sweep. The captures are the
+  # expensive, unrepeatable part (hours of exclusive GPU time); analysis
+  # is cheap and re-runnable against artifacts already on disk. Losing a
+  # night of captures to a summarizing bug would be the worst possible
+  # trade, so record the failure and keep capturing.
+  # Built as one array rather than expanding a possibly-empty
+  # "${gpu_index_args[@]}" inline: under `set -u`, expanding an empty
+  # array that way is an "unbound variable" error on bash 3.2, so the
+  # unpinned (auto-detect) path would break on older shells.
+  analyzer_cmd=(
+    python3 "$HERE/analyze_gpu_profile.py" "$OUTDIR" "$dreg_label" "$pydreg_label"
+    --whole-trace "$dreg_label"
+  )
+  if [[ -n "$nvsmi_dreg" && -n "$nvsmi_pydreg" ]]; then
+    analyzer_cmd+=(--gpu-index "$dreg_label=$nvsmi_dreg,$pydreg_label=$nvsmi_pydreg")
+  fi
+  if ! "${analyzer_cmd[@]}"; then
+    echo "[warn] analysis FAILED for $lib -- captures are intact in $OUTDIR;" \
+      "re-run this script (or the analyzer alone) after fixing to recover it" >&2
+    failed_analysis+=("$lib")
+  fi
 done
 
 echo
+if [[ ${#failed_analysis[@]} -gt 0 ]]; then
+  echo "[sweep] captures complete, but analysis failed for: ${failed_analysis[*]}" >&2
+  echo "[sweep] their raw artifacts are intact -- re-run this script to retry analysis only" >&2
+fi
 echo "[sweep] done. Now draw the figures:"
 echo "  python3 $HERE/plot_gpu_utilization.py --outdir $OUTDIR${NVSMI_GPU:+ --gpu-index $NVSMI_GPU}"
 echo "  python3 $HERE/plot_gpu_time_breakdown.py --outdir $OUTDIR"
 echo "  python3 $HERE/plot_gpu_efficiency.py --outdir $OUTDIR"
+
+# Non-zero exit if any library's analysis failed, so an unattended sweep
+# doesn't look like a clean success -- the captures are fine, but the
+# summaries the figures read are incomplete until it's re-run.
+[[ ${#failed_analysis[@]} -eq 0 ]]
