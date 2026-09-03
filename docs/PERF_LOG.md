@@ -3528,6 +3528,15 @@ convention, but the numbers above are the ones to cite going forward.
 `figures/gpu_profiling/README.md`'s Findings section has been updated to
 match.
 
+**Forward pointer, added 2026-09-03**: the 12-library sweep re-measured
+all of this. dREG's two *counts* above (653,677 and 1,345,274) reproduced
+bit-identically on a different host -- but pydreg's `26,281` is specific
+to the `sv_chunk=32,768` default that shipped on this date and was
+lowered to 16,384 two days later, so the `~25x` launch ratio became
+~12.4x with no behavior change on either side. The times in this table
+are same-host figures and don't transfer either. Cite the 2026-09-03
+entry, not this table, for anything other than dREG's counts.
+
 ## 2026-08-19 — an opt-in, fidelity-breaking "fast mode" for `pmv_laplace`: uniform z-grid thinning rejected (real false-positive bias at the FDR boundary), a provably-bounded tail-truncation shipped instead
 
 Asked directly for a further, explicitly-approximate speedup on top of
@@ -4090,3 +4099,132 @@ actively harmful here -- it looks like a default and isn't one.
 Also worth recording for scope: that sweep captured only G1 before
 dying, so 11 libraries remain. G1's own artifacts are intact and just
 need re-analysis at the corrected index.
+
+## 2026-09-03 -- the full 12-library GPU sweep landed: dREG's launch counts reproduced bit-identically, and the `~25x` kernel-launch figure turned out to be pinned to a retired `sv_chunk` default
+
+The sweep queued by the 2026-09-02 entries finished all 12 libraries on
+`cbsugpu01`. All three figures (`figures/plots/gpu_efficiency.svg`,
+`gpu_time_breakdown.svg`, `gpu_utilization.svg`) are regenerated from it,
+one row per library, replacing the single-library versions. Output-unchanged
+ground rule doesn't apply here -- no pipeline code changed, this is
+measurement only.
+
+**The headline: dREG's operation counts reproduced exactly, across a
+different host, three weeks later.** For Jurkat_PROseq, the one library
+common to both captures, dREG's dominant-kernel launches
+(`SparseEvaluateKernelKernel256`) came back as **653,677** and its H2D
+memcpys as **1,345,274** -- bit-identical to the 2026-08-18 numbers, on a
+different physical GPU. Informative-position counts agreed too
+(5,617,218). That's the strongest evidence yet that these counts are
+deterministic properties of the algorithm rather than artifacts of one
+capture, which matters because the *counts* are what the inefficiency
+claim rests on.
+
+**But the kernel-launch ratio moved, and the old number was ours, not
+dREG's.** The per-launch gap now reads **12.2-12.8x** (median 12.4x)
+across all 12 libraries, where the vetted single-library figure was
+`~25x`. dREG's side is unchanged, so the entire move is on pydreg's side:
+its dominant-kernel launch count for Jurkat_PROseq went 26,281 ->
+**51,208**, while its H2D memcpy count stayed at exactly **1,384**.
+
+That is `sv_chunk`, and the arithmetic is exact:
+`_build_cupy_predict_fn` launches one sgemm per (query chunk x sv chunk)
+pair, so the count is `n_query_chunks * ceil(605,187 / sv_chunk)`:
+
+| capture | date | `sv_chunk` | sv-chunks/query batch | pydreg launches | gap |
+|---|---|---|---|---|---|
+| original | 2026-08-18 | 32,768 | 19 | 26,281 | ~25x |
+| sweep | 2026-09-03 | **16,384** | **37** | **51,208** | **12.8x** |
+
+`1,384 * 37 = 51,208` exactly, and 1,384 is also pydreg's H2D count --
+one H2D per query chunk, which is why the memcpy count *didn't* move: H2D
+transfers are per query chunk, independent of `sv_chunk`. 37/19 = 1.947,
+and 24.9x / 1.947 = 12.8x. Six of the twelve libraries land on an exact
+multiple of 37; the other six are within 36 launches of one (the final
+query chunk's sv sweep clipped at the nsys window edge).
+
+The cause is a timeline collision nobody would spot from the figures
+alone: the original capture ran on 2026-08-18, and the 2026-08-20 (cont.)
+entry above lowered the shipped `sv_chunk` default from 32,768 to 16,384
+two days later. `profile_gpu_all.sh` passes no `--cupy-sv-chunk`, so the
+sweep measured the current default. **Both numbers were correct for their
+configuration**; `~25x` was never wrong, it was measured against a
+default that no longer ships. Every mention has been updated to the
+12-library figures, with the `sv_chunk` dependence stated explicitly so
+this can't quietly rot again the next time a default moves.
+
+Worth stating plainly, because it's the uncomfortable half: **a chunk-size
+default we chose moves this ratio by ~2x.** "dREG launches 12x more
+kernels per unit of work" is a claim about pydreg's batching as much as
+about Rgtsvm's kernel design. The memcpy gap (925-972x, median 942x) is
+the far more robust half of the comparison -- it's set by dREG issuing
+one H2D per position against pydreg's one per query chunk, and it barely
+moved across hosts, captures, or defaults.
+
+**Independent corroboration of the 2026-08-20 `sv_chunk` decision.** The
+sweep re-measures it from the opposite direction: halving `sv_chunk`
+doubled the launch count (26,281 -> 51,208) and *halved* per-launch time
+(11.4ms -> 5.38ms median), leaving total GEMM time flat-to-slightly-better
+(299.6s -> 275.5s) and pydreg's phase wall time unchanged (439s -> 436s).
+Exactly the "memory-bandwidth-bound, not launch-overhead-bound"
+conclusion that entry shipped on, now confirmed at 12-library scale on a
+second card.
+
+**Timing numbers do not transfer between the two captures.** The sweep
+host is not the original capture host (confirmed independently: dREG's
+run sits on nvidia-smi GPU 0 with GPU 1 at 8MB peak, the opposite mapping
+from the original host's 2-GPU node, matching the per-host table in
+`figures/gpu_profiling/README.md`). dREG's per-kernel average went
+2.2ms -> 2.48ms for a bit-identical launch count, i.e. ~13% slower
+kernels on different silicon. So:
+
+- **Counts** (launches, memcpys, positions) are hardware-independent and
+  directly comparable across captures. They reproduced exactly.
+- **Times and time-ratios** are not. The old `4.27x` total-GPU-busy
+  number is a same-host figure for Jurkat_PROseq and should not be
+  compared against the sweep's.
+
+12-library sweep numbers, all phase-exact (dREG whole-process, pydreg
+`start_epoch`-windowed):
+
+| | dREG | pydreg | ratio (median) |
+|---|---|---|---|
+| Positions per kernel launch | 8.57-9.05 | 108.4-110.4 | **12.4x** |
+| Positions per H2D memcpy | 4.16-4.41 | 3,958-4,085 | **942x** |
+| Dominant-kernel avg time | 2.48ms | 5.38ms | -- |
+| H2D avg time per call | 2.1us | 495.5us | -- |
+| Total GPU-busy time | 1,434.8-5,557.8s | 310.0-1,297.3s | **4.47x** (4.28-4.63x) |
+| GPU idle fraction of own window | 20.0-26.6% (med 22.3%) | 3.7-4.8% (med 4.2%) | -- |
+| Scoring-phase GPU time | 1,793-7,567s | 325-1,354s | 5.4-5.6x |
+| Mean dmon utilization | 65-69% | 94-96% | -- |
+
+The busy-time ratio is tighter than expected across a 4x range of library
+sizes (4.28x on G1's 17.1M positions to 4.63x on K562's 4.19M), and
+trends mildly *against* size -- dREG closes a little ground on the
+largest libraries, presumably amortizing its per-round snowfall
+cluster setup over more batches per round.
+
+**The scheduling-gap prediction generalizes.** The 2026-08-18 entry
+confirmed `n.loop - 1` large idle gaps for one library. Across the sweep,
+9 of 12 libraries match the predicted count *exactly* (`ceil(ceil(pos /
+50,000) / 16) - 1`: 5 gaps for K562 up to 10 for G5 and Jurkat_ChROseq,
+all exact). The remaining 3 (G1, G3, GM12878) predict 21, 11 and 12 gaps
+and hit the analyzer's 10-slot `largest_gaps_ns` cap, so they're
+consistent but not confirmable from the summary alone -- raising that cap
+would settle it, and is the only loose end left here.
+
+Also fixed: `_build_cupy_predict_fn`'s docstring said the accumulation
+loop runs "~19 chunks," true only at the retired 32,768 default. It's 37
+at the shipped 16,384.
+
+**Figure follow-up**: `plot_gpu_efficiency.py` gained
+`--panels {both,kernel,memcpy}` (default `both`, output unchanged and
+verified byte-identical), writing `gpu_efficiency_memcpy.svg` for the
+single-panel case. The reasoning is the `sv_chunk` dependence above: the
+technical note shows one per-operation figure, and it should be the half
+that doesn't move when we retune our own batching. Keeping it as a flag
+on the existing script rather than a fourth `plot_*.py` avoids
+duplicating the loader and the log-axis code for what is the same figure
+minus a panel; the panel it emits is pixel-identical to the corresponding
+panel of the two-panel version, since the log-axis bounds are
+decade-aligned and the memcpy values span the same decades either way.

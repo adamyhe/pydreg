@@ -36,38 +36,72 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   extraction (a *freshly spun-up and torn-down* snowfall cluster every
   round) against a single big `Rgtsvm::predict.gtsvm` call, once per round
   of `ncores` batches, with zero overlap between rounds. Real `nsys`
-  `cuda_gpu_trace` idle-gap analysis found exactly `n.loop - 1 = 7` large
-  gaps (`[93.8s, 92.9s, 92.9s, 92.8s, 92.3s, 92.0s, 21.3s]`) matching the
-  round count predicted from source precisely -- ~660s of a 2,431s
-  nsys-covered span (27%) is pure GPU idle time from this alone.
+  `cuda_gpu_trace` idle-gap analysis found exactly `n.loop - 1` large
+  gaps, matching the round count predicted from source precisely, on
+  every library where the prediction is checkable: 9 of the 12 match
+  exactly (5 gaps for K562_groseq up to 10 for G5 and Jurkat_ChROseq),
+  and the other 3 predict 21/11/12 gaps against the analyzer's 10-slot
+  `largest_gaps_ns` cap, so they're consistent but not confirmable from
+  the summary alone. Jurkat_PROseq as the worked example (113 batches ->
+  8 rounds -> 7 gaps): `[70.9s, 70.3s, 70.2s, 70.0s, 69.8s, 69.4s,
+  19.0s]` -- six full 16-batch rounds plus one short gap from the
+  undersized final round of a single batch, 439.5s of pure idle inside a
+  2,433.5s span. dREG loses a median **22.3%** of its own window (range
+  20.0-26.6%) to this; pydreg loses **4.2%** (3.7-4.8%).
 - **Kernel-design gap (hypothesis 2), confirmed and sharper than
   expected -- numbers below are phase-exact** (both sides restricted to
   just the informative-positions phase, via the `start_epoch` windowing
-  fix; see "nsys and windowing" below). For the identical 5,617,218
-  positions: Rgtsvm's `GTSVM::CUDA::SparseEvaluateKernelKernel256` launches
-  **653,677** times (~2.2ms each) vs. pydreg's `sgemm_128x128x8_NT_vec`
-  (cuBLAS) in **26,281** calls (~11.4ms each) -- **~25x** fewer kernel
-  launches for the same work. Memory transfers are starker still: dREG
-  issues **1,345,274** separate Host-to-Device memcpys averaging **2.3us**
-  each (clearly launch-overhead-dominated) vs. pydreg's **1,384** H2D
-  memcpys averaging **478.5us** each -- **~972x** more transfer calls for
-  only ~4.7x more total H2D time. Textbook confirmation of "many small
-  sparse-oriented operations" vs. "few large batched dense operations."
+  fix; see "nsys and windowing" below). Per library, on identical
+  position counts both sides: Rgtsvm's
+  `GTSVM::CUDA::SparseEvaluateKernelKernel256` does **8.57-9.05**
+  positions per launch (~2.48ms each) vs. pydreg's
+  `sgemm_128x128x8_NT_vec` (cuBLAS) at **108.4-110.4** (~5.38ms each) --
+  a median **12.4x** fewer kernel launches for the same work. Memory
+  transfers are starker still: dREG issues one Host-to-Device memcpy per
+  **4.16-4.41** positions, averaging **2.1us** each (clearly
+  launch-overhead-dominated), vs. pydreg's one per **3,958-4,085**
+  positions averaging **495.5us** -- a median **942x** more transfer
+  calls for only ~4x more total H2D time. Textbook confirmation of "many
+  small sparse-oriented operations" vs. "few large batched dense
+  operations."
 - **Cleanest single number**: restricting to time the GPU is *actually
   doing something* (excluding the scheduling gap above entirely), dREG's
-  total GPU-busy time is 1,771.0s vs. pydreg's 415.1s for the identical
-  workload -- **~4.27x**, the kernel-design gap in isolation. dREG loses
-  27.1% of its own window to scheduling idle time; pydreg loses only 5.4%.
+  total GPU-busy time is **4.28-4.63x** pydreg's (median **4.47x**) for
+  the identical workload -- the kernel-design gap in isolation. Notably
+  tight across a 4x range of library sizes, and trending mildly *against*
+  size (4.28x on G1's 17.1M positions, 4.63x on K562_groseq's 4.19M).
+
+**The kernel-launch gap depends on pydreg's `sv_chunk`, so quote it with
+that attached.** `_build_cupy_predict_fn` launches one sgemm per (query
+chunk x sv chunk) pair, so pydreg's launch count is
+`n_query_chunks * ceil(605,187 / sv_chunk)` -- exactly, verified. At the
+shipped default (16,384 -> 37 sv-chunks per query batch) the gap is
+12.4x; at the retired 32,768 default (19 sv-chunks) it was ~25x, which
+is the number earlier versions of this README carried. Both are correct
+for their configuration. The memcpy gap is the more robust half of the
+comparison: H2D transfers are one per *query* chunk, independent of
+`sv_chunk`, and that gap barely moved across hosts, captures or
+defaults.
 
 (The first pass at this comparison used pydreg numbers spanning its whole
 run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
 number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
 entries for the full before/after.)
 
-**Scope**: the numbers above are one library (Jurkat_PROseq), the
-original capture. `profile_gpu_all.sh` extends the same measurement across
-all 12 benchmark libraries -- see "Running" below; until that sweep has
-been run, the figures below are drawn from this single pair.
+**Scope**: the numbers above are the full 12-library sweep
+(`profile_gpu_all.sh`, run 2026-09-03 on `cbsugpu01`), and every figure
+below is drawn from it.
+
+**Counts transfer between captures; times don't.** Jurkat_PROseq is the
+one library captured both in the original 2026-08-18 pair and in the
+sweep, on two different hosts three weeks apart. Its dREG launch counts
+came back *bit-identical* (**653,677** dominant-kernel launches,
+**1,345,274** H2D memcpys, on 5,617,218 positions) -- these counts are
+deterministic properties of the algorithm, which is what makes the
+per-operation claim above solid. Per-kernel *times* moved ~13% on the
+different silicon (2.2ms -> 2.48ms for the same launch count), so
+absolute times and time-ratios from one capture should not be compared
+against the other's. See `docs/PERF_LOG.md`'s 2026-09-03 entry.
 
 Three figures, all regenerable from the real profiling data in `gpu_out/`,
 each drawing **one row per library** across whatever the sweep has
@@ -99,9 +133,12 @@ the division themselves. `plot_gpu_efficiency.py`
 log-scale dot plot of *positions processed per GPU operation* (kernel
 launch, H2D memcpy call), one dumbbell per library, with each library's
 own informative-position count read from its own logs rather than divided
-by a single hardcoded constant. dREG does ~25x/~972x less useful work per
+by a single hardcoded constant. dREG does ~12x/~942x less useful work per
 individual operation than pydreg, which is the actual "inefficient" claim,
-not just "the GPU is idle a lot" or "there are more calls." Built as a
+not just "the GPU is idle a lot" or "there are more calls." `--panels
+memcpy` emits just the lower panel as `gpu_efficiency_memcpy.svg`, for
+the technical note and anywhere else that should quote the
+`sv_chunk`-independent half rather than both. Built as a
 dumbbell dot plot rather than a bar chart specifically because a log-scale
 axis distorts bar *length* perceptually (the same reason
 `figures/_common.py`'s scatter panels use log-scale point marks, not bars).
@@ -195,7 +232,16 @@ Then draw the figures (each writes its own standalone SVG to
 python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index IDX
 python3 plot_gpu_time_breakdown.py --outdir gpu_out
 python3 plot_gpu_efficiency.py     --outdir gpu_out
+python3 plot_gpu_efficiency.py     --outdir gpu_out --panels memcpy
 ```
+
+The last one writes `gpu_efficiency_memcpy.svg`, the memcpy panel alone
+as a standalone figure -- `--panels {both,kernel,memcpy}`, defaulting to
+`both`. It exists because the two panels aren't equally robust (see the
+`sv_chunk` caveat in Findings): where only one per-operation number can
+be shown, the memcpy gap is the one that holds. The single-panel output
+is pixel-identical to that panel in the two-panel figure, just cropped
+to its own canvas with the subtitle naming only the median it shows.
 
 All three discover libraries by globbing for the
 `dreg_<LIB>`/`pydreg_<LIB>` labels and skip (with a note) any library not
