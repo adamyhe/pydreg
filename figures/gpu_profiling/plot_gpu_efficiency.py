@@ -20,17 +20,24 @@ per-operation numbers are per-library rather than divided by one
 hardcoded constant.
 
 The two panels are NOT equally robust, and `--panels` exists so a
-downstream figure can quote just the sturdy one. pydreg's kernel-launch
-count is `n_query_chunks * ceil(n_sv / sv_chunk)`, so the kernel-launch
-gap moves with pydreg's own `--cupy-sv-chunk` default -- it read ~25x at
-the retired 32,768 and ~12x at the shipped 16,384, with no change to
-either tool's behavior (see docs/PERF_LOG.md's 2026-09-03 entry). That
-makes it partly a statement about pydreg's batching rather than purely
-about Rgtsvm's kernel design. The memcpy gap has no such dependence: H2D
-transfers are one per *query* chunk, independent of `sv_chunk`, and the
-gap held at 925-972x across two hosts, two captures and two defaults.
-Prefer `--panels memcpy` where only one number can be shown; keep both
-where the full picture is wanted.
+downstream figure can quote just the sturdier one. Both gaps are partly
+statements about pydreg's own batching, not purely about Rgtsvm's kernel
+design: dREG's per-position rates are tuning-free constants (~0.2338 H2D
+memcpys, ~0.1137 dominant-kernel launches per position), while pydreg
+issues one H2D per query chunk and `ceil(n_sv / sv_chunk)` sgemms per
+query chunk. So the memcpy gap goes as `query_chunk` and the kernel gap
+as `query_chunk / ceil(n_sv / sv_chunk)` -- one knob versus two,
+multiplicatively. The kernel number duly read ~25x at the retired
+`sv_chunk=32,768` and ~12x at the shipped 16,384 with no behavior change
+either side; the memcpy number only looked stable across those captures
+because `query_chunk` happened to stay at 4,096 in both (see
+docs/PERF_LOG.md's 2026-09-03 entry).
+
+Prefer `--panels memcpy` where only one number can be shown -- not
+because it is knob-free, but because its order of magnitude survives the
+whole plausible `query_chunk` range (~120x at 512 to ~11,700x at 50,000)
+while the kernel gap computes to ~1.6x at `query_chunk=512`, erasing
+itself. Keep both panels where the full picture is wanted.
 
 Reads gpu_out/summary_dreg_<LIB>_vs_pydreg_<LIB>.json, as produced by
 analyze_gpu_profile.py -- run that first.

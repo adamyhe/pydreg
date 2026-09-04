@@ -71,17 +71,34 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   tight across a 4x range of library sizes, and trending mildly *against*
   size (4.28x on G1's 17.1M positions, 4.63x on K562_groseq's 4.19M).
 
-**The kernel-launch gap depends on pydreg's `sv_chunk`, so quote it with
-that attached.** `_build_cupy_predict_fn` launches one sgemm per (query
-chunk x sv chunk) pair, so pydreg's launch count is
-`n_query_chunks * ceil(605,187 / sv_chunk)` -- exactly, verified. At the
-shipped default (16,384 -> 37 sv-chunks per query batch) the gap is
-12.4x; at the retired 32,768 default (19 sv-chunks) it was ~25x, which
-is the number earlier versions of this README carried. Both are correct
-for their configuration. The memcpy gap is the more robust half of the
-comparison: H2D transfers are one per *query* chunk, independent of
-`sv_chunk`, and that gap barely moved across hosts, captures or
-defaults.
+**Both per-operation gaps depend on pydreg's own batching defaults, so
+quote them with those attached.** dREG's per-position rates are
+tuning-free constants -- a median **0.2338** H2D memcpys and **0.1137**
+dominant-kernel launches per position, varying only ~5% across the 12
+libraries with data density. pydreg issues one H2D per *query* chunk and
+`ceil(n_sv / sv_chunk)` sgemms per query chunk. So both ratios are
+really statements about pydreg's chunk sizes:
+
+| gap | formula | at the shipped defaults | scales with |
+|---|---|---|---|
+| memcpy | `0.2338 * query_chunk` | 950x (measured 942x) | `query_chunk` |
+| kernel launch | `0.1137 * query_chunk / ceil(605,187 / sv_chunk)` | 12.5x (measured 12.4x) | `query_chunk` **x** `sv_chunk` |
+
+That is why the kernel number read ~25x in earlier versions of this
+README: it was measured at the retired `sv_chunk=32,768` (19 sv-chunks
+per query batch) rather than the shipped 16,384 (37). Both are correct
+for their configuration. The memcpy gap held steady across both captures
+only because `query_chunk` stayed at 4,096 in each -- not because it's
+immune.
+
+**Prefer the memcpy gap anyway, for two reasons that do hold.** It moves
+linearly in one knob rather than the product of two, so it's the less
+fragile by construction; and its order of magnitude survives the whole
+plausible `query_chunk` range (~120x at 512 up to ~11,700x at 50,000,
+never under two orders of magnitude), whereas the kernel gap has no such
+floor -- at `query_chunk=512` with the shipped `sv_chunk` it computes to
+~1.6x, i.e. the claim all but disappears. A number a plausible retune
+can erase shouldn't carry the argument.
 
 (The first pass at this comparison used pydreg numbers spanning its whole
 run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
@@ -137,8 +154,9 @@ by a single hardcoded constant. dREG does ~12x/~942x less useful work per
 individual operation than pydreg, which is the actual "inefficient" claim,
 not just "the GPU is idle a lot" or "there are more calls." `--panels
 memcpy` emits just the lower panel as `gpu_efficiency_memcpy.svg`, for
-the technical note and anywhere else that should quote the
-`sv_chunk`-independent half rather than both. Built as a
+the technical note and anywhere else that should quote the gap whose
+order of magnitude our own retuning can't erase (see Findings). Built
+as a
 dumbbell dot plot rather than a bar chart specifically because a log-scale
 axis distorts bar *length* perceptually (the same reason
 `figures/_common.py`'s scatter panels use log-scale point marks, not bars).
@@ -238,8 +256,9 @@ python3 plot_gpu_efficiency.py     --outdir gpu_out --panels memcpy
 The last one writes `gpu_efficiency_memcpy.svg`, the memcpy panel alone
 as a standalone figure -- `--panels {both,kernel,memcpy}`, defaulting to
 `both`. It exists because the two panels aren't equally robust (see the
-`sv_chunk` caveat in Findings): where only one per-operation number can
-be shown, the memcpy gap is the one that holds. The single-panel output
+batching caveat in Findings): where only one per-operation number can be
+shown, the memcpy gap is the one whose order of magnitude holds across
+any plausible chunk-size setting. The single-panel output
 is pixel-identical to that panel in the two-panel figure, just cropped
 to its own canvas with the subtitle naming only the median it shows.
 

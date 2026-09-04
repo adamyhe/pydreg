@@ -4156,10 +4156,44 @@ this can't quietly rot again the next time a default moves.
 Worth stating plainly, because it's the uncomfortable half: **a chunk-size
 default we chose moves this ratio by ~2x.** "dREG launches 12x more
 kernels per unit of work" is a claim about pydreg's batching as much as
-about Rgtsvm's kernel design. The memcpy gap (925-972x, median 942x) is
-the far more robust half of the comparison -- it's set by dREG issuing
-one H2D per position against pydreg's one per query chunk, and it barely
-moved across hosts, captures, or defaults.
+about Rgtsvm's kernel design.
+
+**Update, same day -- the memcpy gap is not exempt, and the first version
+of this entry wrongly said it was.** Both gaps are set by pydreg's
+batching; they just depend on different knobs. dREG's per-position rates
+are tuning-free constants (median **0.2338** H2D memcpys and **0.1137**
+dominant-kernel launches per position, varying only ~5% across the 12
+libraries with data density, and with no knob on either side touching
+them). pydreg issues one H2D per *query* chunk and
+`ceil(n_sv / sv_chunk)` sgemms per query chunk. So:
+
+- memcpy gap `~= 0.2338 * query_chunk` -- proportional to **one** knob.
+  0.2338 * 4,063 observed positions/chunk = 950x, against a measured
+  median of 942x.
+- kernel gap `~= 0.1137 * query_chunk / ceil(605,187 / sv_chunk)` --
+  proportional to **two**, multiplicatively. 0.1137 * 4,063 / 37 =
+  12.5x, against a measured 12.4x.
+
+The memcpy gap looked stable across the two captures only because
+`query_chunk` stayed at 4,096 in both (verified in both runs' logs);
+`sv_chunk` is the default that actually changed, which is why only the
+kernel number moved. That is a fact about which default we happened to
+retune, not evidence of independence.
+
+Two real distinctions survive, and they're the actual reason to prefer
+the memcpy panel:
+
+1. **One knob, not two.** The memcpy gap moves linearly in
+   `query_chunk`; the kernel gap moves in the product, so it's the more
+   fragile of the two by construction.
+2. **The order of magnitude survives any plausible setting.** Sweeping
+   `query_chunk` across its whole realistic range moves the memcpy gap
+   from ~120x (512) to ~11,700x (50,000, the `sklearn` tier's default) --
+   never below two orders of magnitude, so "dREG issues orders of
+   magnitude more transfer calls" holds throughout. The kernel gap has
+   no such floor: at `query_chunk=512` with the shipped `sv_chunk` it
+   computes to **~1.6x**, i.e. the claim all but disappears. A number
+   that a plausible retune can erase shouldn't carry the argument.
 
 **Independent corroboration of the 2026-08-20 `sv_chunk` decision.** The
 sweep re-measures it from the opposite direction: halving `sv_chunk`
@@ -4220,9 +4254,10 @@ at the shipped 16,384.
 **Figure follow-up**: `plot_gpu_efficiency.py` gained
 `--panels {both,kernel,memcpy}` (default `both`, output unchanged and
 verified byte-identical), writing `gpu_efficiency_memcpy.svg` for the
-single-panel case. The reasoning is the `sv_chunk` dependence above: the
-technical note shows one per-operation figure, and it should be the half
-that doesn't move when we retune our own batching. Keeping it as a flag
+single-panel case. The reasoning is the batching dependence above: the
+technical note shows one per-operation figure, and it should be the one
+whose order of magnitude no plausible retune of our own defaults can
+erase. Keeping it as a flag
 on the existing script rather than a fourth `plot_*.py` avoids
 duplicating the loader and the log-axis code for what is the same figure
 minus a panel; the panel it emits is pixel-identical to the corresponding
