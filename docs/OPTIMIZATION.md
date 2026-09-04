@@ -20,6 +20,64 @@ less peak memory than dREG across completed paired experiments:
   <img src="../figures/plots/memory.svg" alt="dREG versus pydreg peak RSS" width="45%">
 </p>
 
+## Why dREG's GPU path is slower
+
+Both tools can use a GPU for scoring, so the end-to-end gap above isn't
+"GPU versus CPU" — it's two different ways of using the same card. Profiled
+with `nsys` and `nvidia-smi dmon` across all 12 benchmark libraries, with
+both sides restricted to the informative-positions scoring phase, two
+separate mechanisms show up. Neither alone explains the gap.
+
+**1. The GPU spends a lot of dREG's run doing nothing.** `eval_svm.R`'s GPU
+path splits positions into 50,000-row batches, groups them into rounds of
+`ncores` batches, and then strictly alternates: CPU-parallel feature
+extraction for a whole round (spinning up and tearing down a fresh snowfall
+cluster each time), *then* one big `Rgtsvm::predict.gtsvm` call. Nothing
+overlaps, so the GPU idles through every extraction phase. The idle gaps are
+exactly where the source says they'll be — one per round boundary, matching
+the predicted count on 9 of the 12 libraries exactly. dREG loses a median
+**22.3%** of its scoring phase to this; pydreg, which runs extraction one
+chunk ahead of scoring on a background thread (see "Overlapping feature
+extraction with scoring" below), loses **4.2%**. Mean GPU utilization over
+the phase: **65-69%** for dREG against **94-96%** for pydreg.
+
+**2. Each individual GPU operation does far less work.** dREG's GPU SVM
+(Rgtsvm) is built around sparse per-element operations: it issues one
+host-to-device memcpy per ~4 positions, averaging 2.1us each — small enough
+that they're dominated by launch overhead rather than bandwidth. pydreg
+transfers one batch per query chunk, ~4,000 positions at a time, averaging
+495us. Same for compute: Rgtsvm's core kernel covers ~8.8 positions per
+launch, pydreg's cuBLAS GEMM ~110.
+
+<p>
+  <img src="../figures/plots/gpu_time_breakdown.svg" alt="GPU time breakdown, dREG versus pydreg, per library" width="48%">
+  <img src="../figures/plots/gpu_efficiency.svg" alt="Work done per GPU operation, dREG versus pydreg, per library" width="48%">
+</p>
+<p>
+  <img src="../figures/plots/gpu_utilization.svg" alt="GPU utilization over time, dREG versus pydreg, per library" width="60%">
+</p>
+
+Putting a number on mechanism 2 alone — counting only time the GPU is
+actually busy, so the idle gaps above are excluded entirely — dREG takes a
+median **4.47x** longer than pydreg for identical work (4.28-4.63x across
+the 12 libraries). Counting the whole phase including idle time, it's
+**5.48x**.
+
+One caveat worth knowing if you quote the per-operation numbers: they
+describe a *configuration*, not a fixed property of either tool. dREG's side
+is fixed (~0.23 memcpys and ~0.11 kernel launches per position, with no knob
+affecting it), but pydreg's depends on its own batching — the memcpy ratio
+scales with `--query-chunk`, and the kernel-launch ratio with `--query-chunk`
+and `--cupy-sv-chunk` together. At the shipped defaults that's ~942x and ~12x
+respectively, which is what the figure states in its own subtitle. Lowering
+`--cupy-sv-chunk`'s default from 32,768 to 16,384 (for the memory reason
+described under "Kernel fusion and batch size") halved the kernel-launch
+ratio on its own, without changing either tool's behavior.
+
+See `docs/PERF_LOG.md`'s 2026-08-18 and 2026-09-03 entries for the full
+investigation, and `figures/gpu_profiling/README.md` for the methodology and
+how to re-run the profiling yourself.
+
 ## Scoring backends
 
 Evaluating the pretrained SVR (605,187 support vectors) against every
