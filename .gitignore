@@ -4,6 +4,7 @@ _reference/
 _models/
 figures/data/
 figures/output/
+figures/gpu_profiling/gpu_out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

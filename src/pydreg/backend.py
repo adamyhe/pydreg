@@ -353,8 +353,8 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     y_scaled accumulates in float64 despite K/coefs being float32 -- each
     chunk's small (query_chunk,)-sized contribution is upcast before
     adding, cheap insurance against cross-chunk summation error over the
-    ~19 chunks this loop runs, independent of the float32 GEMM/kernel
-    itself."""
+    37 chunks this loop runs at the default sv_chunk, independent of the
+    float32 GEMM/kernel itself."""
     import cupy as cp
 
     SV = cp.asarray(dreg_model.SV, dtype=cp.float32)
