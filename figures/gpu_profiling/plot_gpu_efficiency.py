@@ -19,11 +19,25 @@ parses it out of both tools' logs and cross-checks the two agree), so the
 per-operation numbers are per-library rather than divided by one
 hardcoded constant.
 
+The two panels are NOT equally robust, and `--panels` exists so a
+downstream figure can quote just the sturdy one. pydreg's kernel-launch
+count is `n_query_chunks * ceil(n_sv / sv_chunk)`, so the kernel-launch
+gap moves with pydreg's own `--cupy-sv-chunk` default -- it read ~25x at
+the retired 32,768 and ~12x at the shipped 16,384, with no change to
+either tool's behavior (see docs/PERF_LOG.md's 2026-09-03 entry). That
+makes it partly a statement about pydreg's batching rather than purely
+about Rgtsvm's kernel design. The memcpy gap has no such dependence: H2D
+transfers are one per *query* chunk, independent of `sv_chunk`, and the
+gap held at 925-972x across two hosts, two captures and two defaults.
+Prefer `--panels memcpy` where only one number can be shown; keep both
+where the full picture is wanted.
+
 Reads gpu_out/summary_dreg_<LIB>_vs_pydreg_<LIB>.json, as produced by
 analyze_gpu_profile.py -- run that first.
 
 Usage:
     python3 figures/gpu_profiling/plot_gpu_efficiency.py
+    python3 figures/gpu_profiling/plot_gpu_efficiency.py --panels memcpy
 """
 
 from __future__ import annotations
@@ -49,8 +63,8 @@ ROW_H = 26
 PANEL_GAP = 78
 
 PANELS = [
-    ("Positions per kernel launch", "kernel", "positions/launch"),
-    ("Positions per H2D memcpy call", "memcpy", "positions/call"),
+    ("Positions per kernel launch", "kernel", "positions/launch", "kernel launch"),
+    ("Positions per H2D memcpy call", "memcpy", "positions/call", "memcpy call"),
 ]
 
 
@@ -115,14 +129,26 @@ def axis_bounds(values):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_args(parser)
+    parser.add_argument(
+        "--panels",
+        choices=("both", "kernel", "memcpy"),
+        default="both",
+        help="which panels to draw. 'both' (default) writes the full "
+        "two-panel gpu_efficiency.svg; a single panel writes its own "
+        "standalone gpu_efficiency_<panel>.svg, for notes that want only "
+        "one of the two claims (see this module's docstring on why the "
+        "memcpy panel is the more robust one to quote alone)",
+    )
     args = parser.parse_args()
+
+    panels = [p for p in PANELS if args.panels in ("both", p[1])]
 
     pairs = resolve_pairs(args, require="summary")
     rows = [(p.library, m) for p in pairs if (m := load_metrics(p))]
     if not rows:
         raise SystemExit("no library had usable nsys kernel/memcpy data to plot")
 
-    keys = [key for _, key, _ in PANELS]
+    keys = [key for _, key, *_ in panels]
     low, high = axis_bounds(
         [m[tool][key] for _, m in rows for tool in ("dreg", "pydreg") for key in keys]
     )
@@ -134,11 +160,16 @@ def main():
     legend_y = 86  # below the subtitle (y=58), above the first panel title
     plot_w = width - margin_left - margin_right
     panel_h = len(rows) * ROW_H
-    height = top_margin + 2 * panel_h + PANEL_GAP + bottom_margin
+    height = (
+        top_margin
+        + len(panels) * panel_h
+        + (len(panels) - 1) * PANEL_GAP
+        + bottom_margin
+    )
 
     median_gaps = {
         key: statistics.median(m["pydreg"][key] / m["dreg"][key] for _, m in rows)
-        for _, key, _ in PANELS
+        for _, key, *_ in panels
     }
 
     parts = [
@@ -151,8 +182,11 @@ def main():
         f'<text x="{margin_left}" y="34" class="title">Work done per GPU operation</text>',
         f'<text x="{margin_left}" y="58" class="subtitle">'
         f"{len(rows)} librar{'y' if len(rows) == 1 else 'ies'}, log scale, higher = "
-        f"more efficient -- median gap {median_gaps['kernel']:,.0f}x per kernel launch, "
-        f"{median_gaps['memcpy']:,.0f}x per memcpy call</text>",
+        "more efficient -- median gap "
+        + ", ".join(
+            f"{median_gaps[key]:,.0f}x per {phrase}" for _, key, _, phrase in panels
+        )
+        + "</text>",
     ]
 
     for i, (color, label) in enumerate([(COLOR_DREG, "dREG"), (COLOR_PYDREG, "pydreg")]):
@@ -162,7 +196,7 @@ def main():
             f'<text x="{lx + 14}" y="{legend_y + 5}" class="legend">{escape(label)}</text>'
         )
 
-    for panel_i, (panel_title, key, unit) in enumerate(PANELS):
+    for panel_i, (panel_title, key, unit, _) in enumerate(panels):
         y_top = top_margin + panel_i * (panel_h + PANEL_GAP)
         parts.append(
             f'<text x="{margin_left}" y="{y_top - 12}" class="colhead">'
@@ -215,9 +249,10 @@ def main():
             )
 
     parts.append("</svg>")
-    write_svg(parts, "gpu_efficiency.svg")
+    suffix = "" if args.panels == "both" else f"_{args.panels}"
+    write_svg(parts, f"gpu_efficiency{suffix}.svg")
 
-    for _, key, unit in PANELS:
+    for _, key, unit, _ in panels:
         print(f"\n{unit}:")
         for library, m in rows:
             print(
