@@ -39,11 +39,13 @@ second line names the batching it was measured at, with `query_chunk`
 parsed from the pydreg run's log and sv-chunks-per-batch measured from
 the trace (kernel launches per H2D memcpy) rather than hardcoded.
 
-Prefer `--panels memcpy` where only one number can be shown -- not
-because it is knob-free, but because its order of magnitude survives the
-whole plausible `query_chunk` range (~120x at 512 to ~11,700x at 50,000)
-while the kernel gap computes to ~1.6x at `query_chunk=512`, erasing
-itself. Keep both panels where the full picture is wanted.
+Because each panel is self-scoping, showing both is safe, and `both` is
+both the default and what the technical note uses. `--panels
+{kernel,memcpy}` is for a context where only one number fits; prefer
+memcpy there -- not because it is knob-free, but because its order of
+magnitude survives the whole plausible `query_chunk` range (~120x at 512
+to ~11,700x at 50,000) while the kernel gap computes to ~1.6x at
+`query_chunk=512`, erasing itself.
 
 Reads gpu_out/summary_dreg_<LIB>_vs_pydreg_<LIB>.json, as produced by
 analyze_gpu_profile.py -- run that first.

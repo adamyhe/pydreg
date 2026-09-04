@@ -4298,3 +4298,18 @@ efficiency SVGs are no longer byte-identical to the sweep's originals --
 the dot geometry is untouched, and the memcpy-only figure is still
 pixel-identical to the corresponding panel of the two-panel version
 (verified: 24 of 24 dots match after the 390px shift).
+
+
+## 2026-09-03 (cont.) -- technical note went back to both efficiency panels
+
+Now that each panel names the batching it was measured at, the reason to
+show only one is gone: a two-panel figure captioned with its
+configuration isn't the thing that misleads. The note shows both, and
+`--panels both` (the default) is what it uses.
+
+`--panels {kernel,memcpy}` stays for contexts where only one number
+fits, and memcpy is still the right pick there -- the magnitude-floor
+argument in the entry above is unchanged, it just isn't load-bearing for
+the note anymore. `gpu_efficiency_memcpy.svg` is no longer committed:
+nothing referenced it, two efficiency SVGs in `figures/plots/` invites
+confusion about which is canonical, and one command regenerates it.

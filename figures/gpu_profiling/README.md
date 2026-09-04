@@ -160,14 +160,15 @@ launch, H2D memcpy call), one dumbbell per library, with each library's
 own informative-position count read from its own logs rather than divided
 by a single hardcoded constant. dREG does ~12x/~942x less useful work per
 individual operation than pydreg, which is the actual "inefficient" claim,
-not just "the GPU is idle a lot" or "there are more calls." `--panels
-memcpy` emits just the lower panel as `gpu_efficiency_memcpy.svg`, for
-the technical note and anywhere else that should quote the gap whose
-order of magnitude our own retuning can't erase (see Findings). Built
-as a
-dumbbell dot plot rather than a bar chart specifically because a log-scale
-axis distorts bar *length* perceptually (the same reason
-`figures/_common.py`'s scatter panels use log-scale point marks, not bars).
+not just "the GPU is idle a lot" or "there are more calls." Both panels
+carry their own configuration line (see Findings), which is what makes
+showing both of them safe -- and the technical note shows both.
+`--panels {kernel,memcpy}` emits either one alone for a context where
+only a single number fits; memcpy is the better pick there, for the
+reason Findings gives. Built as a dumbbell dot plot rather than a bar
+chart specifically because a log-scale axis distorts bar *length*
+perceptually (the same reason `figures/_common.py`'s scatter panels use
+log-scale point marks, not bars).
 
 ## Isolating the right process/phase, with zero source modification
 
@@ -258,20 +259,22 @@ Then draw the figures (each writes its own standalone SVG to
 python3 plot_gpu_utilization.py   --outdir gpu_out --gpu-index IDX
 python3 plot_gpu_time_breakdown.py --outdir gpu_out
 python3 plot_gpu_efficiency.py     --outdir gpu_out
-python3 plot_gpu_efficiency.py     --outdir gpu_out --panels memcpy
 ```
 
-The last one writes `gpu_efficiency_memcpy.svg`, the memcpy panel alone
-as a standalone figure -- `--panels {both,kernel,memcpy}`, defaulting to
-`both`. Every variant states the batching it was measured at in its own
-subtitle, parsed from the pydreg run's log (`query_chunk`) and measured
-from the trace (sv-chunks per batch = kernel launches per H2D memcpy),
-so no default is hardcoded into a figure. It exists because the two panels aren't equally robust (see the
-batching caveat in Findings): where only one per-operation number can be
-shown, the memcpy gap is the one whose order of magnitude holds across
-any plausible chunk-size setting. The single-panel output
-is pixel-identical to that panel in the two-panel figure, just cropped
-to its own canvas with the subtitle naming only the median it shows.
+`plot_gpu_efficiency.py` takes `--panels {both,kernel,memcpy}`,
+defaulting to `both` -- the two-panel `gpu_efficiency.svg` is what the
+technical note shows. A single panel writes its own
+`gpu_efficiency_<panel>.svg` instead, for a context where only one
+per-operation number fits (memcpy is the better pick there, per
+Findings); that output is pixel-identical to the corresponding panel of
+the two-panel figure, just cropped to its own canvas with the header
+naming only the median it shows. It isn't committed -- one command
+regenerates it.
+
+Every variant states the batching it was measured at in its own header,
+parsed from the pydreg run's log (`query_chunk`) and measured from the
+trace (sv-chunks per batch = kernel launches per H2D memcpy), so no
+default is hardcoded into a figure.
 
 All three discover libraries by globbing for the
 `dreg_<LIB>`/`pydreg_<LIB>` labels and skip (with a note) any library not
