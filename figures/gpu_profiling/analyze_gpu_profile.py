@@ -94,6 +94,25 @@ def parse_positions(log_path):
     return None
 
 
+# pydreg logs its resolved query-chunk size unprompted at startup ("using
+# cupy backend (query_chunk=4096)"). Reading it back means the efficiency
+# figure can state the batching its own ratios were measured at, rather
+# than hardcoding a default that later moves -- which is exactly how the
+# kernel-launch ratio silently drifted from ~25x to ~12x when sv_chunk's
+# default was lowered. dREG's log has no counterpart and needs none.
+QUERY_CHUNK_RE = re.compile(r"query_chunk=(\d+)")
+
+
+def parse_query_chunk(log_path):
+    """Returns the query-chunk size this pydreg run scored with, or None
+    for a log that doesn't state one (dREG's, or a pydreg build predating
+    the startup line)."""
+    if not log_path.exists():
+        return None
+    m = QUERY_CHUNK_RE.search(log_path.read_text(errors="replace"))
+    return int(m.group(1)) if m else None
+
+
 def parse_dmon(dmon_path):
     """Parses `nvidia-smi dmon -s um -o DT` output. Column layout (names,
     ordering, presence of a units row) has drifted across driver versions,

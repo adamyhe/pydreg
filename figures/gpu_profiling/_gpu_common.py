@@ -48,6 +48,7 @@ from analyze_gpu_profile import (  # noqa: E402
     parse_dmon,
     parse_log_window,
     parse_positions,
+    parse_query_chunk,
     select_active_gpu,
     window_df,
 )
@@ -156,6 +157,12 @@ class Pair:
                 "Check the right two runs got paired."
             )
         return next(iter(counts.values()))
+
+    def query_chunk(self):
+        """The query-chunk size the pydreg run scored with, read from its
+        own log, or None if it didn't state one. Only pydreg logs this;
+        dREG has no equivalent knob."""
+        return parse_query_chunk(self.log_path(self.pydreg_label))
 
 
 def parse_pair_specs(specs):

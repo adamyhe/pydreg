@@ -33,6 +33,12 @@ either side; the memcpy number only looked stable across those captures
 because `query_chunk` happened to stay at 4,096 in both (see
 docs/PERF_LOG.md's 2026-09-03 entry).
 
+So every variant states its own configuration: the subtitle makes the
+scoped claim ("pydreg does 942x dREG's work per memcpy call") and a
+second line names the batching it was measured at, with `query_chunk`
+parsed from the pydreg run's log and sv-chunks-per-batch measured from
+the trace (kernel launches per H2D memcpy) rather than hardcoded.
+
 Prefer `--panels memcpy` where only one number can be shown -- not
 because it is knob-free, but because its order of magnitude survives the
 whole plausible `query_chunk` range (~120x at 512 to ~11,700x at 50,000)
@@ -152,6 +158,7 @@ def main():
 
     pairs = resolve_pairs(args, require="summary")
     rows = [(p.library, m) for p in pairs if (m := load_metrics(p))]
+    query_chunks = {qc for p in pairs if (qc := p.query_chunk()) is not None}
     if not rows:
         raise SystemExit("no library had usable nsys kernel/memcpy data to plot")
 
@@ -163,8 +170,9 @@ def main():
 
     width = 960
     margin_left, margin_right = 196, 122
-    top_margin, bottom_margin = 136, 56
-    legend_y = 86  # below the subtitle (y=58), above the first panel title
+    top_margin, bottom_margin = 158, 56
+    config_y = 80  # the batching line, directly under the subtitle (y=58)
+    legend_y = 108  # below the config line, above the first panel title
     plot_w = width - margin_left - margin_right
     panel_h = len(rows) * ROW_H
     height = (
@@ -179,6 +187,40 @@ def main():
         for _, key, *_ in panels
     }
 
+    # State the batching these ratios were measured at, read from the runs
+    # themselves rather than hardcoded: both gaps scale with pydreg's chunk
+    # sizes (memcpy with query_chunk, kernel launch with query_chunk over
+    # the sv-chunk count), so a figure quoting them without naming the
+    # configuration invites exactly the misreading that the ~25x -> ~12x
+    # drift caused. sv-chunks per query batch is measured, not assumed:
+    # it's pydreg's kernel launches per H2D memcpy.
+    knobs = [
+        f"query_chunk {sorted(query_chunks)[0]:,}"
+        if len(query_chunks) == 1
+        else "mixed query_chunk"
+    ] if query_chunks else ["query_chunk not stated in the logs"]
+    if any(key == "kernel" for _, key, *_ in panels):
+        sv_chunks = statistics.median(
+            m["pydreg"]["memcpy"] / m["pydreg"]["kernel"] for _, m in rows
+        )
+        knobs.append(f"{sv_chunks:,.0f} sv-chunks per batch")
+    # "pydreg does 12x dREG's work per kernel launch and 942x per memcpy
+    # call" -- the referent is spelled out once and carried, so a second
+    # panel doesn't repeat it. Header text is unwrapped SVG <text>, and
+    # DejaVu Sans (first in the stack) is wide enough that the old
+    # single-line subtitle already ran off the 960px canvas, so the scope
+    # and the batching knobs live on the second line where they fit.
+    per_panel = [
+        f"{median_gaps[key]:,.0f}x{' dREG’s work' if i == 0 else ''} per {phrase}"
+        for i, (_, key, _, phrase) in enumerate(panels)
+    ]
+    claim = f"pydreg does {' and '.join(per_panel)}"
+    config_note = (
+        f"median of {len(rows)} librar{'y' if len(rows) == 1 else 'ies'}; "
+        f"pydreg at {', '.join(knobs)} -- "
+        + ("both scale with these" if len(panels) > 1 else "this scales with it")
+    )
+
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img">',
@@ -188,12 +230,9 @@ def main():
         f'<rect width="{width}" height="{height}" fill="#fff"/>',
         f'<text x="{margin_left}" y="34" class="title">Work done per GPU operation</text>',
         f'<text x="{margin_left}" y="58" class="subtitle">'
-        f"{len(rows)} librar{'y' if len(rows) == 1 else 'ies'}, log scale, higher = "
-        "more efficient -- median gap "
-        + ", ".join(
-            f"{median_gaps[key]:,.0f}x per {phrase}" for _, key, _, phrase in panels
-        )
-        + "</text>",
+        f"{escape(claim)}</text>",
+        f'<text x="{margin_left}" y="{config_y}" class="panelstat">'
+        f"{escape(config_note)}</text>",
     ]
 
     for i, (color, label) in enumerate([(COLOR_DREG, "dREG"), (COLOR_PYDREG, "pydreg")]):

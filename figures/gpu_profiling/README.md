@@ -91,14 +91,22 @@ for their configuration. The memcpy gap held steady across both captures
 only because `query_chunk` stayed at 4,096 in each -- not because it's
 immune.
 
-**Prefer the memcpy gap anyway, for two reasons that do hold.** It moves
-linearly in one knob rather than the product of two, so it's the less
-fragile by construction; and its order of magnitude survives the whole
-plausible `query_chunk` range (~120x at 512 up to ~11,700x at 50,000,
-never under two orders of magnitude), whereas the kernel gap has no such
-floor -- at `query_chunk=512` with the shipped `sv_chunk` it computes to
-~1.6x, i.e. the claim all but disappears. A number a plausible retune
-can erase shouldn't carry the argument.
+**So state the configuration and report the measurement**, rather than
+arguing about which ratio is intrinsic: *at pydreg's default batching,
+pydreg does 942x dREG's work per H2D memcpy and 12x per kernel launch.*
+Both figures say exactly that on their face -- the subtitle carries the
+claim and a second line names the `query_chunk` and sv-chunks-per-batch
+they were measured at, read out of the runs' own logs rather than
+hardcoded, so the figure can't silently drift the way the ~25x number
+did.
+
+**Where only one ratio can be shown, use memcpy.** Not because it's
+knob-free -- it isn't -- but because its order of magnitude survives the
+whole plausible `query_chunk` range (~120x at 512 up to ~11,700x at
+50,000, never under two orders of magnitude), whereas the kernel gap has
+no such floor: at `query_chunk=512` with the shipped `sv_chunk` it
+computes to ~1.6x, i.e. the claim all but disappears. A number a
+plausible retune can erase shouldn't carry the argument.
 
 (The first pass at this comparison used pydreg numbers spanning its whole
 run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
@@ -255,7 +263,10 @@ python3 plot_gpu_efficiency.py     --outdir gpu_out --panels memcpy
 
 The last one writes `gpu_efficiency_memcpy.svg`, the memcpy panel alone
 as a standalone figure -- `--panels {both,kernel,memcpy}`, defaulting to
-`both`. It exists because the two panels aren't equally robust (see the
+`both`. Every variant states the batching it was measured at in its own
+subtitle, parsed from the pydreg run's log (`query_chunk`) and measured
+from the trace (sv-chunks per batch = kernel launches per H2D memcpy),
+so no default is hardcoded into a figure. It exists because the two panels aren't equally robust (see the
 batching caveat in Findings): where only one per-operation number can be
 shown, the memcpy gap is the one whose order of magnitude holds across
 any plausible chunk-size setting. The single-panel output

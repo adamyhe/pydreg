@@ -4263,3 +4263,38 @@ duplicating the loader and the log-axis code for what is the same figure
 minus a panel; the panel it emits is pixel-identical to the corresponding
 panel of the two-panel version, since the log-axis bounds are
 decade-aligned and the memcpy values span the same decades either way.
+
+
+## 2026-09-03 (cont.) -- the efficiency figure now states the batching it was measured at
+
+Reframing, prompted by the observation that arguing about which ratio is
+"intrinsic" is the wrong move when neither is: just name the
+configuration and report the measurement. Both panels now say it
+directly -- *"pydreg does 942x dREG's work per memcpy call"* as the
+subtitle, with a second line reading *"median of 12 libraries; pydreg at
+query_chunk 4,096 -- this scales with it."*
+
+The important part is that neither number in that second line is
+hardcoded. `query_chunk` is parsed from the pydreg run's own startup log
+line (`using cupy backend (query_chunk=4096)`, new `parse_query_chunk`
+in `analyze_gpu_profile.py`), and sv-chunks-per-batch is *measured* from
+the trace as pydreg's kernel launches per H2D memcpy (37.0 median, which
+is `ceil(605,187 / 16,384)`) rather than derived from a default that
+could move. That closes the exact failure mode this whole thread came
+from: a figure quoting a ratio whose configuration lived only in a
+docstring, which silently went stale when the default changed.
+
+Caught while re-laying out the header: the *existing* single-line
+subtitle already overflowed the 960px canvas. Measured with real font
+metrics rather than eyeballed -- the two-panel subtitle rendered 936px
+wide starting at x=196, running ~172px off the right edge in DejaVu Sans
+(the first font in the stack; Arial, further down it, is ~5% narrower
+and still overflowed by 25px). Split into a 17px claim line and a 14px
+configuration line, every header line in all three panel variants now
+clears the canvas by at least 53px in DejaVu.
+
+Layout changed (`top_margin` 136 -> 158, legend 86 -> 108), so the
+efficiency SVGs are no longer byte-identical to the sweep's originals --
+the dot geometry is untouched, and the memcpy-only figure is still
+pixel-identical to the corresponding panel of the two-panel version
+(verified: 24 of 24 dots match after the 390px shift).
