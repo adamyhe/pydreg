@@ -103,6 +103,7 @@ result = pipeline.run(
     backend_name=None,
     svr_model_path=None,
     rf_model_path=None,
+    cores=8
 )
 # result: {"dense_infp": ..., "raw_peak": ..., "peak_bed": ..., "min_score": ...}
 ```
