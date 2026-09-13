@@ -1,13 +1,13 @@
 cff-version: 1.2.0
 message: >-
-  If you use this software, please cite it using the metadata below.
-  pydreg is an inference-only port of dREG (Danko Lab) -- please also
-  cite the original dREG papers listed under `references` below (and in
-  the README's "Citation" section) to credit the underlying method.
+  If you use this software, please cite the preprint under
+  `preferred-citation` below. pydreg is port of dREG please also cite
+  the original dREG papers listed under `references` below (and in the
+  README's "Citation" section) to credit the underlying method.
 type: software
 title: pydreg
-version: 0.3.1
-date-released: '2026-08-23'
+version: 0.3.1.post2
+date-released: '2026-09-13'
 abstract: >-
   An inference-only Python port of dREG (Danko Lab) for detecting active
   transcriptional regulatory elements (promoters and enhancers) from
@@ -28,6 +28,21 @@ keywords:
   - gro-seq
   - peak calling
   - svm
+preferred-citation:
+  type: article
+  title: >-
+    pydreg: a fast Python package for identifying active cis-regulatory
+    elements from nascent transcription
+  authors:
+    - given-names: Adam Youlin
+      family-names: He
+    - given-names: Charles G
+      family-names: Danko
+  journal: bioRxiv
+  year: 2026
+  month: 9
+  doi: 10.64898/2026.09.06.745329
+  url: https://www.biorxiv.org/content/10.64898/2026.09.06.745329
 references:
   - type: article
     title: Identification of active transcriptional regulatory elements from GRO-seq data

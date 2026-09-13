@@ -151,7 +151,11 @@ GPL-3.0 (matching the original dREG R package, which is GPL-3-licensed).
 
 ## Citation
 
-If you use this package, please cite the original dREG papers:
+If you use this package, please cite the pydreg preprint:
+
+> He, A. Y., & Danko, C. G. (2026). pydreg: a fast Python package for identifying active cis-regulatory elements from nascent transcription. *bioRxiv*. https://doi.org/10.64898/2026.09.06.745329
+
+Since pydreg is a port that reuses dREG's pretrained models and peak-calling procedure, please also cite the original dREG papers:
 
 > Danko, C. G., Hyland, S. L., Core, L. J., Martins, A. L., Waters, C. T., Lee, H. W., Cheung, V. G., Kraus, W. L., Lis, J. T., & Siepel, A. (2015). Identification of active transcriptional regulatory elements from GRO-seq data. *Nature Methods*, 12(5), 433-438. https://doi.org/10.1038/nmeth.3329
 
