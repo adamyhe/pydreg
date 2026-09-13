@@ -105,6 +105,14 @@ If you use this data, please cite pydreg, dREG, and the original data
 sources listed in the table above:
 
 ```bibtex
+@article{he2026pydreg,
+  author  = {He, Adam Youlin and Danko, Charles G.},
+  title   = {pydreg: a fast Python package for identifying active cis-regulatory elements from nascent transcription},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.09.06.745329}
+}
+
 @article{wang2019dreg,
   author  = {Wang, Zhong and Chu, Tinyi and Choate, Lauren A. and Danko, Charles G.},
   title   = {Identification of regulatory elements from nascent transcription using dREG},
