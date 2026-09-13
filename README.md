@@ -51,7 +51,7 @@ If you already have compatible exported model files, pass them with `--svr-model
 ### CLI
 
 ```bash
-pydreg plus.bw minus.bw out_prefix --verbose
+pydreg plus.bw minus.bw out_prefix --verbose --cores 8
 ```
 
 - `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized **read counts** — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. `minus.bw` may be positive- or negative-signed — `pydreg` takes the absolute value of both strands during feature extraction (matching the original C implementation), so sign convention doesn't affect scoring.
