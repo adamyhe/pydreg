@@ -25,12 +25,36 @@ import pandas as pd
 from . import smoothing, stats
 
 
-def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2):
+def _next_pmv_rng(seed_seq):
+    """One independent Generator per stats.pmv_laplace call, spawned from
+    this block's SeedSequence (None -> pmv_laplace's own unseeded default,
+    fresh OS entropy).
+
+    Per call rather than one shared Generator per peak because the number
+    of uniforms a call consumes is itself random (_qmvn_adaptive's growth
+    rounds, plus pmv_laplace's p_norm > 0.99 short-circuit, which can make
+    the difference between 1 and ~100 kernel evaluations) -- so stream
+    offsets aren't predictable and can't be reasoned about. SeedSequence
+    keys the streams by position in the spawn tree instead, which is what
+    makes a seeded run reproduce independently of `cores` and of how blocks
+    happen to be scheduled across workers."""
+    if seed_seq is None:
+        return None
+    return np.random.default_rng(seed_seq.spawn(1)[0])
+
+
+def find_rf_peaks(
+    model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2, seed_seq=None
+):
     """x, y: 1-D arrays of positions/scores for one broad peak (already
     restricted to that peak's span). model: a DREGPeakSplitForest. Returns a
     DataFrame with columns start, stop, score, prob, smooth_mode,
     original_mode, centroid (prob == -1 sentinel for regions <5 points wide
     -- no p-value computed), or None if no local maxima exceed amp_threshold.
+
+    seed_seq: an optional numpy SeedSequence this peak's p-value
+    evaluations draw their QMC streams from (see _next_pmv_rng); None
+    leaves stats.pmv_laplace unseeded, the default.
 
     SlopeThreshold from the R signature is dropped: it's only ever used
     there to decide how many times to replicate AmpThreshold/smoothwidth
@@ -147,7 +171,7 @@ def find_rf_peaks(model, x, y, amp_threshold, smoothwidth, cor_mat, smoothtype=2
         i_sample = _sample_indices(y, i_left, i_right, i_peak)
         pv = np.nan
         if i_sample is not None and not np.any(np.isnan(y[i_sample])):
-            pv = stats.pmv_laplace(y[i_sample], cor_mat)
+            pv = stats.pmv_laplace(y[i_sample], cor_mat, rng=_next_pmv_rng(seed_seq))
 
         peak_window = y[i_left : i_right + 1]
         weights = np.arange(1, i_right - i_left + 2, dtype=float)

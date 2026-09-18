@@ -126,6 +126,19 @@ def main(argv=None):
         "pass --pmv-laplace-tail-tol explicitly to use some other "
         "tolerance instead",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="seed the randomized QMC integration inside pmv_laplace, the "
+        "only stochastic step in the pipeline, making the called peaks "
+        "reproducible run-to-run (and independent of --cores). Omitted by "
+        "default: each p-value draws fresh OS entropy, as it always has. "
+        "Reproducibility holds for a fixed environment and a fixed set of "
+        "--pmv-laplace-* settings, not across platforms or SciPy versions. "
+        "Two runs at different seeds, diffed, measure how much of the "
+        "called-peak set is FDR-boundary noise",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--no-progress",
@@ -166,6 +179,7 @@ def main(argv=None):
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
         pmv_laplace_tail_tol=pmv_laplace_tail_tol,
+        seed=args.seed,
         progress=not args.no_progress,
     )
 

@@ -43,3 +43,17 @@ def test_explicit_pmv_laplace_tail_tol_without_exact_flag(monkeypatch):
         ["plus.bw", "minus.bw", "out", "--pmv-laplace-tail-tol", "2e-5"],
     )
     assert kwargs["pmv_laplace_tail_tol"] == 2e-5
+
+
+def test_seed_defaults_to_none(monkeypatch):
+    # Unseeded by default: keeps the long-validated behavior, and keeps a
+    # single run from looking more exact than it is.
+    kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out"])
+    assert kwargs["seed"] is None
+
+
+def test_seed_is_passed_through(monkeypatch):
+    kwargs = _run_and_capture(
+        monkeypatch, ["plus.bw", "minus.bw", "out", "--seed", "20260917"]
+    )
+    assert kwargs["seed"] == 20260917

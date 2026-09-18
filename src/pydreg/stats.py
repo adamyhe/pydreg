@@ -5,6 +5,7 @@ multivariate-Laplace tail-probability integral (the per-summit p-value used
 before BH-FDR adjustment in pydreg.peaks).
 """
 
+import inspect
 import math
 import time
 
@@ -237,9 +238,15 @@ def _z_grid():
 # performance win with zero numerical risk: it only reuses exactly the
 # value SciPy would otherwise have recomputed, never approximates anything,
 # and never touches the randomized QMC shift/kernel evaluation itself
-# (scipy's `_qmvn` draws that fresh, per eval, from its own RNG state,
-# entirely independent of this cached deterministic setup step) -- so
-# pmv_laplace's existing run-to-run QMC noise is unaffected.
+# (`_qmvn_local` below draws that fresh, per eval, from the caller's
+# Generator, entirely independent of this cached deterministic setup step)
+# -- so pmv_laplace's existing run-to-run QMC noise is unaffected.
+# (Re-measured under the small-start schedule _QAUTO_START introduced
+# below, which replaced _qauto: two distinct keys now occur, (4, 21) and
+# (4, 30), across a wide sweep of cor_mat/x/tail_tol -- the second only for
+# boxes needing a growth round. Rarer further growth rounds can reach more,
+# which is why this stays a cache over SciPy's constructor rather than a
+# frozen data table.)
 #
 # _permuted_cholesky (the other per-eval setup step, box-reordering +
 # Cholesky factorization) was tried the same way and DELIBERATELY DROPPED:
@@ -262,7 +269,9 @@ def _z_grid():
 # _cbc_lattice is a private SciPy API (`scipy.stats._qmvnt`, underscore-
 # prefixed). Saving the original below fails loudly (AttributeError at
 # import time) if a future SciPy version renames/removes it, rather than
-# silently reverting to uncached-but-still-correct behavior.
+# silently reverting to uncached-but-still-correct behavior. `_qmvn_local`
+# calls the cached wrapper directly -- SciPy's own module global is left
+# alone (see _qmvn_local's docstring for why that matters).
 _orig_cbc_lattice = _qmvnt._cbc_lattice
 
 _cbc_lattice_cache = {}
@@ -278,9 +287,6 @@ def _cached_cbc_lattice(n_dim, n_qmc_samples):
     # Return a copy: the lattice array must never be mutated in place by a
     # caller, or every future cache hit would silently return corrupted data.
     return q.copy(), n_qmc_samples_actual
-
-
-_qmvnt._cbc_lattice = _cached_cbc_lattice
 
 
 # _permuted_cholesky (box-reordering + Cholesky factorization, run once per
@@ -391,9 +397,88 @@ def _permuted_cholesky_numba(covar, low, high, tol=1e-10):
 
 
 # Private SciPy API, same "fail loudly if renamed/removed" reasoning as
-# _orig_cbc_lattice above.
+# _orig_cbc_lattice above. Kept as the reference implementation the numba
+# port is validated against in the tests; SciPy's own module global is left
+# pointing at it (see _qmvn_local's docstring).
 _orig_permuted_cholesky = _qmvnt._permuted_cholesky
-_qmvnt._permuted_cholesky = _permuted_cholesky_numba
+
+
+# The one remaining *runtime* dependency on SciPy's private QMC internals:
+# `_qmvn_inner`, the compiled Cython kernel (tent-periodized CBC lattice
+# point, Cranley-Patterson shift, ndtri/ndtr, online mean/error-variance
+# across batches). Deliberately used rather than reimplemented -- a
+# line-for-line numba port of it was built and measured at 0.83-1.11x
+# (IEEE-safe) against it, and would additionally force a hand-rolled ndtri
+# since scipy.special.ndtri isn't numba-typeable; see docs/PERF_LOG.md
+# (Phase B0/B1) for why neither a fidelity nor a speed case exists for
+# owning this kernel ourselves.
+#
+# Binding it here fails loudly (AttributeError at import) if a future SciPy
+# renames or removes it -- the same failure mode that CI caught in July
+# 2026 and that set this project's `scipy>=1.16` floor. The parameter check
+# below additionally covers a *signature* change, which is the drift mode
+# that could otherwise pass unnoticed: _qmvn_local passes all seven
+# arguments positionally, so a reordered, renamed, or inserted parameter
+# would silently compute the wrong probability instead of raising. Only the
+# leading seven are pinned -- SciPy appending a new trailing parameter with
+# a default is harmless to a positional call, so it shouldn't break imports.
+_qmvn_inner = _qmvnt._qmvn_inner
+_QMVN_INNER_PARAMS = ("q", "rndm", "n_qmc_samples", "n_batches", "cho", "lo", "hi")
+_qmvn_inner_params = tuple(inspect.signature(_qmvn_inner).parameters)
+if _qmvn_inner_params[: len(_QMVN_INNER_PARAMS)] != _QMVN_INNER_PARAMS:
+    raise ImportError(
+        "scipy.stats._qmvnt._qmvn_inner's signature changed: pydreg.stats "
+        f"expects it to start with {_QMVN_INNER_PARAMS}, found "
+        f"{_qmvn_inner_params}. pydreg.stats._qmvn_local calls it "
+        "positionally, so this must be re-checked against the installed "
+        "SciPy before pmv_laplace's p-values can be trusted -- see that "
+        "function's docstring."
+    )
+
+
+def _qmvn_local(m, covar, low, high, rng, n_batches=10):
+    """One randomized-QMC evaluation of the box probability
+    P(low < X < high) for X ~ N(0, covar), using `m` total points split
+    across `n_batches` batches. Returns (prob, est_error, n_samples), where
+    est_error is 3x the standard error across the batch means.
+
+    A local re-derivation of SciPy's private `_qmvnt._qmvn` driver, so the
+    two deterministic setup steps this module overrides -- the cached CBC
+    lattice and the numba pivoted-Cholesky -- can be passed in as arguments
+    rather than monkeypatched into `scipy.stats._qmvnt`'s module globals,
+    which is how they used to be installed. Same functions in the same
+    order as SciPy's own driver, so this is bit-identical to it given the
+    same `rng` draws; what changes is that importing pydreg no longer
+    mutates SciPy's behavior for everything else in the process
+    (`scipy.stats.multivariate_normal.cdf` included), and that a *semantic*
+    change to the private API surface now fails a test (see
+    test_stats.py's cross-check against the public CDF) instead of quietly
+    feeding a differently-shaped decomposition into the kernel.
+
+    Every random bit in pydreg's pipeline is the single `rng.random()` call
+    below: an (n_batches, n_dim) block of independent Cranley-Patterson
+    shifts, one scalar per (batch, dimension). Two contracts ride on it and
+    must not be "optimized":
+      - the batch shifts have to stay independent of each other, since
+        est_error is the standard error across the batch means -- so never
+        substitute a pre-drawn or tiled array for a live Generator;
+      - the caller must not hand out a fresh identically-seeded Generator
+        per evaluation, which would reuse one shift across every box of
+        pmv_laplace's z-grid and inflate its run-to-run noise ~3.7x
+        (measured) by correlating errors that otherwise cancel.
+    See pmv_laplace's `rng` parameter for the seeding scheme built on this.
+    """
+    cho, lo, hi = _permuted_cholesky_numba(covar, low, high)
+    if not cho.flags.c_contiguous:
+        # _qmvn_inner requires contiguous buffers (SciPy's own driver makes
+        # the same defensive copy). Not currently reachable -- the numba
+        # port's output is C-contiguous -- but this shouldn't silently
+        # depend on that.
+        cho = cho.copy()
+    n = cho.shape[0]
+    q, n_qmc_samples = _cached_cbc_lattice(n - 1, max(m // n_batches, 1))
+    rndm = rng.random(size=(n_batches, n))
+    return _qmvn_inner(q, rndm, int(n_qmc_samples), int(n_batches), cho, lo, hi)
 
 
 # SciPy's own public adaptive driver (_qmvnt._qauto, used internally by
@@ -424,11 +509,15 @@ _QAUTO_START = 150
 
 def _qmvn_adaptive(cor_mat, low, high, rng, maxpts, abseps, n_batches=10):
     """Box probability P(low < X < high), X ~ N(0, cor_mat), via SciPy's
-    private randomized-QMC kernel (_qmvnt._qmvn) driven by our own small-
-    start adaptive loop (see _QAUTO_START above) instead of SciPy's public
-    _qauto. Returns (prob, n_calls) -- n_calls counts how many times the
-    underlying kernel was invoked (usually 1, occasionally more for boxes
-    that need extra growth rounds to hit abseps), used for profiling. Only
+    randomized-QMC kernel (_qmvn_local, which wraps the compiled
+    _qmvn_inner) driven by our own small-start adaptive loop (see
+    _QAUTO_START above) instead of SciPy's public _qauto. The successive
+    growth rounds are pooled as independent estimates (the `wt` weighting
+    below), which is another reason each round must draw fresh shifts from
+    `rng` rather than repeat one. Returns (prob, n_calls) -- n_calls counts
+    how many times the underlying kernel was invoked (usually 1,
+    occasionally more for boxes that need extra growth rounds to hit
+    abseps), used for profiling. Only
     valid for cor_mat.shape[0] >= 3 (this codebase's build_cormat always
     produces order=5)."""
     n_samples = 0
@@ -438,7 +527,7 @@ def _qmvn_adaptive(cor_mat, low, high, rng, maxpts, abseps, n_batches=10):
     est_error = 1.0
     while est_error > abseps and n_samples < maxpts:
         mi = round(np.sqrt(2) * mi)
-        pi, ei, ni = _qmvnt._qmvn(mi, cor_mat, low, high, rng=rng, n_batches=n_batches)
+        pi, ei, ni = _qmvn_local(mi, cor_mat, low, high, rng, n_batches=n_batches)
         n_samples += ni
         n_calls += 1
         wt = 1.0 / (1 + (ei / est_error) ** 2)
@@ -460,7 +549,7 @@ def get_pmv_laplace_profile():
     return dict(_pmv_laplace_profile)
 
 
-def pmv_laplace(x, cor_mat):
+def pmv_laplace(x, cor_mat, rng=None):
     """Tail probability of a multivariate-Laplace null (covariance cor_mat)
     inside the symmetric box [-|x|, |x|]^d, from peak_calling.R's pmvLaplace().
     A multivariate Laplace is a Gaussian variance-mixture (Laplace =
@@ -506,13 +595,28 @@ def pmv_laplace(x, cor_mat):
     upper bound falls below `tol`, cutting the number of QMC evaluations
     at the cost of a bounded (never worse than `tol`, for any cor_mat/x)
     approximation to the same integral. See docs/OPTIMIZATION.md for
-    measured speed/fidelity numbers and a recommended default."""
+    measured speed/fidelity numbers and a recommended default.
+
+    `rng`: the Generator every QMC evaluation in this call draws its
+    Cranley-Patterson shifts from. None (the default) means a fresh
+    unseeded Generator per call, i.e. OS entropy -- the long-standing
+    behavior, and still what peak calling does unless a seed is passed.
+    Pass one Generator per call (never one per box: see _qmvn_local) to get
+    reproducible p-values; peaks.call_peaks's `seed` builds those from
+    SeedSequence keys derived from each block's position, so a seeded run
+    reproduces regardless of `cores`. Reproducibility holds for a fixed
+    environment, not across platforms or SciPy versions: how many uniforms
+    a kernel evaluation consumes is a SciPy implementation detail (it
+    changed from 40 scalar draws to one (n_batches, n_dim) block between
+    1.14 and 1.18), and the maxpts/eps/tail_tol settings change how many
+    evaluations a call makes at all."""
     t0 = time.perf_counter()
     cdf_evals = 0
     try:
         x = np.asarray(x, dtype=float)
         abs_x = np.abs(x)
-        rng = np.random.default_rng()
+        if rng is None:
+            rng = np.random.default_rng()
 
         p_norm, n_calls = _qmvn_adaptive(
             cor_mat, -abs_x, abs_x, rng, _PMV_CDF_MAXPTS, _PMV_CDF_EPS
