@@ -11,7 +11,7 @@ Given a pair of strand-specific bigWig files, pydreg scores every informative ge
 
 ## Performance
 
-pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA Titan Xp with 16 cores, across 12 real PRO-seq/GRO-seq/ChRO-seq libraries we see a median 4.51x walltime speedup (range 4.40x-4.71x) and a median 5.38x reduction in peak RSS (range 3.78x-6.75x):
+pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA Titan Xp and 16 CPU cores, across 12 real PRO-seq/GRO-seq/ChRO-seq libraries we see a median 4.51x walltime speedup (range 4.40x-4.71x) and a median 5.38x reduction in peak RSS (range 3.78x-6.75x):
 
 <p>
   <img src="https://raw.githubusercontent.com/adamyhe/pydreg/main/figures/plots/walltime.svg" alt="dREG versus pydreg walltime" width="45%">
