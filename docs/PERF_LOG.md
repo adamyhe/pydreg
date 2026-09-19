@@ -4313,3 +4313,151 @@ argument in the entry above is unchanged, it just isn't load-bearing for
 the note anymore. `gpu_efficiency_memcpy.svg` is no longer committed:
 nothing referenced it, two efficiency SVGs in `figures/plots/` invites
 confusion about which is canonical, and one command regenerates it.
+
+
+## 2026-09-17 -- own the QMC *driver* (not the kernel): monkeypatching SciPy's globals removed, plus an opt-in `--seed`
+
+Two changes to the same ~50 lines of `stats.py`, logged together because
+they share a verification story. Neither is a performance change: the
+first is bit-identical by construction, the second is off by default.
+
+### Part 1: `_qmvn_local` replaces the monkeypatched `_qmvnt._qmvn` path
+
+`pmv_laplace` drove SciPy's private `_qmvnt._qmvn` while *mutating* two of
+that module's globals at import time (`_cbc_lattice` -> our cached
+wrapper, `_permuted_cholesky` -> our numba port). That had two problems
+worse than the "private API might disappear" one:
+
+1. **Importing pydreg silently changed `scipy.stats.multivariate_normal.cdf`
+   for everything else in the process.** A real side effect for an
+   installable library, not a theoretical one.
+2. **It was the one coupling that could drift *silently*.** A removed
+   symbol raises `AttributeError` at import -- which is exactly how CI
+   caught the 2026-07-16 `_qmvn_inner` issue that set the `scipy>=1.16`
+   floor, the cheapest possible failure mode. But a *signature or
+   semantics* change to `_permuted_cholesky` would have called our
+   replacement under new expectations and produced wrong p-values with no
+   exception at all.
+
+Fixed by re-deriving SciPy's `_qmvn` driver locally (`stats._qmvn_local`,
+~10 lines: numba pivoted-Cholesky, contiguity copy, cached CBC lattice,
+one `rng.random(size=(n_batches, n_dim))` shift block, then the compiled
+kernel). Both monkeypatches are gone; the cached lattice and numba
+Cholesky are now passed in as arguments. Runtime private-API surface goes
+from **three symbols, two of them globally mutated, to one read-only
+symbol** (`_qmvn_inner`, the compiled kernel).
+
+**Why not go further and reimplement the kernel too** (the recurring
+question this closes out): Phase B0 above already showed no fidelity gap
+to R's Korobov-lattice method, and Phase B1 already built the
+line-for-line numba port and measured it at **0.83-1.11x** IEEE-safe
+against SciPy's Cython -- so owning the kernel buys neither accuracy nor
+speed, while taking on a hand-rolled `ndtri` (`scipy.special.ndtri` isn't
+numba-typeable). The driver is the part worth owning; the kernel isn't.
+
+**Verification (bit-identical, per this log's ground rule)**: reinstated
+the old arrangement in-process (monkeypatches + SciPy's own driver) and
+compared it against `_qmvn_local` on identical seeded `rng` objects across
+900 evaluations (300 random order-5 `cor_mat`/box cases x
+`m` in {212, 300, 5000}, spanning the growth-round sizes the adaptive
+schedule actually requests): **max abs diff 0.0** on both `prob` and
+`est_error`, identical `n_samples`. Not "within QMC noise" -- the same
+functions in the same order on the same draws.
+
+Speed is a wash, as expected (one less Python wrapper): 0.0065s vs
+0.0066s per `pmv_laplace` call, 40 reps, representative non-saturated box.
+
+New drift guards, replacing the mutation that used to be the risk:
+- an import-time check that `_qmvn_inner`'s leading seven parameter names
+  are still `(q, rndm, n_qmc_samples, n_batches, cho, lo, hi)`, since
+  `_qmvn_local` passes them positionally. Only the leading seven are
+  pinned -- SciPy appending a trailing defaulted parameter is harmless to
+  a positional call and shouldn't break imports.
+- a test cross-checking `_qmvn_local` against the *public*
+  `multivariate_normal.cdf` on 25 random boxes (max abs diff measured
+  2.5e-6, both sides being randomized QMC at `abseps=1e-3`; the assertion
+  allows 1e-4). This is the guard for semantic drift, which the arity
+  check can't see.
+- a test asserting `_qmvnt._cbc_lattice`/`_permuted_cholesky` are still
+  SciPy's own objects, so the monkeypatching can't quietly come back.
+
+Also fixed a stale comment: `pyproject.toml`'s `scipy>=1.16` floor cited
+`_qmvn_inner` as something "stats.py drives directly", which had stopped
+being true at runtime (only the tests referenced it). It is true again,
+and the comment now points at `_qmvn_local`.
+
+### Part 2: `--seed`, keyed by block position
+
+The QMC shifts are the only randomness in the entire pipeline (the infp
+scan, feature extraction, SVR scoring and the RF splitter are all
+deterministic; `_permuted_cholesky` and `_cbc_lattice` are deterministic
+too), so one seed makes a whole run reproducible. Measured, for the
+record, what a call actually consumes at the shipped fast settings:
+**one `rng.random(size=(10, 5))` block = 50 uniforms per kernel
+evaluation, ~100 evaluations per call** (~5000 uniforms), matching the
+~90 evals/call implied by the production logs in `figures/gpu_profiling/`.
+Calls whose `p_norm > 0.99` short-circuit consume exactly one.
+
+Plumbing: `--seed` -> `pipeline.run(seed=)` -> `call_peaks(seed=)` ->
+`_attach_seed_keys` (appends `(seed, block_index)` to each task tuple) ->
+`_call_peak_block` builds `SeedSequence(entropy=seed, spawn_key=(idx,))`
+-> `rfsplit._next_pmv_rng` spawns one child Generator per `pmv_laplace`
+call -> `pmv_laplace(rng=)`.
+
+Four design constraints, each of which rules out an easier-looking scheme:
+
+1. **Key on the block's index in `tasks`, not on the worker or the
+   completion order.** A per-worker seed would make results depend on
+   `cores` and on which worker grabbed which block; a seeded module global
+   set in `_init_peak_worker` would be inherited *identically* by every
+   forked worker. Keying on position makes a seeded run reproducible
+   across `cores` values, which is now a test.
+2. **One Generator per `pmv_laplace` call, not per box.** Creating a fresh
+   identically-seeded Generator inside the z-grid loop -- the natural-
+   looking way to "seed pmv_laplace" -- reuses one Cranley-Patterson shift
+   across all ~100 boxes, correlating errors that otherwise cancel.
+   Measured cost: **sd inflates 3.7x** (2.19e-5 -> 8.16e-5 at pv~0.097;
+   1.68e-5 -> 6.02e-5 at pv~0.043, 40 reps each). The estimator stays
+   essentially unbiased (mean offset ~3 of its own SEs at N=40); the
+   damage is variance. A test now pins one `(10, 5)` draw per evaluation
+   from one caller-supplied Generator.
+3. **Spawn per call rather than advancing one stream**, because the number
+   of uniforms a call consumes is itself random (growth rounds, plus the
+   1-vs-~100 short-circuit), so stream offsets can't be reasoned about.
+4. **Key on position, never on data content.** Hashing `x`/`cor_mat` would
+   make the QMC error a deterministic function of summit shape, so
+   identically-shaped summits get identically perturbed p-values -- common
+   random numbers across tests, which is constraint 2's correlation
+   problem reintroduced in a data-dependent way. `select_sig_peak`'s BH
+   threshold is a function of the whole genome-wide p-value vector, and
+   independent per-peak error is what lets it average out at the cut.
+
+Default stays unseeded (fresh OS entropy per call), so the shipped
+behavior and the validated 0.999084-Jaccard baseline are untouched, and so
+a single run doesn't look more exact than it is.
+
+Run-to-run noise at the shipped settings, for calibration (40 reps,
+order-5 AR(1) `cor_mat`, `tail_tol=1e-6`): sd of `p_max` = 2.2e-5 at
+pv~0.097, 1.7e-5 at pv~0.043, 4.7e-6 at pv~0.0023 -- a few tenths of a
+percent *relative* on the p-value in the region where the BH cut lands.
+
+Caveat recorded in the user-facing docs too: a seed reproduces within one
+environment, not across platforms or SciPy versions. How many uniforms a
+kernel evaluation draws is a SciPy implementation detail, and it has
+already changed underneath this project -- 1.14 drew 40 scalars one at a
+time, 1.18 draws one `(10, 5)` block. The `threadpool_limits(1)` in
+`_init_peak_worker` helps by making the linear algebra deterministic, but
+`phi`/`phinv` last-bit differences across platforms are the same class of
+issue already documented for the numba Cholesky above.
+
+One test-fixture note worth keeping: the first attempt at the
+cores-invariance test couldn't tell a seeded run from a differently-seeded
+one, because at the existing fixtures' `cor_mat = np.eye(5) * 0.01` every
+synthetic summit sits ~9 sd out, every QMC batch returns 1.0 to machine
+precision, and the integral has *no* run-to-run variance to reproduce. The
+new test uses `np.eye(5) * 0.5 + 0.2` so the p-values are non-saturated;
+the "different seed must actually redraw" assertion is there so the
+reproducibility assertions can't pass for the wrong reason.
+
+Tests: 95 -> 105 (6 in `test_stats.py`, 2 in `test_peaks.py`, 2 in
+`test_cli.py`), all passing.

@@ -179,6 +179,7 @@ def run(
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
     pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
+    seed=None,
     write_outputs=True,
     progress=False,
 ):
@@ -225,7 +226,14 @@ def run(
     reason) since it should hold for this whole run, not just one call --
     peak-calling's worker processes still independently pin themselves to
     a single BLAS thread each via their own initializer, unaffected by
-    this main-process-wide setting."""
+    this main-process-wide setting.
+
+    seed: makes the run reproducible. Only peak calling is stochastic --
+    the informative-position scan, feature extraction, SVR scoring and the
+    RF split forest are all deterministic -- so this single value is passed
+    straight through to peaks.call_peaks, which is where it's documented
+    (including what "reproducible" does and doesn't cover). None (the
+    default) leaves the QMC integration unseeded, as it has always been."""
     numba.set_num_threads(cores)
     threadpoolctl.threadpool_limits(limits=cores)
     bw_plus = pybigtools.open(plus_bw_path)
@@ -296,6 +304,7 @@ def run(
             pmv_laplace_cdf_maxpts=pmv_laplace_cdf_maxpts,
             pmv_laplace_cdf_eps=pmv_laplace_cdf_eps,
             pmv_laplace_tail_tol=pmv_laplace_tail_tol,
+            seed=seed,
         )
     logger.info(
         "%s raw candidate peaks, %s significant",

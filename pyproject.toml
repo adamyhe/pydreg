@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.3.1.post2"
+version = "0.3.2"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -18,7 +18,7 @@ dependencies = [
   "numpy>=1.26",
   "pandas>=2.0",
   # >=1.16 specifically: scipy.stats._qmvnt._qmvn_inner (the compiled QMC
-  # kernel stats.py drives directly, see that module's docstring) doesn't
+  # kernel stats._qmvn_local drives directly, see its docstring) doesn't
   # exist before 1.16.0 -- confirmed empirically (1.15.3 lacks it, 1.16.0
   # has it). The old >=1.11 floor was simply wrong; CI catching this on a
   # real resolution against Python 3.10 (which can only resolve up to

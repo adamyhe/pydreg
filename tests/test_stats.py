@@ -319,3 +319,120 @@ def test_permuted_cholesky_numba_agrees_with_scipy_on_final_probability_at_satur
             f"resulting probabilities disagree ({prob_s} vs {prob_n}) -- this "
             "would be a real correctness bug, unlike a mere pivot-order difference"
         )
+
+
+def test_import_does_not_monkeypatch_scipy_private_api():
+    # pydreg.stats used to install its cached lattice and numba Cholesky
+    # into scipy.stats._qmvnt's module globals, which meant importing
+    # pydreg silently changed scipy.stats.multivariate_normal.cdf's
+    # behavior for everything else in the process. _qmvn_local now passes
+    # both in as arguments instead; this pins that they stay out of SciPy.
+    assert _qmvnt._cbc_lattice is stats._orig_cbc_lattice
+    assert _qmvnt._permuted_cholesky is stats._orig_permuted_cholesky
+
+
+def test_qmvn_inner_signature_matches_what_qmvn_local_assumes():
+    # _qmvn_local calls the compiled kernel positionally, so a reordered or
+    # inserted parameter would silently compute a wrong probability rather
+    # than raise. stats.py checks this at import too -- this test is here so
+    # the failure is attributable rather than showing up as a collection
+    # error, and so the expected names are asserted in one obvious place.
+    import inspect
+
+    params = tuple(inspect.signature(_qmvnt._qmvn_inner).parameters)
+    assert params[:7] == ("q", "rndm", "n_qmc_samples", "n_batches", "cho", "lo", "hi")
+
+
+def test_qmvn_local_agrees_with_public_scipy_cdf():
+    # The semantic-drift guard for the one private SciPy symbol left at
+    # runtime (_qmvn_inner): if a future SciPy changes what the kernel
+    # expects -- rather than renaming it, which fails loudly at import --
+    # our locally-driven box probability would quietly stop matching
+    # SciPy's own public entry point for the same integral. Both sides are
+    # randomized QMC at abseps=1e-3, so this compares to a tolerance, not
+    # exactly; empirically the gap is ~1e-6 (measured max 2.5e-6 over 25
+    # boxes), orders of magnitude below what any real drift would produce.
+    from scipy.stats import multivariate_normal
+
+    rng = np.random.default_rng(3)
+    max_diff = 0.0
+    for _ in range(25):
+        cor_mat = _random_cormat(rng)
+        abs_x = rng.uniform(0.1, 1.5, size=5)
+        ours, _, _ = stats._qmvn_local(
+            25000, cor_mat, -abs_x, abs_x, np.random.default_rng(11), n_batches=10
+        )
+        ref = multivariate_normal.cdf(
+            abs_x, mean=np.zeros(5), cov=cor_mat, lower_limit=-abs_x
+        )
+        max_diff = max(max_diff, abs(ours - ref))
+    assert max_diff < 1e-4
+
+
+def test_pmv_laplace_seeded_rng_is_reproducible_and_seed_dependent():
+    cor_mat = _random_cormat(np.random.default_rng(5))
+    x = np.array([0.24, 0.38, 0.55, 0.41, 0.28])
+
+    def run(seed):
+        return pmv_laplace(x, cor_mat, rng=np.random.default_rng(seed))
+
+    assert run(1234) == run(1234)
+    # Different streams must actually move the estimate -- otherwise the
+    # "reproducible" assertion above could be passing for the wrong reason
+    # (e.g. an rng argument silently ignored).
+    assert run(1234) != run(5678)
+
+
+def test_pmv_laplace_seed_sequence_children_are_independent_streams():
+    # The scheme peaks.call_peaks uses: one spawned child per pmv_laplace
+    # call, keyed by position in the spawn tree. Same key -> same value;
+    # different keys -> different draws.
+    cor_mat = _random_cormat(np.random.default_rng(6))
+    x = np.array([0.24, 0.38, 0.55, 0.41, 0.28])
+
+    def run_block(block_idx):
+        seed_seq = np.random.SeedSequence(entropy=99, spawn_key=(block_idx,))
+        return [
+            pmv_laplace(x, cor_mat, rng=np.random.default_rng(seed_seq.spawn(1)[0]))
+            for _ in range(3)
+        ]
+
+    assert run_block(0) == run_block(0)
+    assert run_block(0) != run_block(1)
+    # Within a block, successive calls draw from distinct child streams.
+    assert len(set(run_block(0))) == 3
+
+
+def test_pmv_laplace_draws_one_shift_block_per_eval_from_one_generator():
+    # Guards the two contracts _qmvn_local's docstring spells out: every
+    # kernel evaluation gets its OWN (n_batches, n_dim) block of
+    # Cranley-Patterson shifts, all of them drawn from the single
+    # caller-supplied Generator. Re-creating a Generator per box instead
+    # (the natural-looking way to "seed pmv_laplace") reuses one shift
+    # across the whole z-grid and was measured to inflate run-to-run noise
+    # ~3.7x by correlating errors that otherwise cancel.
+    class CountingRng:
+        def __init__(self, inner):
+            self.inner = inner
+            self.shapes = []
+
+        def random(self, *args, **kwargs):
+            out = self.inner.random(*args, **kwargs)
+            self.shapes.append(np.shape(out))
+            return out
+
+    cor_mat = np.eye(5) * 0.02 + 0.01
+    x = np.array([0.18, 0.3, 0.42, 0.33, 0.2])
+    rng = CountingRng(np.random.default_rng(0))
+    try:
+        set_pmv_laplace_tail_tol(1e-6)
+        reset_pmv_laplace_profile()
+        pmv_laplace(x, cor_mat, rng=rng)
+        n_evals = get_pmv_laplace_profile()["cdf_evals"]
+    finally:
+        set_pmv_laplace_tail_tol(0.0)
+        reset_pmv_laplace_profile()
+
+    assert n_evals > 1
+    assert len(rng.shapes) == n_evals
+    assert set(rng.shapes) == {(10, 5)}

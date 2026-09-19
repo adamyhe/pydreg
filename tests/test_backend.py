@@ -276,7 +276,8 @@ def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
-def test_explicit_cupy_build_scorer_raises_when_not_installed():
+def test_explicit_cupy_build_scorer_raises_when_not_installed(monkeypatch):
+    monkeypatch.setattr(backend, "_cupy_installed", lambda: False)
     model = _tiny_svr_model()
 
     try:

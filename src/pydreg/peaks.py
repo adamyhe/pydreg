@@ -341,7 +341,17 @@ def _init_peak_worker(
 
 
 def _call_peak_block(task):
-    chrom, peak_starts, peak_ends, infp_starts, infp_ends, infp_scores = task
+    chrom, peak_starts, peak_ends, infp_starts, infp_ends, infp_scores, seed_key = task
+    # seed_key is None (unseeded) or (seed, block_index) -- see call_peaks's
+    # `seed` parameter. Built here rather than passed as a SeedSequence so
+    # the task payload stays plain ints; the key is what matters, and it's
+    # derived from the block's index in `tasks`, never from the worker or
+    # from completion order.
+    seed_seq = (
+        None
+        if seed_key is None
+        else np.random.SeedSequence(entropy=seed_key[0], spawn_key=(seed_key[1],))
+    )
     rf_model = _WORKER_STATE["rf_model"]
     min_score = _WORKER_STATE["min_score"]
     smoothwidth = _WORKER_STATE["smoothwidth"]
@@ -366,6 +376,7 @@ def _call_peak_block(task):
             amp_threshold=min_score,
             smoothwidth=smoothwidth,
             cor_mat=cor_mat,
+            seed_seq=seed_seq,
         )
         find_rf_peaks_seconds += time.perf_counter() - t_find_rf_peaks
         if result is None:
@@ -386,6 +397,19 @@ def _call_peak_block(task):
     if not raw_rows:
         return None, profile
     return pd.concat(raw_rows, ignore_index=True), profile
+
+
+def _attach_seed_keys(tasks, seed):
+    """Append each block's QMC seed key to its task tuple: None when
+    unseeded, else (seed, block_index).
+
+    The index comes from enumerating the fully-materialized, deterministic
+    task list, so it names the same block no matter how many workers run or
+    in what order they finish -- the property that makes a seeded run
+    reproducible across `cores` values. See call_peaks's `seed` parameter."""
+    if seed is None:
+        return [task + (None,) for task in tasks]
+    return [task + ((int(seed), idx),) for idx, task in enumerate(tasks)]
 
 
 def _peak_calling_tasks(
@@ -432,6 +456,7 @@ def call_peaks(
     pmv_laplace_cdf_maxpts=25000,
     pmv_laplace_cdf_eps=1e-3,
     pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
+    seed=None,
 ):
     """The find_rf_peaks-calling orchestration from peak_calling.R's
     start_calling(): one genome-wide cor_mat, then an independent call to
@@ -464,7 +489,27 @@ def call_peaks(
     bounded amount of fidelity for speed; 0.0 is exact (identical to R).
     Defaults to stats.PMV_LAPLACE_FAST_TAIL_TOL (validated against real
     dREG peak calls -- see docs/OPTIMIZATION.md for measured numbers);
-    pass 0.0 explicitly for the old exact-by-default behavior."""
+    pass 0.0 explicitly for the old exact-by-default behavior.
+
+    seed: makes the per-summit p-values reproducible. The QMC integration
+    inside stats.pmv_laplace is the only stochastic step in the whole
+    pipeline, and it's unseeded by default (fresh OS entropy per call) --
+    which keeps the long-validated behavior and keeps a single run from
+    looking more exact than it is. With a seed, each block of candidate
+    peaks gets an independent stream keyed on its *index in `tasks`*, and
+    each pmv_laplace call within it a spawned child of that (see
+    rfsplit._next_pmv_rng), so:
+      - results don't depend on `cores`, on which worker picked up which
+        block, or on completion order -- a per-worker or per-process seed
+        would get all three wrong, and a seeded module global would be
+        inherited identically by every forked worker;
+      - the QMC error stays independent across peaks, which is what lets
+        it average out at select_sig_peak's genome-wide BH threshold
+        instead of shifting the cut. Keying on peak *content* instead of
+        position would break that -- identically-shaped summits would get
+        identically perturbed p-values.
+    Reproducibility is per-environment and per-configuration, not
+    cross-platform; see stats.pmv_laplace's `rng` parameter."""
     chrom_col, start_col, end_col, score_col = dense_infp.columns[:4]
     if not np.isfinite(min_score):
         raise ValueError(
@@ -492,9 +537,12 @@ def call_peaks(
             dense_sorted, candidates, chrom_col, start_col, end_col, block_width
         )
     )
+    seed = None if seed is None else int(seed)
+    tasks = _attach_seed_keys(tasks, seed)
     logger.info(
         "calling %d broad peaks in %d blocks of up to %d with %d peak-calling process(es) "
-        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g, pmv_laplace_tail_tol=%g)",
+        "(pmv_laplace_cdf_maxpts=%s, pmv_laplace_cdf_eps=%g, pmv_laplace_tail_tol=%g, "
+        "seed=%s)",
         len(candidates),
         len(tasks),
         block_width,
@@ -502,6 +550,7 @@ def call_peaks(
         pmv_laplace_cdf_maxpts,
         pmv_laplace_cdf_eps,
         pmv_laplace_tail_tol,
+        "unseeded" if seed is None else seed,
     )
     raw_rows = []
     completed_results = [None] * len(tasks)

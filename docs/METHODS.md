@@ -106,6 +106,18 @@ practice. See `docs/OPTIMIZATION.md` for how this specific step, initially
 the dominant cost in peak calling, was made ~150x faster without changing
 its statistical behavior.
 
+This is the only randomized step in the whole pipeline — the
+informative-position scan, feature extraction, SVR scoring and the
+random-forest splitter are all deterministic — so `--seed N` is enough to
+make a run reproducible end to end, including reproducible across different
+`--cores` values. It's off by default, so that the residual noise stays
+visible rather than looking like exactness a single run hasn't earned. The
+guarantee is run-to-run on one machine with one set of versions and
+`--pmv-laplace-*` settings, not bit-for-bit across platforms or SciPy
+releases. Running the same input twice under two different seeds and
+diffing the results is a direct measurement of how much of your own peak
+set sits close enough to the FDR threshold to be noise-sensitive.
+
 Finally, all candidate summits' p-values are adjusted for multiple testing
 (Benjamini-Hochberg FDR by default) across the whole genome at once, and
 only peaks clearing the adjusted threshold (0.05 by default) are kept as the
