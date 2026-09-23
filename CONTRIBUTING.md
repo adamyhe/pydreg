@@ -24,6 +24,17 @@ plus a full synthetic end-to-end pipeline run. Model-dependent tests are
 skipped (not failed) if the Hugging Face repo hosting the pretrained
 weights is unreachable.
 
+## Code coverage
+
+```bash
+uv run pytest tests/ -q --cov=pydreg --cov-report=term-missing
+```
+
+Note that numba-jitted and GPU codepaths are not instrumentable by
+coverage.py, so the reported percentage will undercount. There is no
+enforced coverage threshold — use this to spot untested logic, not to
+chase a number.
+
 ## Before making changes
 
 - **Algorithmic/structural changes**: read `docs/PLANNING.md` first. It's

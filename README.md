@@ -2,6 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pydreg)](https://pypi.org/project/pydreg/)
 [![Tests](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-83%25-brightgreen)](https://github.com/adamyhe/pydreg)
 [![Weights](https://img.shields.io/badge/%F0%9F%A4%97-Weights-yellow)](https://huggingface.co/adamyhe/pydreg)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/pydreg?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pydreg)
 
