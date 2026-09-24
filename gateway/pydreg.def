@@ -1,0 +1,17 @@
+Bootstrap: docker
+From: nvidia/cuda:12.6.3-runtime-ubuntu24.04
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends python3 python3-pip && \
+        rm -rf /var/lib/apt/lists/*
+    pip3 install --no-cache-dir --break-system-packages pydreg[gpu]
+
+%runscript
+    exec pydreg "$@"
+
+%test
+    pydreg --help
+
+%labels
+    Author Adam Youlin He
+    Description pydreg: GPU-accelerated dREG peak calling
