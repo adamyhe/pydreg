@@ -23,17 +23,17 @@ sbatch submit_pydreg.sh /path/to/plus.bw /path/to/minus.bw /path/to/output_prefi
 
 ## SLURM configuration
 
-The script defaults to a single V100-16GB on the `GPU-shared` partition.
-Edit the `#SBATCH` directives to change resources:
+The script defaults to a single V100-16GB on the `GPU-shared` partition
+with 16 CPU cores. Edit the `#SBATCH` directives to change resources:
 
 | Directive | Default | Notes |
 |---|---|---|
 | `-p` | `GPU-shared` | Shared GPU partition (1 GPU). Use `GPU` for a full 8-GPU node. |
-| `--gpus` | `v100-16:1` | Also available: `v100-32:1`, `l40s-48:1`, `h100-80:1`. |
+| `--gpus` | `v100-16:1` | Any non-H100 GPU costs the same SU rate: `v100-16:1`, `v100-32:1`, `l40s-48:1`. H100 (`h100-80:1`) is 2x. |
 | `-A` | `YOUR_ACCESS_ALLOCATION` | Your ACCESS allocation ID. |
-| `--cpus-per-task` | `8` | pydreg's `--cores` is set to match. More cores = faster peak calling. |
+| `--cpus-per-task` | `16` | pydreg's `--cores` is set to match. More cores = faster peak calling. |
 | `--mem` | `16G` | Sufficient for all benchmarked libraries (peak RSS ≤10.5 GB). |
-| `-t` | `02:00:00` | Conservative; largest benchmarked library finishes in ~45 min with 8 cores. |
+| `-t` | `02:00:00` | Conservative; largest benchmarked library finishes in ~45 min with 16 cores. |
 
 ## Cost
 
