@@ -247,7 +247,9 @@ def run(
 
     logger.info("scanning informative positions...")
     with _timed("scanning informative positions"):
-        infp_bed = infp.get_informative_positions(bw_plus, bw_minus, progress=progress)
+        infp_bed = infp.get_informative_positions(
+            bw_plus, bw_minus, progress=progress, cores=cores
+        )
     logger.info("%d informative positions found", len(infp_bed))
 
     logger.info("scoring informative positions...")
