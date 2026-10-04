@@ -22,18 +22,47 @@ def set_reader_threads(n):
     _N_JOBS = n
 
 
+_WINDOWED_SUM_CHUNK_BP = 5_000_000
+
+
 def windowed_sum(bw, chrom, phase, window, chrom_size):
     """Exact literal sum of bw's signal in non-overlapping `window`-bp tiles
     starting at `phase`, tiling `[phase, phase + n_bins*window)`. Any trailing
     partial tile (narrower than `window`) at the chromosome end is dropped,
     matching get_informative_positions.R's assumed behavior (see
-    docs/PLANNING.md). Returns an empty array if no full tile fits."""
+    docs/PLANNING.md). Returns an empty array if no full tile fits.
+
+    Reads in chunks to bound transient memory: figwig returns raw
+    base-resolution values (no server-side binning like pybigtools had),
+    so a full-chromosome read would transiently allocate ~12 bytes per bp
+    (float32 raw + float64 cast). Chunking caps this at ~60 MB per call
+    regardless of chromosome size, which matters when infp scans many
+    chromosomes concurrently."""
     n_bins = (chrom_size - phase) // window
     if n_bins <= 0:
         return np.zeros(0)
-    width = n_bins * window
-    raw = bw.read([chrom], [phase], width=width, missing=0.0, n_jobs=_N_JOBS)
-    return raw[0].astype(np.float64).reshape(n_bins, window).sum(axis=1)
+
+    chunk_bins = _WINDOWED_SUM_CHUNK_BP // window
+    if n_bins <= chunk_bins:
+        width = n_bins * window
+        raw = bw.read([chrom], [phase], width=width, missing=0.0, n_jobs=_N_JOBS)
+        return raw[0].astype(np.float64).reshape(n_bins, window).sum(axis=1)
+
+    result = np.empty(n_bins, dtype=np.float64)
+    offset = phase
+    pos = 0
+    remaining = n_bins
+    while remaining > 0:
+        this_bins = min(remaining, chunk_bins)
+        this_width = this_bins * window
+        raw = bw.read([chrom], [offset], width=this_width, missing=0.0, n_jobs=_N_JOBS)
+        result[pos:pos + this_bins] = (
+            raw[0].astype(np.float64).reshape(this_bins, window).sum(axis=1)
+        )
+        pos += this_bins
+        offset += this_width
+        remaining -= this_bins
+    return result
 
 
 def fetch_raw(bw, chrom, start, end):

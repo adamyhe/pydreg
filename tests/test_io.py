@@ -37,6 +37,20 @@ def test_fetch_raw_missing_chromosome_returns_zeroes(tmp_path):
     assert np.all(raw == 0)
 
 
+def test_windowed_sum_chunked_matches_unchunked(monkeypatch, synthetic_bigwig_pair):
+    plus_path, _ = synthetic_bigwig_pair
+    bw = BigWigReader(plus_path)
+    chrom_size = bw.chrom_sizes["chr1"]
+
+    phase, window = 7, 100
+    unchunked = io.windowed_sum(bw, "chr1", phase, window, chrom_size)
+
+    monkeypatch.setattr(io, "_WINDOWED_SUM_CHUNK_BP", 500)
+    chunked = io.windowed_sum(bw, "chr1", phase, window, chrom_size)
+
+    np.testing.assert_array_equal(unchunked, chunked)
+
+
 def test_write_bed_gz_sorts_and_tabix_indexes(tmp_path):
     df = pd.DataFrame(
         {"chrom": ["chr1"] * 3, "start": [300, 100, 200], "end": [301, 101, 201], "score": [0.5, 0.9, 0.1]}
