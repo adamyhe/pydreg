@@ -55,6 +55,7 @@ def _score_positions(
     chunk,
     progress=False,
     desc="scoring",
+    cores=1,
 ):
     """Scores every row of bed_df (columns chrom, start, ... positionally)
     and returns scores in the same row order. Groups by chromosome first
@@ -63,22 +64,16 @@ def _score_positions(
 
     Overlaps each chunk's CPU-bound feature extraction (bigWig I/O +
     binning) with the *previous* chunk's scorer.predict() call, via a
-    single background thread one chunk ahead -- these two steps were
-    previously strictly sequential (extract, then predict, then extract
-    the next chunk, ...), which left the GPU backends idle during every
-    chunk's extraction. This is scheduling only, not a formula change: the
-    same feature-extraction/scoring calls run on the same inputs in the
-    same order, just overlapped. Safe with a single background thread at
-    *this* level specifically because it's the only thread here that ever
-    touches bw_plus/bw_minus -- the main thread never reads a bigWig while
-    a background extraction is in flight, and a ThreadPoolExecutor with
-    max_workers=1 guarantees at most one call into this level's extract()
-    ever runs at a time regardless of how far ahead a chunk gets submitted.
-    The overlap itself relies on scorer.predict() releasing the GIL while
-    it blocks on the GPU (true for CuPy's device-sync calls) -- on the
-    numpy/sklearn CPU backends this prefetch still can't hurt correctness,
-    just may not overlap as usefully since there's no GPU wait to hide
-    behind.
+    single background thread one chunk ahead. The overlap relies on
+    scorer.predict() releasing the GIL while it blocks on the GPU (true
+    for CuPy's device-sync calls) -- on the numpy/sklearn CPU backends
+    this prefetch still can't hurt correctness, just may not overlap as
+    usefully since there's no GPU wait to hide behind.
+
+    Within each chunk's extraction, extract_features_batch fans out
+    across clusters via ThreadPoolExecutor when cores > 1 -- figwig's
+    BigWigReader is thread-safe (GIL-free reads, no per-reader cache),
+    so one shared reader pair serves all cluster threads.
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).
@@ -109,6 +104,7 @@ def _score_positions(
             centers,
             model.window_sizes,
             model.half_n_windows,
+            cores=cores,
         )
         extract_seconds += time.perf_counter() - t0
         return positions, X
@@ -265,6 +261,7 @@ def run(
             chunk,
             progress=progress,
             desc="scoring informative positions",
+            cores=cores,
         )
 
     def score_fn(bed_df, desc="scoring"):
@@ -277,6 +274,7 @@ def run(
             chunk,
             progress=progress,
             desc=desc,
+            cores=cores,
         )
 
     logger.info("densifying and merging into broad peaks...")

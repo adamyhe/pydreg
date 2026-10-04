@@ -257,7 +257,9 @@ def _build_clusters(sorted_centers, max_dist):
     return clusters
 
 
-def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+def extract_features_batch(
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, cores=1
+):
     """Same as extract_features(), for an array of centers on one
     chromosome. Returns (n_centers, n_features).
 
@@ -271,12 +273,11 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
     Input order need not be sorted; this sorts internally and restores the
     original order before returning.
 
-    Single-threaded, one reader, by design -- see docs/PERF_LOG.md. A
-    multi-threaded variant (independently-opened extra reader pairs
-    processing clusters concurrently) was built and measured on the
-    `multithreaded-extraction-dev` branch. With the switch from
-    pybigtools to figwig (which has no per-reader index cache and is
-    GIL-free), the original memory blocker is gone -- revisit."""
+    When cores > 1 and there are multiple clusters, processes clusters
+    concurrently via ThreadPoolExecutor. figwig's BigWigReader is
+    thread-safe (no mutable borrow, no per-reader index cache), so one
+    shared reader pair serves all workers. Each cluster writes to a
+    non-overlapping slice of the output array."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -289,9 +290,31 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
     out = np.empty((n, n_features), dtype=np.float64)
 
     clusters = _build_clusters(sorted_centers, max_dist)
-    for start_i, end_i in clusters:
-        cluster = sorted_centers[start_i:end_i]
-        out[order[start_i:end_i]] = _extract_features_cluster(
-            bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
-        )
+
+    if cores > 1 and len(clusters) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _process(cluster_range):
+            start_i, end_i = cluster_range
+            cluster = sorted_centers[start_i:end_i]
+            return _extract_features_cluster(
+                bw_plus, bw_minus, chrom, cluster, max_dist,
+                window_sizes, half_n_windows,
+            )
+
+        with ThreadPoolExecutor(
+            max_workers=min(cores, len(clusters))
+        ) as pool:
+            futures = [
+                (pool.submit(_process, c), c) for c in clusters
+            ]
+            for future, (start_i, end_i) in futures:
+                out[order[start_i:end_i]] = future.result()
+    else:
+        for start_i, end_i in clusters:
+            cluster = sorted_centers[start_i:end_i]
+            out[order[start_i:end_i]] = _extract_features_cluster(
+                bw_plus, bw_minus, chrom, cluster, max_dist,
+                window_sizes, half_n_windows,
+            )
     return out
