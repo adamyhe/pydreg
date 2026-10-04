@@ -3,8 +3,8 @@ and are skipped (not failed) if that's unreachable, so the dependency-free
 unit tests (smoothing/stats/peaks) always run even offline."""
 
 import numpy as np
-import pybigtools
 import pytest
+from figwig import BigWigWriter
 
 
 @pytest.fixture
@@ -25,21 +25,25 @@ def synthetic_bigwig_pair(tmp_path):
     minus -= rng.poisson(0.01, size=length)
 
     paths = {}
+    sizes = {"chr1": chrom_size}
     for strand, vals in (("plus", plus), ("minus", minus)):
         path = str(tmp_path / f"{strand}.bw")
-        bw = pybigtools.open(path, "w")
-        intervals = []
+        chroms, starts, ends, values = [], [], [], []
         i = 0
         while i < length:
             if vals[i] != 0:
                 j = i
                 while j < length and vals[j] == vals[i]:
                     j += 1
-                intervals.append(("chr1", i, j, float(vals[i])))
+                chroms.append("chr1")
+                starts.append(i)
+                ends.append(j)
+                values.append(float(vals[i]))
                 i = j
             else:
                 i += 1
-        bw.write({"chr1": chrom_size}, intervals)
+        with BigWigWriter(path, sizes) as bw:
+            bw.write(chroms, starts, np.array(values, dtype=np.float32), ends=ends)
         paths[strand] = path
 
     return paths["plus"], paths["minus"]

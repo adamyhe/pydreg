@@ -1,5 +1,5 @@
 import numpy as np
-import pybigtools
+from figwig import BigWigReader, BigWigWriter
 
 from pydreg import infp
 
@@ -39,8 +39,8 @@ def test_dedupe_centers_handles_all_empty_arrays():
 
 def test_get_informative_positions_finds_the_synthetic_peak(synthetic_bigwig_pair):
     plus_path, minus_path = synthetic_bigwig_pair
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
 
     result = infp.get_informative_positions(bw_plus, bw_minus)
 
@@ -60,13 +60,13 @@ def test_get_informative_positions_handles_chrom_only_in_plus(tmp_path):
     plus_path = str(tmp_path / "plus.bw")
     minus_path = str(tmp_path / "minus.bw")
 
-    bw = pybigtools.open(plus_path, "w")
-    bw.write({"chrUn_gl000233": 5000}, [("chrUn_gl000233", 100, 300, 5.0)])
-    bw = pybigtools.open(minus_path, "w")
-    bw.write({"chr1": 5000}, [("chr1", 10, 11, -1.0)])
+    with BigWigWriter(plus_path, {"chrUn_gl000233": 5000}) as bw:
+        bw.write(["chrUn_gl000233"], [100], np.array([5.0], dtype=np.float32), ends=[300])
+    with BigWigWriter(minus_path, {"chr1": 5000}) as bw:
+        bw.write(["chr1"], [10], np.array([-1.0], dtype=np.float32), ends=[11])
 
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
     result = infp.get_informative_positions(bw_plus, bw_minus)
 
     assert set(result["chrom"]) == {"chrUn_gl000233"}
@@ -74,11 +74,11 @@ def test_get_informative_positions_handles_chrom_only_in_plus(tmp_path):
 
 def test_get_informative_positions_returns_empty_frame_for_no_chromosomes(tmp_path):
     path = str(tmp_path / "tiny.bw")
-    bw = pybigtools.open(path, "w")
-    bw.write({"tiny": 100}, [("tiny", 0, 10, 1.0)])  # below MIN_CHROM_SIZE
+    with BigWigWriter(path, {"tiny": 100}) as bw:
+        bw.write(["tiny"], [0], np.array([1.0], dtype=np.float32), ends=[10])
 
-    bw_plus = pybigtools.open(path)
-    bw_minus = pybigtools.open(path)
+    bw_plus = BigWigReader(path)
+    bw_minus = BigWigReader(path)
     result = infp.get_informative_positions(bw_plus, bw_minus)
 
     assert list(result.columns) == ["chrom", "start", "end"]

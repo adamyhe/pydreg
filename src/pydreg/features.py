@@ -273,18 +273,10 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
 
     Single-threaded, one reader, by design -- see docs/PERF_LOG.md. A
     multi-threaded variant (independently-opened extra reader pairs
-    processing clusters concurrently) was built and measured to speed up
-    the specific extraction-bound gap-filling step, but real production
-    hardware showed it also multiplies a real, unbounded per-reader
-    caching cost inside pybigtools/bigtools (each independently-opened
-    reader accumulates its own per-chromosome index cache with no
-    eviction), and every mitigation tried (capping reader count,
-    resetting readers per chromosome, restricting threading to just the
-    gap-fill call) traded away most or all of the speedup without fixing
-    the memory cost. That work is preserved on the
-    `multithreaded-extraction-dev` branch rather than discarded --
-    revisit once upstream `bigtools` adds real eviction to that cache, or
-    a cap/restriction is found that survives real-hardware validation."""
+    processing clusters concurrently) was built and measured on the
+    `multithreaded-extraction-dev` branch. With the switch from
+    pybigtools to figwig (which has no per-reader index cache and is
+    GIL-free), the original memory blocker is gone -- revisit."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)

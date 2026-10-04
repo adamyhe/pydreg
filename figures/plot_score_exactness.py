@@ -6,8 +6,8 @@ Downloads each library's paired *.dREG.infp.bw (the raw, pre-peak-calling
 SVR score track -- dREG's eval_svm.R output, ported by pydreg.models /
 pydreg.backend) from the adamyhe/pydreg-supporting-data HF dataset, reads
 every chromosome as a dense per-bp array (~a few seconds per genome once
-the file itself is local -- pybigtools' remote HTTP range-request path is
-far slower than a bulk download, confirmed empirically during development),
+the file itself is local -- reading a local file is far faster than
+remote HTTP range-requests, confirmed empirically during development),
 and pairs up positions where BOTH tools reported a defined (non-NaN) score.
 Pools all 13 benchmark libraries into one comparison, since the claim being
 validated ("pydreg's raw scores match dREG's") isn't library-specific.
@@ -39,19 +39,17 @@ from _common import LIBRARIES, PLOTS_DIR, SVG_STYLE, escape, fetch, nice_ticks
 
 
 def paired_scores(lib: str) -> tuple[np.ndarray, np.ndarray]:
-    import pybigtools
+    from figwig import BigWigReader
 
-    dreg_bw = pybigtools.open(str(fetch("dreg", lib, "infp.bw")))
-    pydreg_bw = pybigtools.open(str(fetch("pydreg", lib, "infp.bw")))
-    dreg_chroms = dreg_bw.chroms()
-    pydreg_chroms = pydreg_bw.chroms()
-    shared = sorted(set(dreg_chroms) & set(pydreg_chroms))
+    dreg_bw = BigWigReader(str(fetch("dreg", lib, "infp.bw")))
+    pydreg_bw = BigWigReader(str(fetch("pydreg", lib, "infp.bw")))
+    shared = sorted(set(dreg_bw.chrom_sizes) & set(pydreg_bw.chrom_sizes))
 
     dreg_vals, pydreg_vals = [], []
     for chrom in shared:
-        size = min(dreg_chroms[chrom], pydreg_chroms[chrom])
-        d = dreg_bw.values(chrom, 0, size, fillna=None)
-        p = pydreg_bw.values(chrom, 0, size, fillna=None)
+        size = min(dreg_bw.chrom_sizes[chrom], pydreg_bw.chrom_sizes[chrom])
+        d = dreg_bw.read([chrom], [0], width=size, missing=np.nan)[0].astype(np.float64)
+        p = pydreg_bw.read([chrom], [0], width=size, missing=np.nan)[0].astype(np.float64)
         mask = np.isfinite(d) & np.isfinite(p)
         if mask.any():
             dreg_vals.append(d[mask].astype(np.float32))

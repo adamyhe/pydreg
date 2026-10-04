@@ -1,14 +1,14 @@
 import numpy as np
 import pandas as pd
-import pybigtools
+from figwig import BigWigReader, BigWigWriter
 
 from pydreg import io
 
 
 def test_windowed_sum_matches_manual_reshape(synthetic_bigwig_pair):
     plus_path, _ = synthetic_bigwig_pair
-    bw = pybigtools.open(plus_path)
-    chrom_size = bw.chroms()["chr1"]
+    bw = BigWigReader(plus_path)
+    chrom_size = bw.chrom_sizes["chr1"]
 
     phase, window = 7, 100
     ws = io.windowed_sum(bw, "chr1", phase, window, chrom_size)
@@ -20,7 +20,7 @@ def test_windowed_sum_matches_manual_reshape(synthetic_bigwig_pair):
 
 def test_fetch_raw_zero_pads_out_of_bounds(synthetic_bigwig_pair):
     plus_path, _ = synthetic_bigwig_pair
-    bw = pybigtools.open(plus_path)
+    bw = BigWigReader(plus_path)
     raw = io.fetch_raw(bw, "chr1", -50, 50)
     assert raw.shape[0] == 100
     assert np.all(raw[:50] == 0)
@@ -28,10 +28,10 @@ def test_fetch_raw_zero_pads_out_of_bounds(synthetic_bigwig_pair):
 
 def test_fetch_raw_missing_chromosome_returns_zeroes(tmp_path):
     path = str(tmp_path / "one_chrom.bw")
-    bw = pybigtools.open(path, "w")
-    bw.write({"chr1": 1000}, [("chr1", 10, 20, 1.0)])
+    with BigWigWriter(path, {"chr1": 1000}) as bw:
+        bw.write(["chr1"], [10], np.array([1.0], dtype=np.float32), ends=[20])
 
-    raw = io.fetch_raw(pybigtools.open(path), "chrMissing", -25, 75)
+    raw = io.fetch_raw(BigWigReader(path), "chrMissing", -25, 75)
 
     assert raw.shape[0] == 100
     assert np.all(raw == 0)
@@ -53,15 +53,13 @@ def test_write_bed_gz_sorts_and_tabix_indexes(tmp_path):
 
 
 def test_write_bigwig_roundtrips_int_coordinates(tmp_path):
-    # Coordinates as whole-numbered floats (as rfsplit.py's arithmetic can
-    # produce) must not break the strict int contract pybigtools requires.
     df = pd.DataFrame(
         {"chrom": ["chr1", "chr1"], "start": [0.0, 10.0], "end": [10.0, 20.0], "score": [1.5, 2.5]}
     )
     path = str(tmp_path / "out.bw")
     io.write_bigwig(path, {"chr1": 1000}, df)
 
-    r = pybigtools.open(path)
-    vals = r.values("chr1", 0, 20, fillna=0.0)
-    np.testing.assert_allclose(vals[:10], 1.5)
-    np.testing.assert_allclose(vals[10:], 2.5)
+    r = BigWigReader(path)
+    vals = r.read(["chr1"], [0], width=20, missing=0.0)[0]
+    np.testing.assert_allclose(vals[:10], 1.5, atol=1e-6)
+    np.testing.assert_allclose(vals[10:], 2.5, atol=1e-6)

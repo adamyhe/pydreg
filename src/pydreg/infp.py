@@ -79,7 +79,7 @@ def _dedupe_centers(chrom_size, centers):
 
 
 def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=False):
-    """bw_plus/bw_minus: open pybigtools readers (pybigtools.open(...)).
+    """bw_plus/bw_minus: open figwig.BigWigReader instances.
 
     Chromosomes scanned = bw_plus's chromosomes with size > 2500 (strict).
     Known upstream bug, replicated faithfully (see docs/PLANNING.md): the
@@ -100,8 +100,8 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
     # truncate if that's ever violated.
     assert WINDOW_OR % step == 0 and WINDOW_AND % step == 0
     phases = list(range(0, window + step, step))
-    plus_sizes = bw_plus.chroms()
-    minus_sizes = bw_minus.chroms()
+    plus_sizes = bw_plus.chrom_sizes
+    minus_sizes = bw_minus.chrom_sizes
     chroms = [c for c, size in plus_sizes.items() if size > MIN_CHROM_SIZE]
 
     rows = []

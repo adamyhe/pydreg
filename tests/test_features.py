@@ -1,6 +1,6 @@
 import numpy as np
-import pybigtools
 import pytest
+from figwig import BigWigReader, BigWigWriter
 
 from pydreg import features, infp
 
@@ -32,21 +32,25 @@ def integer_bigwig_pair(tmp_path):
     minus -= np.round(5 * np.exp(-((x - 49800) ** 2) / (2 * 150**2)))
 
     paths = {}
+    sizes = {"chr1": chrom_size}
     for strand, vals in (("plus", plus), ("minus", minus)):
         path = str(tmp_path / f"{strand}.bw")
-        bw = pybigtools.open(path, "w")
-        intervals = []
+        chroms, starts, ends, values = [], [], [], []
         i = 0
         while i < chrom_size:
             if vals[i] != 0:
                 j = i
                 while j < chrom_size and vals[j] == vals[i]:
                     j += 1
-                intervals.append(("chr1", i, j, float(vals[i])))
+                chroms.append("chr1")
+                starts.append(i)
+                ends.append(j)
+                values.append(float(vals[i]))
                 i = j
             else:
                 i += 1
-        bw.write({"chr1": chrom_size}, intervals)
+        with BigWigWriter(path, sizes) as bw:
+            bw.write(chroms, starts, np.array(values, dtype=np.float32), ends=ends)
         paths[strand] = path
 
     return paths["plus"], paths["minus"]
@@ -64,8 +68,8 @@ def _naive_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows
 
 def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -92,8 +96,8 @@ def test_extract_features_batch_matches_naive_per_position(integer_bigwig_pair):
 
 def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -121,8 +125,8 @@ def test_extract_features_batch_handles_unsorted_input(integer_bigwig_pair):
 
 def test_extract_features_batch_handles_chromosome_edges(integer_bigwig_pair):
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -154,8 +158,8 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     spaced centers must fall into separate clusters, exercising the
     multi-cluster path on a tiny fixture."""
     plus_path, minus_path = integer_bigwig_pair
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
 
     window_sizes = [10, 25, 50]
     half_n_windows = [10, 10, 10]
@@ -222,16 +226,13 @@ def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
     plus_path = str(tmp_path / "plus.bw")
     minus_path = str(tmp_path / "minus.bw")
 
-    bw = pybigtools.open(plus_path, "w")
-    bw.write(
-        {"chrUn_gl000233": 5000},
-        [("chrUn_gl000233", 100, 300, 5.0)],
-    )
-    bw = pybigtools.open(minus_path, "w")
-    bw.write({"chr1": 5000}, [("chr1", 10, 11, -1.0)])
+    with BigWigWriter(plus_path, {"chrUn_gl000233": 5000}) as bw:
+        bw.write(["chrUn_gl000233"], [100], np.array([5.0], dtype=np.float32), ends=[300])
+    with BigWigWriter(minus_path, {"chr1": 5000}) as bw:
+        bw.write(["chr1"], [10], np.array([-1.0], dtype=np.float32), ends=[11])
 
-    bw_plus = pybigtools.open(plus_path)
-    bw_minus = pybigtools.open(minus_path)
+    bw_plus = BigWigReader(plus_path)
+    bw_minus = BigWigReader(minus_path)
     positions = infp.get_informative_positions(bw_plus, bw_minus)
 
     assert set(positions["chrom"]) == {"chrUn_gl000233"}

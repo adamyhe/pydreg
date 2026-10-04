@@ -248,10 +248,7 @@ def test_pipeline_runs_end_to_end_on_synthetic_signal(synthetic_bigwig_pair, tmp
 
 class _FakeChromReader:
     def __init__(self, sizes):
-        self._sizes = sizes
-
-    def chroms(self):
-        return dict(self._sizes)
+        self.chrom_sizes = dict(sizes)
 
 
 def _write_outputs_files(tmp_path, out_prefix, cores):
@@ -301,7 +298,7 @@ def test_write_outputs_parallel_matches_serial(tmp_path):
     import gzip
     import os
 
-    import pybigtools
+    from figwig import BigWigReader
 
     serial_paths = _write_outputs_files(tmp_path, str(tmp_path / "serial"), cores=1)
     parallel_paths = _write_outputs_files(tmp_path, str(tmp_path / "parallel"), cores=4)
@@ -313,10 +310,11 @@ def test_write_outputs_parallel_matches_serial(tmp_path):
         parallel_path = parallel_paths[suffix]
         assert os.path.exists(parallel_path)
         if suffix.endswith(".bw"):
-            sr = pybigtools.open(serial_path)
-            pr = pybigtools.open(parallel_path)
+            sr = BigWigReader(serial_path)
+            pr = BigWigReader(parallel_path)
             np.testing.assert_array_equal(
-                sr.values("chr1", 0, 40, fillna=0.0), pr.values("chr1", 0, 40, fillna=0.0)
+                sr.read(["chr1"], [0], width=40, missing=0.0),
+                pr.read(["chr1"], [0], width=40, missing=0.0),
             )
         else:
             with gzip.open(serial_path, "rt") as f:

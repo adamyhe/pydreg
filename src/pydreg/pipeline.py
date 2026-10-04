@@ -13,7 +13,7 @@ from functools import partial
 
 import numba
 import numpy as np
-import pybigtools
+from figwig import BigWigReader
 import threadpoolctl
 from tqdm.auto import tqdm
 
@@ -236,8 +236,9 @@ def run(
     default) leaves the QMC integration unseeded, as it has always been."""
     numba.set_num_threads(cores)
     threadpoolctl.threadpool_limits(limits=cores)
-    bw_plus = pybigtools.open(plus_bw_path)
-    bw_minus = pybigtools.open(minus_bw_path)
+    io.set_reader_threads(cores)
+    bw_plus = BigWigReader(plus_bw_path)
+    bw_minus = BigWigReader(minus_bw_path)
 
     logger.info("loading models...")
     with _timed("loading models"):
@@ -341,25 +342,16 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
     with every other, including the `.bed.gz`/`.bw` pairs that share
     score_bed/prob_bed as a read-only source.
 
-    Dispatched across *two* pools, not one -- measured directly (not
-    assumed) that the two writers behave oppositely under threading:
-    `pysam.tabix_index`'s bgzip compression does release the GIL (~5.6x
-    speedup threading 8 concurrent calls), but `pybigtools`' bigWig
-    writer does not -- threading 4 concurrent write_bigwig calls measured
-    **4x slower** than calling them serially (20.7s vs 5.2s), i.e. real
-    lock contention inside its Rust binding, not just "no speedup". A
-    `ProcessPoolExecutor` sidesteps that (2.5s for the same 4 files) at
-    the cost of pickling each write's DataFrame across a process
-    boundary -- cheap here since `io.py` itself imports nothing heavier
-    than numpy/pybigtools (confirmed: ~0.2s pool startup, not the seconds
-    a fresh numba/sklearn import would cost) and bigWig outputs are small
-    now that the large infp `.bed.gz` is gone. `.bed.gz` writes stay on
-    threads, which need no such workaround. Falls back to serial bigWig
-    writes if process pools are unavailable in the current environment
-    (mirrors peaks.call_peaks's own ProcessPoolExecutor fallback). `cores`
-    is the same pipeline-wide budget as everywhere else, split between the
-    two pools rather than a separate setting."""
-    sizes = bw_plus.chroms()
+    Dispatched across two pools: `.bed.gz` writes via ThreadPoolExecutor
+    (pysam.tabix_index releases the GIL), bigWig writes via
+    ProcessPoolExecutor. figwig's writer is GIL-free so ThreadPoolExecutor
+    would also work, but ProcessPoolExecutor is kept for consistency with
+    the existing parallelism pattern. Falls back to serial bigWig writes
+    if process pools are unavailable (mirrors peaks.call_peaks's own
+    ProcessPoolExecutor fallback). `cores` is the same pipeline-wide
+    budget as everywhere else, split between the two pools rather than a
+    separate setting."""
+    sizes = bw_plus.chrom_sizes
     chrom_col, start_col, end_col = dense_infp.columns[:3]
 
     infp_out = dense_infp[[chrom_col, start_col, end_col, "score", "infp"]]
