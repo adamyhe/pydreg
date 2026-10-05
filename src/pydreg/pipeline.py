@@ -104,7 +104,6 @@ def _score_positions(
             centers,
             model.window_sizes,
             model.half_n_windows,
-            cores=cores,
         )
         extract_seconds += time.perf_counter() - t0
         return positions, X
