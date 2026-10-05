@@ -26,7 +26,7 @@ import os
 import resource
 
 import numpy as np
-import pybigtools
+from figwig import BigWigReader
 
 from pydreg import features, infp
 
@@ -51,8 +51,8 @@ def main():
     numba.set_num_threads(args.cores)
 
     print(f"[RSS {rss_mb():8.0f} MB]  baseline")
-    bw_plus = pybigtools.open(args.plus_bw)
-    bw_minus = pybigtools.open(args.minus_bw)
+    bw_plus = BigWigReader(args.plus_bw)
+    bw_minus = BigWigReader(args.minus_bw)
 
     print("scanning real informative positions...")
     infp_bed = infp.get_informative_positions(bw_plus, bw_minus)
@@ -65,7 +65,7 @@ def main():
     half_n_windows = np.array([10, 10, 30, 20, 20])
 
     extra_readers = [
-        (pybigtools.open(args.plus_bw), pybigtools.open(args.minus_bw))
+        (BigWigReader(args.plus_bw), BigWigReader(args.minus_bw))
         for _ in range(max(0, args.cores - 1))
     ]
 

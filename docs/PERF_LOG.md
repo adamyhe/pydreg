@@ -4461,3 +4461,55 @@ reproducibility assertions can't pass for the wrong reason.
 
 Tests: 95 -> 105 (6 in `test_stats.py`, 2 in `test_peaks.py`, 2 in
 `test_cli.py`), all passing.
+
+
+## 2026-10-04 — replace pybigtools with figwig; chunked reads; concurrent strand reads
+
+Replaced pybigtools with [figwig](https://github.com/jmschrei/figwig)
+(pure Python + numba, GIL-free, no per-reader index cache) for all bigWig
+I/O. Motivation: Python 3.14 support (pybigtools pins PyO3 which refuses
+>3.13), thread safety (`&mut self` reader crash), and HPC build failures
+(no Rust toolchain needed).
+
+**Key API difference**: figwig has no server-side binning (unlike
+pybigtools' `values(bins=n, summary="sum")`), so `io.windowed_sum` reads
+raw base-resolution values and reshapes+sums. Without mitigation, a
+full-chromosome read transiently allocates ~12 bytes/bp (float32 raw +
+float64 cast) — ~3 GB for chr1. Fix: chunk reads at 5M bp
+(`_WINDOWED_SUM_CHUNK_BP`), capping transient memory at ~60 MB per call
+regardless of chromosome size. Verified bit-identical to unchunked via
+monkeypatched chunk-size test.
+
+**Concurrent strand reads**: figwig's thread-safe reader enables
+overlapping plus and minus strand reads within each chromosome (infp
+scanning) and within each cluster (feature extraction), via a single
+background thread per call site. Zero extra memory (both arrays are needed
+anyway for the computation that follows).
+
+**Investigated and rejected**:
+
+- **Cross-chromosome infp parallelism** (16 chromosomes concurrently via
+  ThreadPoolExecutor): +1.8 GiB RSS from concurrent fine arrays across
+  chromosomes, for ~15s wall-time savings. Not worth the memory cost.
+
+- **Cross-cluster threaded extraction** (16 clusters concurrently): +1.2
+  GiB RSS from concurrent cluster buffers. The per-reader cache cost
+  (pybigtools' original blocker) is gone with figwig, but the concurrent
+  buffer cost is inherent to the approach. Not shipped.
+
+**Real production benchmarks** (cbsugpu01, TITAN Xp, `--cores 16`):
+
+| dataset | | wall time | peak RSS |
+|---|---|---|---|
+| K562_groseq | 0.3.x (pybigtools) | 13:26 | 5.37 GiB |
+| | **0.3.3 (figwig)** | **13:19** | **5.53 GiB** |
+| G1 | 0.3.x (pybigtools) | 43:26 | 10.0 GiB |
+| | **0.3.3 (figwig)** | **42:33** | **10.6 GiB** |
+
+Wall time within run-to-run noise. RSS ~3-6% higher, attributable to
+figwig's own internals vs pybigtools' Rust reader — confirmed by
+isolating every other variable (threaded extraction off, cross-chromosome
+parallelism off, chunked reads on).
+
+Tests: 107 -> 106 (removed threaded-extraction-matches-serial test;
+added chunked-windowed-sum-matches-unchunked test). All passing.

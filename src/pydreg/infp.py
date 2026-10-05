@@ -78,8 +78,49 @@ def _dedupe_centers(chrom_size, centers):
     return np.nonzero(mask)[0]
 
 
-def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=False):
-    """bw_plus/bw_minus: open pybigtools readers (pybigtools.open(...)).
+def _scan_chrom(bw_plus, bw_minus, chrom, chrom_size, has_minus, phases, step):
+    """Scans one chromosome for informative positions."""
+    centers = []
+    if has_minus:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            minus_future = pool.submit(
+                io.windowed_sum, bw_minus, chrom, 0, step, chrom_size
+            )
+            fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
+            fine_minus = minus_future.result()
+    else:
+        fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
+        fine_minus = None
+
+    for phase in phases:
+        plus_or = _windowed_sums_from_fine(fine_plus, phase, WINDOW_OR, step)
+        if has_minus:
+            minus_or = np.abs(
+                _windowed_sums_from_fine(fine_minus, phase, WINDOW_OR, step)
+            )
+            idx = np.nonzero((plus_or + minus_or) > DEPTH_OR)[0]
+        else:
+            idx = np.nonzero(np.abs(plus_or) > DEPTH_OR)[0]
+        centers.append(idx * WINDOW_OR + phase + WINDOW_OR // 2)
+
+        if has_minus:
+            plus_and = _windowed_sums_from_fine(fine_plus, phase, WINDOW_AND, step)
+            minus_and = np.abs(
+                _windowed_sums_from_fine(fine_minus, phase, WINDOW_AND, step)
+            )
+            idx = np.nonzero((plus_and > DEPTH_AND) & (minus_and > DEPTH_AND))[0]
+            centers.append(idx * WINDOW_AND + phase + WINDOW_AND // 2)
+
+    all_centers = _dedupe_centers(chrom_size, centers)
+    return pd.DataFrame({"chrom": chrom, "start": all_centers, "end": all_centers + 1})
+
+
+def get_informative_positions(
+    bw_plus, bw_minus, window=400, step=50, progress=False
+):
+    """bw_plus/bw_minus: open figwig.BigWigReader instances.
 
     Chromosomes scanned = bw_plus's chromosomes with size > 2500 (strict).
     Known upstream bug, replicated faithfully (see docs/PLANNING.md): the
@@ -88,20 +129,18 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
     like a union but isn't) -- the pretrained model's expected input
     distribution was produced by this exact scan.
 
-    progress: show a tqdm progress bar over chromosomes (auto-hidden if
-    stdout isn't a terminal, e.g. redirected to a file or CI log).
+    Each chromosome's plus and minus strand reads are overlapped via a
+    background thread (figwig's BigWigReader is thread-safe), halving
+    per-chromosome I/O time without the memory cost of processing many
+    chromosomes concurrently.
 
     Returns a DataFrame with columns chrom, start, end (1bp intervals,
     end = start + 1), one row per informative position, sorted and
     deduplicated within each chromosome."""
-    # The fine-grid shortcut below (see _windowed_sums_from_fine) requires
-    # WINDOW_OR/WINDOW_AND to be exact multiples of step -- true for every
-    # real call site (step=50 always), but assert rather than silently
-    # truncate if that's ever violated.
     assert WINDOW_OR % step == 0 and WINDOW_AND % step == 0
     phases = list(range(0, window + step, step))
-    plus_sizes = bw_plus.chroms()
-    minus_sizes = bw_minus.chroms()
+    plus_sizes = bw_plus.chrom_sizes
+    minus_sizes = bw_minus.chrom_sizes
     chroms = [c for c, size in plus_sizes.items() if size > MIN_CHROM_SIZE]
 
     rows = []
@@ -111,48 +150,11 @@ def get_informative_positions(bw_plus, bw_minus, window=400, step=50, progress=F
         unit="chrom",
         disable=None if progress else True,
     ):
-        chrom_size = plus_sizes[chrom]
-        has_minus = chrom in minus_sizes
-        centers = []
-
-        # WINDOW_OR/WINDOW_AND/every phase are all multiples of `step` -- one
-        # step-resolution fetch per strand replaces up to 27 separate
-        # per-phase bw.values() calls per chromosome (see
-        # _windowed_sums_from_fine's docstring for the exactness proof).
-        fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
-        fine_minus = (
-            io.windowed_sum(bw_minus, chrom, 0, step, chrom_size) if has_minus else None
-        )
-
-        for phase in phases:
-            plus_or = _windowed_sums_from_fine(fine_plus, phase, WINDOW_OR, step)
-            if has_minus:
-                # OR pass: combined depth (plus signed + minus abs) per tile.
-                minus_or = np.abs(
-                    _windowed_sums_from_fine(fine_minus, phase, WINDOW_OR, step)
-                )
-                idx = np.nonzero((plus_or + minus_or) > DEPTH_OR)[0]
-            else:
-                # bw_minus lacks this chromosome: falls back to plus-only
-                # depth thresholding (matches data.two_bigwig.OR's fallback
-                # to data.one_bigwig, which thresholds on abs(plus_sum)).
-                idx = np.nonzero(np.abs(plus_or) > DEPTH_OR)[0]
-            centers.append(idx * WINDOW_OR + phase + WINDOW_OR // 2)
-
-            if has_minus:
-                # AND pass: both strands independently nonzero per tile.
-                # bw_minus lacking the chromosome contributes nothing here
-                # (matches data.two_bigwig returning no candidates).
-                plus_and = _windowed_sums_from_fine(fine_plus, phase, WINDOW_AND, step)
-                minus_and = np.abs(
-                    _windowed_sums_from_fine(fine_minus, phase, WINDOW_AND, step)
-                )
-                idx = np.nonzero((plus_and > DEPTH_AND) & (minus_and > DEPTH_AND))[0]
-                centers.append(idx * WINDOW_AND + phase + WINDOW_AND // 2)
-
-        all_centers = _dedupe_centers(chrom_size, centers)
         rows.append(
-            pd.DataFrame({"chrom": chrom, "start": all_centers, "end": all_centers + 1})
+            _scan_chrom(
+                bw_plus, bw_minus, chrom, plus_sizes[chrom],
+                chrom in minus_sizes, phases, step,
+            )
         )
 
     if not rows:

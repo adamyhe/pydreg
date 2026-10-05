@@ -13,7 +13,7 @@ from functools import partial
 
 import numba
 import numpy as np
-import pybigtools
+from figwig import BigWigReader
 import threadpoolctl
 from tqdm.auto import tqdm
 
@@ -55,6 +55,7 @@ def _score_positions(
     chunk,
     progress=False,
     desc="scoring",
+    cores=1,
 ):
     """Scores every row of bed_df (columns chrom, start, ... positionally)
     and returns scores in the same row order. Groups by chromosome first
@@ -63,22 +64,16 @@ def _score_positions(
 
     Overlaps each chunk's CPU-bound feature extraction (bigWig I/O +
     binning) with the *previous* chunk's scorer.predict() call, via a
-    single background thread one chunk ahead -- these two steps were
-    previously strictly sequential (extract, then predict, then extract
-    the next chunk, ...), which left the GPU backends idle during every
-    chunk's extraction. This is scheduling only, not a formula change: the
-    same feature-extraction/scoring calls run on the same inputs in the
-    same order, just overlapped. Safe with a single background thread at
-    *this* level specifically because it's the only thread here that ever
-    touches bw_plus/bw_minus -- the main thread never reads a bigWig while
-    a background extraction is in flight, and a ThreadPoolExecutor with
-    max_workers=1 guarantees at most one call into this level's extract()
-    ever runs at a time regardless of how far ahead a chunk gets submitted.
-    The overlap itself relies on scorer.predict() releasing the GIL while
-    it blocks on the GPU (true for CuPy's device-sync calls) -- on the
-    numpy/sklearn CPU backends this prefetch still can't hurt correctness,
-    just may not overlap as usefully since there's no GPU wait to hide
-    behind.
+    single background thread one chunk ahead. The overlap relies on
+    scorer.predict() releasing the GIL while it blocks on the GPU (true
+    for CuPy's device-sync calls) -- on the numpy/sklearn CPU backends
+    this prefetch still can't hurt correctness, just may not overlap as
+    usefully since there's no GPU wait to hide behind.
+
+    Within each chunk's extraction, extract_features_batch fans out
+    across clusters via ThreadPoolExecutor when cores > 1 -- figwig's
+    BigWigReader is thread-safe (GIL-free reads, no per-reader cache),
+    so one shared reader pair serves all cluster threads.
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).
@@ -236,8 +231,9 @@ def run(
     default) leaves the QMC integration unseeded, as it has always been."""
     numba.set_num_threads(cores)
     threadpoolctl.threadpool_limits(limits=cores)
-    bw_plus = pybigtools.open(plus_bw_path)
-    bw_minus = pybigtools.open(minus_bw_path)
+    io.set_reader_threads(cores)
+    bw_plus = BigWigReader(plus_bw_path)
+    bw_minus = BigWigReader(minus_bw_path)
 
     logger.info("loading models...")
     with _timed("loading models"):
@@ -250,7 +246,9 @@ def run(
 
     logger.info("scanning informative positions...")
     with _timed("scanning informative positions"):
-        infp_bed = infp.get_informative_positions(bw_plus, bw_minus, progress=progress)
+        infp_bed = infp.get_informative_positions(
+            bw_plus, bw_minus, progress=progress
+        )
     logger.info("%d informative positions found", len(infp_bed))
 
     logger.info("scoring informative positions...")
@@ -264,6 +262,7 @@ def run(
             chunk,
             progress=progress,
             desc="scoring informative positions",
+            cores=cores,
         )
 
     def score_fn(bed_df, desc="scoring"):
@@ -276,6 +275,7 @@ def run(
             chunk,
             progress=progress,
             desc=desc,
+            cores=cores,
         )
 
     logger.info("densifying and merging into broad peaks...")
@@ -341,25 +341,16 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
     with every other, including the `.bed.gz`/`.bw` pairs that share
     score_bed/prob_bed as a read-only source.
 
-    Dispatched across *two* pools, not one -- measured directly (not
-    assumed) that the two writers behave oppositely under threading:
-    `pysam.tabix_index`'s bgzip compression does release the GIL (~5.6x
-    speedup threading 8 concurrent calls), but `pybigtools`' bigWig
-    writer does not -- threading 4 concurrent write_bigwig calls measured
-    **4x slower** than calling them serially (20.7s vs 5.2s), i.e. real
-    lock contention inside its Rust binding, not just "no speedup". A
-    `ProcessPoolExecutor` sidesteps that (2.5s for the same 4 files) at
-    the cost of pickling each write's DataFrame across a process
-    boundary -- cheap here since `io.py` itself imports nothing heavier
-    than numpy/pybigtools (confirmed: ~0.2s pool startup, not the seconds
-    a fresh numba/sklearn import would cost) and bigWig outputs are small
-    now that the large infp `.bed.gz` is gone. `.bed.gz` writes stay on
-    threads, which need no such workaround. Falls back to serial bigWig
-    writes if process pools are unavailable in the current environment
-    (mirrors peaks.call_peaks's own ProcessPoolExecutor fallback). `cores`
-    is the same pipeline-wide budget as everywhere else, split between the
-    two pools rather than a separate setting."""
-    sizes = bw_plus.chroms()
+    Dispatched across two pools: `.bed.gz` writes via ThreadPoolExecutor
+    (pysam.tabix_index releases the GIL), bigWig writes via
+    ProcessPoolExecutor. figwig's writer is GIL-free so ThreadPoolExecutor
+    would also work, but ProcessPoolExecutor is kept for consistency with
+    the existing parallelism pattern. Falls back to serial bigWig writes
+    if process pools are unavailable (mirrors peaks.call_peaks's own
+    ProcessPoolExecutor fallback). `cores` is the same pipeline-wide
+    budget as everywhere else, split between the two pools rather than a
+    separate setting."""
+    sizes = bw_plus.chrom_sizes
     chrom_col, start_col, end_col = dense_infp.columns[:3]
 
     infp_out = dense_infp[[chrom_col, start_col, end_col, "score", "infp"]]

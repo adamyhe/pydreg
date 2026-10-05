@@ -4,15 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydreg"
-version = "0.3.2"
+version = "0.3.3"
 description = "End-to-end dREG peak calling from PRO-seq/GRO-seq bigWig data"
 readme = "README.md"
 license = "GPL-3.0-only"
-# Ceiling is implicitly 3.13 for now, not 3.14, even though nothing here
-# says so explicitly -- see .github/workflows/ci.yml's 3.14-exclusion
-# comment for why (pybigtools and safetensors, both native extensions,
-# don't have cp314 wheels yet as of 2026-08-15; every other dependency,
-# including numba/llvmlite, already does). Revisit once both ship one.
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",
@@ -29,7 +24,7 @@ dependencies = [
   "scipy>=1.16",
   "statsmodels>=0.14",
   "scikit-learn>=1.4",
-  "pybigtools>=0.3",
+  "figwig>=0.1",
   "pysam>=0.22",
   "huggingface-hub>=0.24",
   "safetensors>=0.4",
@@ -57,6 +52,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 

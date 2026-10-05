@@ -201,10 +201,12 @@ def _extract_features_cluster(
     hi = int(cluster_centers[-1]) + max_dist + 1
     offsets = (cluster_centers - lo).astype(np.int64)
 
-    # abs() before cumsum, matching the C reference's bigwig_readi(...,
-    # abs=1, ...) read call -- see extract_features's comment above.
-    raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
-    raw_rev = np.abs(io.fetch_raw(bw_minus, chrom, lo, hi))
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        rev_future = pool.submit(io.fetch_raw, bw_minus, chrom, lo, hi)
+        raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
+        raw_rev = np.abs(rev_future.result())
     csum_fwd = np.concatenate([[0.0], np.cumsum(raw_fwd)])
     csum_rev = np.concatenate([[0.0], np.cumsum(raw_rev)])
 
@@ -257,7 +259,9 @@ def _build_clusters(sorted_centers, max_dist):
     return clusters
 
 
-def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows):
+def extract_features_batch(
+    bw_plus, bw_minus, chrom, centers, window_sizes, half_n_windows, **kwargs
+):
     """Same as extract_features(), for an array of centers on one
     chromosome. Returns (n_centers, n_features).
 
@@ -269,22 +273,7 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
     is the batching the C original's merge_adjacent_range does that
     extract_features (the naive per-position reference above) doesn't.
     Input order need not be sorted; this sorts internally and restores the
-    original order before returning.
-
-    Single-threaded, one reader, by design -- see docs/PERF_LOG.md. A
-    multi-threaded variant (independently-opened extra reader pairs
-    processing clusters concurrently) was built and measured to speed up
-    the specific extraction-bound gap-filling step, but real production
-    hardware showed it also multiplies a real, unbounded per-reader
-    caching cost inside pybigtools/bigtools (each independently-opened
-    reader accumulates its own per-chromosome index cache with no
-    eviction), and every mitigation tried (capping reader count,
-    resetting readers per chromosome, restricting threading to just the
-    gap-fill call) traded away most or all of the speedup without fixing
-    the memory cost. That work is preserved on the
-    `multithreaded-extraction-dev` branch rather than discarded --
-    revisit once upstream `bigtools` adds real eviction to that cache, or
-    a cap/restriction is found that survives real-hardware validation."""
+    original order before returning."""
     window_sizes = np.asarray(window_sizes, dtype=int)
     half_n_windows = np.asarray(half_n_windows, dtype=int)
     max_dist = max_dist_from_center(window_sizes, half_n_windows)
@@ -297,9 +286,11 @@ def extract_features_batch(bw_plus, bw_minus, chrom, centers, window_sizes, half
     out = np.empty((n, n_features), dtype=np.float64)
 
     clusters = _build_clusters(sorted_centers, max_dist)
+
     for start_i, end_i in clusters:
         cluster = sorted_centers[start_i:end_i]
         out[order[start_i:end_i]] = _extract_features_cluster(
-            bw_plus, bw_minus, chrom, cluster, max_dist, window_sizes, half_n_windows
+            bw_plus, bw_minus, chrom, cluster, max_dist,
+            window_sizes, half_n_windows,
         )
     return out
