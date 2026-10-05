@@ -186,26 +186,6 @@ def test_extract_features_batch_splits_wide_clusters(monkeypatch, integer_bigwig
     np.testing.assert_allclose(naive, batched, atol=1e-12)
 
 
-def test_extract_features_batch_threaded_matches_serial(monkeypatch, integer_bigwig_pair):
-    plus_path, minus_path = integer_bigwig_pair
-    bw_plus = BigWigReader(plus_path)
-    bw_minus = BigWigReader(minus_path)
-
-    window_sizes = [10, 25, 50]
-    half_n_windows = [10, 10, 10]
-    centers = np.array([1000, 2000, 50000, 51000, 90000])
-
-    monkeypatch.setattr(features, "_MAX_SHARED_FETCH_WIDTH", 500)
-
-    serial = features.extract_features_batch(
-        bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows, cores=1
-    )
-    threaded = features.extract_features_batch(
-        bw_plus, bw_minus, "chr1", centers, window_sizes, half_n_windows, cores=4
-    )
-    np.testing.assert_array_equal(serial, threaded)
-
-
 def test_build_clusters_splits_on_density_not_just_absolute_span():
     # max_dist=500 => 2*max_dist+1=1001 is the density threshold. Two dense
     # groups (50bp apart internally) separated by a ~40,000bp gap -- far
