@@ -201,10 +201,12 @@ def _extract_features_cluster(
     hi = int(cluster_centers[-1]) + max_dist + 1
     offsets = (cluster_centers - lo).astype(np.int64)
 
-    # abs() before cumsum, matching the C reference's bigwig_readi(...,
-    # abs=1, ...) read call -- see extract_features's comment above.
-    raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
-    raw_rev = np.abs(io.fetch_raw(bw_minus, chrom, lo, hi))
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        rev_future = pool.submit(io.fetch_raw, bw_minus, chrom, lo, hi)
+        raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
+        raw_rev = np.abs(rev_future.result())
     csum_fwd = np.concatenate([[0.0], np.cumsum(raw_fwd)])
     csum_rev = np.concatenate([[0.0], np.cumsum(raw_rev)])
 
