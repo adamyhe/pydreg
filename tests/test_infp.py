@@ -56,18 +56,6 @@ def test_get_informative_positions_finds_the_synthetic_peak(synthetic_bigwig_pai
     assert ((starts > 49_500) & (starts < 50_500)).any()
 
 
-def test_get_informative_positions_threaded_matches_serial(synthetic_bigwig_pair):
-    plus_path, minus_path = synthetic_bigwig_pair
-    bw_plus = BigWigReader(plus_path)
-    bw_minus = BigWigReader(minus_path)
-
-    serial = infp.get_informative_positions(bw_plus, bw_minus, cores=1)
-    threaded = infp.get_informative_positions(bw_plus, bw_minus, cores=4)
-
-    np.testing.assert_array_equal(serial["start"].values, threaded["start"].values)
-    np.testing.assert_array_equal(serial["chrom"].values, threaded["chrom"].values)
-
-
 def test_get_informative_positions_handles_chrom_only_in_plus(tmp_path):
     plus_path = str(tmp_path / "plus.bw")
     minus_path = str(tmp_path / "minus.bw")

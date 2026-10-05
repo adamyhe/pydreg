@@ -79,13 +79,20 @@ def _dedupe_centers(chrom_size, centers):
 
 
 def _scan_chrom(bw_plus, bw_minus, chrom, chrom_size, has_minus, phases, step):
-    """Scans one chromosome for informative positions. Factored out of
-    get_informative_positions so it can be dispatched across threads."""
+    """Scans one chromosome for informative positions."""
     centers = []
-    fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
-    fine_minus = (
-        io.windowed_sum(bw_minus, chrom, 0, step, chrom_size) if has_minus else None
-    )
+    if has_minus:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            minus_future = pool.submit(
+                io.windowed_sum, bw_minus, chrom, 0, step, chrom_size
+            )
+            fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
+            fine_minus = minus_future.result()
+    else:
+        fine_plus = io.windowed_sum(bw_plus, chrom, 0, step, chrom_size)
+        fine_minus = None
 
     for phase in phases:
         plus_or = _windowed_sums_from_fine(fine_plus, phase, WINDOW_OR, step)
@@ -111,7 +118,7 @@ def _scan_chrom(bw_plus, bw_minus, chrom, chrom_size, has_minus, phases, step):
 
 
 def get_informative_positions(
-    bw_plus, bw_minus, window=400, step=50, progress=False, cores=1
+    bw_plus, bw_minus, window=400, step=50, progress=False
 ):
     """bw_plus/bw_minus: open figwig.BigWigReader instances.
 
@@ -122,10 +129,10 @@ def get_informative_positions(
     like a union but isn't) -- the pretrained model's expected input
     distribution was produced by this exact scan.
 
-    When cores > 1, chromosomes are processed concurrently via
-    ThreadPoolExecutor. figwig's BigWigReader is thread-safe (GIL-free
-    reads, no per-reader cache), so one shared reader pair serves all
-    threads.
+    Each chromosome's plus and minus strand reads are overlapped via a
+    background thread (figwig's BigWigReader is thread-safe), halving
+    per-chromosome I/O time without the memory cost of processing many
+    chromosomes concurrently.
 
     Returns a DataFrame with columns chrom, start, end (1bp intervals,
     end = start + 1), one row per informative position, sorted and
@@ -136,50 +143,19 @@ def get_informative_positions(
     minus_sizes = bw_minus.chrom_sizes
     chroms = [c for c, size in plus_sizes.items() if size > MIN_CHROM_SIZE]
 
-    if cores > 1 and len(chroms) > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from functools import partial
-
-        scan = partial(
-            _scan_chrom,
-            bw_plus, bw_minus,
-            phases=phases, step=step,
+    rows = []
+    for chrom in tqdm(
+        chroms,
+        desc="scanning chromosomes",
+        unit="chrom",
+        disable=None if progress else True,
+    ):
+        rows.append(
+            _scan_chrom(
+                bw_plus, bw_minus, chrom, plus_sizes[chrom],
+                chrom in minus_sizes, phases, step,
+            )
         )
-        with ThreadPoolExecutor(max_workers=min(cores, len(chroms))) as pool:
-            futures = {
-                pool.submit(
-                    scan, chrom, plus_sizes[chrom], chrom in minus_sizes
-                ): chrom
-                for chrom in chroms
-            }
-            rows = []
-            pbar = tqdm(
-                total=len(chroms),
-                desc="scanning chromosomes",
-                unit="chrom",
-                disable=None if progress else True,
-            )
-            for future in as_completed(futures):
-                rows.append(future.result())
-                pbar.update(1)
-            pbar.close()
-        # Restore chromosome order (as_completed returns in completion order)
-        chrom_order = {c: i for i, c in enumerate(chroms)}
-        rows.sort(key=lambda df: chrom_order[df["chrom"].iloc[0]] if len(df) > 0 else 0)
-    else:
-        rows = []
-        for chrom in tqdm(
-            chroms,
-            desc="scanning chromosomes",
-            unit="chrom",
-            disable=None if progress else True,
-        ):
-            rows.append(
-                _scan_chrom(
-                    bw_plus, bw_minus, chrom, plus_sizes[chrom],
-                    chrom in minus_sizes, phases, step,
-                )
-            )
 
     if not rows:
         return pd.DataFrame(columns=["chrom", "start", "end"])
