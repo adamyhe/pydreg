@@ -289,12 +289,14 @@ predict:extract ratio drops from 3.05x to 1.46x between the two cards as
 GPUs get faster — extraction time is fixed and CPU-bound, so it becomes a
 growing fraction of total time as `predict()` shrinks. Parallelizing
 extraction itself across multiple independently-opened bigWig readers was
-investigated (pybigtools' `BBIReader` isn't safely shareable across
-threads, but is safely reopenable per-thread) and initially shipped, then
-reverted after real production data showed each reader accumulates an
-unbounded per-chromosome index cache with no eviction inside `bigtools`
-(`--cores 16` cost ~1.6GB extra RSS, a consistent ~20% regression) — see
-"Feature-extraction clustering" below. Separately, a numba-jitted
+investigated with pybigtools, then reverted after real production data
+showed each reader accumulates an unbounded per-chromosome index cache
+with no eviction inside `bigtools` (`--cores 16` cost ~1.6GB extra RSS).
+Since 0.3.3, pydreg uses figwig (pure Python + numba, GIL-free,
+no per-reader cache), which makes the reader thread-safe — plus and minus
+strand reads within each cluster are now overlapped via a background
+thread, at zero extra memory cost (both arrays are needed anyway for the
+cumsum that follows). Separately, a numba-jitted
 `features._binned_sums_batch` (fused, no gather-index arrays, later
 `prange`-parallelized across positions) made the single-threaded path
 itself 2-4x faster, which is what actually fixed the worst case
@@ -352,25 +354,18 @@ position sets are unaffected; only sparse ones change behavior. Ships
 unconditionally, since it only changes how a single reader groups its own
 fetches.
 
-**Multi-threaded extraction** (extra, independently-opened reader pairs
-processing clusters concurrently) was also built, measured at a real 2.2x
-speedup on a synthetic sparse benchmark — then found on real production
-data to multiply an unbounded memory cost, since each independently-opened
-`pybigtools` reader accumulates its own per-chromosome index cache with no
-eviction (confirmed against `bigtools`' Rust source): a single reader
-grows ~120MB over a full genome sweep, `--cores 16` grows ~1.6GB, a
-consistent ~20% whole-pipeline RSS regression. Every mitigation tried
-(capping reader count, resetting per chromosome, restricting to the one
-call site it helps) traded away most of the speedup without fixing the
-memory cost — the real fix needs eviction added to `bigtools` itself.
-**Not shipped**: removed from this release and preserved, unmodified, on
-the `multithreaded-extraction-dev` branch; feature extraction here is
-always single-threaded, one reader, regardless of `--cores`, but still
-gets density-aware clustering. Real production re-validation (K562_groseq,
-G2, `--cores 16`) confirmed this is a clean win: peak RSS within 0.2-1.1%
-of the pre-clustering baseline (noise-level), wall-clock unaffected. See
-`docs/PERF_LOG.md`'s 2026-08-10, 2026-08-14, and 2026-08-15 entries for the
-full mitigation attempts.
+**Multi-threaded extraction across clusters** (extra reader pairs
+processing clusters concurrently) was investigated with pybigtools, but
+each independently-opened reader accumulates its own per-chromosome index
+cache with no eviction (`--cores 16` cost ~1.6GB RSS), and concurrent
+cluster buffers add further memory proportional to cluster count. Since
+0.3.3, figwig's thread-safe shared reader eliminates the per-reader cache
+cost, but concurrent cluster buffers remain (~1.2 GiB measured on real
+data). Cross-cluster threading is not shipped; instead, each cluster
+overlaps its plus and minus strand reads (zero extra memory, since both
+arrays are needed anyway). Feature extraction still gets density-aware
+clustering regardless. See `docs/PERF_LOG.md`'s 2026-08-10, 2026-08-14,
+2026-08-15, and 2026-10-04 entries.
 
 ## Peak calling: process parallelism and per-worker BLAS pinning
 
@@ -515,19 +510,16 @@ other. The informative-position `.bed.gz` was dropped entirely — it
 duplicated the `.bw` purely for debugging, was never read back anywhere,
 and was by far the largest, slowest file this step wrote.
 
-The remaining writes are dispatched across two pools, because the two
-writers behave oppositely under threading. `pysam.tabix_index`'s bgzip
-compression releases the GIL (~5.6x speedup threading 8 concurrent calls on
-a 10-core machine), so `.bed.gz` writes go on a
-`ThreadPoolExecutor(max_workers=min(cores, n_bedgz_files))`. `pybigtools`'
-bigWig writer does **not** — threading 4 concurrent `write_bigwig` calls
-measured 4x *slower* than serial (20.7s vs 5.2s), real Rust-binding lock
-contention. BigWig writes instead go on a
-`ProcessPoolExecutor(max_workers=min(cores, n_bigwig_files))`, which
-correctly parallelizes (2.5s for the same 4 files) — pickling cost across
-the process boundary is cheap here since `pydreg.io` only imports
-numpy/pybigtools (pool startup ~0.2s) and bigWig outputs are all small now
-that the large infp `.bed.gz` is gone.
+The remaining writes are dispatched across two pools. `pysam.tabix_index`'s
+bgzip compression releases the GIL (~5.6x speedup threading 8 concurrent
+calls on a 10-core machine), so `.bed.gz` writes go on a
+`ThreadPoolExecutor(max_workers=min(cores, n_bedgz_files))`. BigWig writes
+go on a `ProcessPoolExecutor(max_workers=min(cores, n_bigwig_files))` —
+figwig's writer is GIL-free so `ThreadPoolExecutor` would also work, but
+`ProcessPoolExecutor` is kept for consistency with the existing pattern.
+Pickling cost across the process boundary is cheap since `pydreg.io` only
+imports numpy/figwig (pool startup ~0.2s) and bigWig outputs are all small
+now that the large infp `.bed.gz` is gone.
 
 ## Reproducing these results
 
