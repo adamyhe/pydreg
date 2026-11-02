@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 from figwig import BigWigReader, BigWigWriter
 
 from pydreg import io
@@ -24,6 +25,52 @@ def test_fetch_raw_zero_pads_out_of_bounds(synthetic_bigwig_pair):
     raw = io.fetch_raw(bw, "chr1", -50, 50)
     assert raw.shape[0] == 100
     assert np.all(raw[:50] == 0)
+
+
+def test_fetch_raw_zero_pads_past_chromosome_end(synthetic_bigwig_pair):
+    plus_path, _ = synthetic_bigwig_pair
+    bw = BigWigReader(plus_path)
+    chrom_size = bw.chrom_sizes["chr1"]
+
+    raw = io.fetch_raw(bw, "chr1", chrom_size - 50, chrom_size + 50)
+    in_bounds = io.fetch_raw(bw, "chr1", chrom_size - 50, chrom_size)
+
+    assert raw.shape[0] == 100
+    assert not np.isnan(raw).any()
+    np.testing.assert_array_equal(raw[:50], in_bounds)
+    assert np.all(raw[50:] == 0)
+
+
+def test_fetch_raw_zero_pads_both_chromosome_ends(synthetic_bigwig_pair):
+    plus_path, _ = synthetic_bigwig_pair
+    bw = BigWigReader(plus_path)
+    chrom_size = bw.chrom_sizes["chr1"]
+
+    raw = io.fetch_raw(bw, "chr1", -10, chrom_size + 10)
+
+    assert raw.shape[0] == chrom_size + 20
+    assert np.all(raw[:10] == 0) and np.all(raw[-10:] == 0)
+    np.testing.assert_array_equal(raw[10:-10], io.fetch_raw(bw, "chr1", 0, chrom_size))
+
+
+def test_fetch_raw_entirely_past_chromosome_end_returns_zeroes(synthetic_bigwig_pair):
+    plus_path, _ = synthetic_bigwig_pair
+    bw = BigWigReader(plus_path)
+    chrom_size = bw.chrom_sizes["chr1"]
+
+    raw = io.fetch_raw(bw, "chr1", chrom_size + 100, chrom_size + 200)
+
+    assert raw.shape[0] == 100
+    assert np.all(raw == 0)
+
+
+def test_windowed_sum_raises_on_infinite_value(array_reader):
+    signal = np.zeros(1000, dtype=np.float32)
+    signal[123] = np.inf
+    bw = array_reader({"chr1": signal})
+
+    with pytest.raises(ValueError, match="infinite value on chr1"):
+        io.windowed_sum(bw, "chr1", 0, 50, 1000)
 
 
 def test_fetch_raw_missing_chromosome_returns_zeroes(tmp_path):

@@ -4513,3 +4513,141 @@ parallelism off, chunked reads on).
 
 Tests: 107 -> 106 (removed threaded-extraction-matches-serial test;
 added chunked-windowed-sum-matches-unchunked test). All passing.
+
+## 2026-11-01 — figwig 0.2.0's optional ISA-L decoder: investigated, not adopted
+
+figwig 0.2.0 adds an `isal` extra: with python-isal installed, `read()`'s
+default `engine='auto'` inflates bigWig blocks with ISA-L instead of zlib,
+returning the same values. Since bigWig reads sit on feature extraction's
+critical path, this looked like a free win. It isn't.
+
+**Benchmark**: G1 (K562 PRO-seq, GSM1480327), chr1 only, single-threaded
+(`set_reader_threads(1)`, `numba.set_num_threads(1)`), best of 3, Apple
+Silicon (macOS), python-isal 1.8.0 (bundled ISA-L 2.31.1, the one layout
+figwig 0.2.0 has verified, so ISA-L was really in use). Engine forced per
+read via a reader proxy. Dense set = chr1's 1,628,945 informative
+positions; sparse set = 500 isolated points (non-overlapping windows), a
+stand-in for gap-filled positions.
+
+| stage | zlib | isal | isal speedup |
+|---|---|---|---|
+| infp scan | 0.70 s | 0.74 s | 0.94x |
+| dense extraction (wall) | 7.66 s | 7.66 s | 1.00x |
+| ↳ fetch only (both strands) | 1.78 s | 1.87 s | 0.95x |
+| ↳ cumsum + binning only | 5.29 s | 5.29 s | — |
+| sparse extraction (wall) | 1.24 s | 1.58 s | 0.78x |
+| ↳ fetch only | 0.70 s | 0.83 s | 0.85x |
+
+ISA-L is slightly *slower* on every read-bound stage, which held when
+re-run with the engine order alternated (isal first). The likely reason
+(not tested directly) is that bigWig data is many small compressed blocks,
+so ISA-L's per-block setup cost outweighs its faster inflate. Features
+were bit-identical across engines. Untested: x86 Linux, where ISA-L's
+SIMD paths differ, though decompression's small share of extraction time
+caps any possible gain there anyway.
+
+**Where extraction time actually goes**: for dense positions, ~70% is
+cumsum + binning and ~25% is fetching. Within fetching, the actual figwig
+read is the minor part: per-cluster raw reads of chr1's plus strand
+total 0.18 s (same as one whole-chromosome read, so clustering itself
+costs nothing: 59 clusters, 0.94x of chr1's span), but `io.fetch_raw`
+over the same clusters takes 0.68 s. The difference is `fetch_raw`'s
+float64 cast (~0.13 s for chr1) and especially its `np.nan_to_num`
+(~0.47 s for chr1), which exists only to zero the NaNs figwig returns for
+bases past a chromosome's end. Not changed here; noted as a candidate.
+
+Not adopted: no `isal` dependency or extra. figwig's `cuda` extra (device
+reads) was also considered and rejected without benchmarking, since its
+reads still decode on the CPU and pydreg's binning consumes raw signal on
+the CPU.
+
+## 2026-11-01 (cont.) — `fetch_raw` clamps reads to the chromosome instead of NaN-cleaning every base; infinite input now raises
+
+The entry above found `io.fetch_raw`'s `np.nan_to_num` costing more than
+the figwig read it cleans up after. Its only job: with `missing=0.0`,
+figwig (0.1.0 and 0.2.0 alike, probed directly) already returns 0 for
+uncovered bases *and* for stored NaNs; the one NaN source left is bases
+past a chromosome's end, which `fetch_raw` asks for whenever a position
+sits within `max_dist` of a chromosome end. So the read is now clamped to
+`[0, chrom_size)` and the overhang zero-padded (the start side already
+worked this way), and `nan_to_num` is gone.
+
+Correction to the entry above: its "59 clusters" read pattern came from
+calling `extract_features_batch` once on all of chr1. The real pipeline
+calls it per `query_chunk` (4,096 positions by default), giving 419 reads
+per strand on chr1 (median 547 kb, 1.23x chr1's span read in total, since
+adjacent chunks each re-read their `max_dist` margins). All numbers below
+use that real chunking.
+
+`nan_to_num` also silently mapped ±inf to ±1.8e308. Rather than keep that,
+infinite input is now an error, checked without a pass over the raw
+signal: in feature extraction the abs()'d buffer is non-negative and
+NaN-free, so its cumsum's last element is infinite exactly when some base
+is (`features._check_finite`, O(1) per cluster); in the infp scan,
+`windowed_sum` reads never leave the chromosome, so a non-finite tile sum
+can only come from an infinite base (`io._check_finite_sums`, one pass
+over the sums, 1/50th the size of the raw read). figwig itself refuses to
+write infinite values; this guards against bigWigs from other writers.
+
+**Benchmark** (G1 chr1, single-threaded, best of 3, old/new run
+alternately twice, Apple Silicon):
+
+| | old | new |
+|---|---|---|
+| `fetch_raw`, plus strand, chunked reads | 0.86 s | 0.49 s |
+| chunked extraction, 1,628,945 positions | 8.54 / 8.73 s | 8.22 / 8.12 s |
+| infp scan | 0.71 / 0.70 s | 0.70 / 0.67 s |
+
+`fetch_raw` is 43% faster; extraction gains ~5%, under the ~11% that
+`nan_to_num`'s measured share suggested, likely because the minus strand's
+`fetch_raw` already ran on a background thread overlapping the plus
+strand's, hiding part of its saving. On GPU runs, where extraction is
+overlapped with scoring, the end-to-end effect will be smaller still; the
+CPU backends and the extraction-bound gap-fill stage are where it shows.
+
+**Output unchanged**: features bit-identical before/after for all
+1,633,817 positions checked on G1 — chr1's informative positions plus
+positions every 997 bp within `max_dist` of both ends of every chromosome.
+
+Tests: 106 -> 112 (`fetch_raw` past-end, both-ends, and entirely-past-end
+zero-padding; infinite input raising in `windowed_sum`, `extract_features`
+and `extract_features_batch`, for +inf and -inf).
+
+## 2026-11-01 (cont.) — one-pass `_abs_cumsum` kernel replaces four full-size copies per cluster strand
+
+After the `fetch_raw` clamp above, each cluster strand's prefix-sum buffer
+was still built as `np.concatenate([[0.0], np.cumsum(np.abs(raw))])` on a
+float64 copy of figwig's float32 read: four full-size passes (cast, abs,
+cumsum, concat), each allocating. Measured on G1 chr1's plus strand with
+the real 4,096-position chunking (419 clusters, 306 Mb), that chain took
+1.04 s, versus 1.97 s for the (already parallel) binning kernel that
+consumes it — and unlike binning, none of it used `--cores`.
+
+`features._abs_cumsum` (numba, `nogil=True`) builds the same buffer in one
+pass straight from float32 (`fetch_raw` gained a `dtype` argument; the
+batched path asks for float32, everything else keeps float64). It
+accumulates in the same sequential left-to-right order `np.cumsum` does,
+so it's bit-identical, not just close: 0.31 s for the same plus-strand
+chr1 reads. `nogil=True` also lets the minus strand's cumsum run on the
+existing background thread alongside the plus strand's, where before only
+the two reads overlapped.
+
+**Benchmark** (G1 chr1, single-threaded, best of 3, alternating runs
+against the `fetch_raw`-clamp branch, Apple Silicon):
+
+| | before | after |
+|---|---|---|
+| chunked extraction, 1,628,945 positions | 8.01 / 7.84 s | 6.05 / 5.79 s |
+
+~25% faster extraction, above the ~18% the isolated kernel timing
+predicted, the difference being the newly overlapped minus-strand cumsum.
+Combined with the `fetch_raw` clamp, chr1 extraction went from ~8.6 s to
+~5.9 s (~31%). Same caveat as above on end-to-end effect: largest for the
+CPU backends and the extraction-bound gap-fill stage, mostly hidden behind
+GPU scoring in the main scan.
+
+**Output unchanged**: features bit-identical to the pre-clamp baseline on
+the same 1,633,817 G1 positions (chr1's informative positions plus every
+chromosome's ends). New test pins `_abs_cumsum` bit-identical to the numpy
+expression on float32 and float64 input with signed, non-integer values.
+Tests: 112 -> 113.

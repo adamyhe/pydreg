@@ -46,7 +46,9 @@ def windowed_sum(bw, chrom, phase, window, chrom_size):
     if n_bins <= chunk_bins:
         width = n_bins * window
         raw = bw.read([chrom], [phase], width=width, missing=0.0, n_jobs=_N_JOBS)
-        return raw[0].astype(np.float64).reshape(n_bins, window).sum(axis=1)
+        result = raw[0].astype(np.float64).reshape(n_bins, window).sum(axis=1)
+        _check_finite_sums(result, chrom)
+        return result
 
     result = np.empty(n_bins, dtype=np.float64)
     offset = phase
@@ -62,33 +64,58 @@ def windowed_sum(bw, chrom, phase, window, chrom_size):
         pos += this_bins
         offset += this_width
         remaining -= this_bins
+    _check_finite_sums(result, chrom)
     return result
 
 
-def fetch_raw(bw, chrom, start, end):
+def _check_finite_sums(sums, chrom):
+    """Raises ValueError if windowed_sum's tile sums hold a non-finite value.
+    Its reads never extend past the chromosome and `missing=0.0` zeroes
+    uncovered bases and stored NaNs, so the only way a sum can be
+    non-finite is an infinite value in the bigWig itself. Checking the sums
+    (one per `window` bp) rather than the raw per-bp read keeps this cheap."""
+    if not np.isfinite(sums).all():
+        raise ValueError(
+            f"bigWig holds an infinite value on {chrom}; dREG input must be "
+            f"finite read counts."
+        )
+
+
+def fetch_raw(bw, chrom, start, end, dtype=np.float64):
     """Raw per-bp signal over [start, end), zero-filled at uncovered
     positions AND at any portion of the range outside the chromosome
     (start < 0 or end > chrom size). If the bigWig lacks `chrom` entirely,
     that strand contributes all-zero signal over the requested span. Always
-    returns an array of length end - start."""
+    returns an array of length end - start, of `dtype`. figwig reads
+    float32, so dtype=np.float32 skips a full-size cast copy -- what
+    features._extract_features_cluster asks for, since its _abs_cumsum
+    widens each value to float64 itself.
+
+    The read itself is clamped to the chromosome and the overhang
+    zero-padded here, rather than reading past the end and NaN-cleaning:
+    figwig returns NaN only past a chromosome's end (`missing=0.0` already
+    zeroes uncovered bases and stored NaNs), so the clamp makes the output
+    NaN-free without an np.nan_to_num pass over every base -- which cost
+    more than the read itself (see docs/PERF_LOG.md's 2026-11-01 entries).
+    Infinite values are passed through; callers check for them (see
+    features._check_finite)."""
     length = end - start
     if length <= 0:
-        return np.zeros(0, dtype=np.float64)
+        return np.zeros(0, dtype=dtype)
     if chrom not in bw.chrom_sizes:
-        return np.zeros(length, dtype=np.float64)
+        return np.zeros(length, dtype=dtype)
     read_start = max(0, start)
-    read_width = end - read_start
-    if read_width <= 0:
-        return np.zeros(length, dtype=np.float64)
-    raw = bw.read([chrom], [read_start], width=read_width, missing=0.0,
-                  n_jobs=_N_JOBS)
-    vals = raw[0].astype(np.float64)
-    np.nan_to_num(vals, copy=False, nan=0.0)
-    if start < 0:
-        result = np.zeros(length, dtype=np.float64)
-        result[-start:] = vals
-        return result
-    return vals
+    read_end = min(end, bw.chrom_sizes[chrom])
+    if read_end <= read_start:
+        return np.zeros(length, dtype=dtype)
+    raw = bw.read([chrom], [read_start], width=read_end - read_start,
+                  missing=0.0, n_jobs=_N_JOBS)
+    vals = raw[0].astype(dtype, copy=False)
+    if read_start == start and read_end == end:
+        return vals
+    result = np.zeros(length, dtype=dtype)
+    result[read_start - start:read_end - start] = vals
+    return result
 
 
 def write_bed_gz(df, path, columns=None):

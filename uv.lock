@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -240,15 +240,15 @@ ctk = [
 
 [[package]]
 name = "figwig"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numba" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/28/98cbb17bbd388c0101fc75a3c0e542bb8a4fb44b5caf35dea1726e1b3516/figwig-0.1.0.tar.gz", hash = "sha256:c757ff371b518a815dd81fe2178e36e4eb2c8b9616fb7fd1d4326d484f8b723b", size = 132024, upload-time = "2026-10-04T17:39:57.709Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/8a/3d1e23a83604b6190d4d854093681975cde3d1853918cb0ffe43e3a8ebc1/figwig-0.2.0.tar.gz", hash = "sha256:e2708fc6a6410f9338f3df6ee857f603bad238226dcd7d45903c31a8a87b7c2e", size = 346217, upload-time = "2026-10-27T00:36:12.136Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/d0/b1e0ed480da3eaff0bec35863b96d312ee8a5c144b3c8c70b7d616fb298a/figwig-0.1.0-py3-none-any.whl", hash = "sha256:acb84a2e92c4167c8b9973c25b7e09654d49945f6a7afbab2cb0eb2d8d3ed020", size = 89362, upload-time = "2026-10-04T17:39:56.419Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/11/56155bddf2653388c6f5694aadcee776f867e1a328f98d7ca5fe7ac7609f/figwig-0.2.0-py3-none-any.whl", hash = "sha256:aca77f12a82101336d12a5ec44a7a0e1bbad1bcd307966d6dc3600c6bc86a0af", size = 221927, upload-time = "2026-10-27T00:36:10.706Z" },
 ]
 
 [[package]]
@@ -729,7 +729,7 @@ wheels = [
 
 [[package]]
 name = "pydreg"
-version = "0.3.3"
+version = "0.3.4"
 source = { editable = "." }
 dependencies = [
     { name = "figwig" },
