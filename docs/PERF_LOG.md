@@ -4513,3 +4513,50 @@ parallelism off, chunked reads on).
 
 Tests: 107 -> 106 (removed threaded-extraction-matches-serial test;
 added chunked-windowed-sum-matches-unchunked test). All passing.
+
+## 2026-11-01 — figwig 0.2.0's optional ISA-L decoder: investigated, not adopted
+
+figwig 0.2.0 adds an `isal` extra: with python-isal installed, `read()`'s
+default `engine='auto'` inflates bigWig blocks with ISA-L instead of zlib,
+returning the same values. Since bigWig reads sit on feature extraction's
+critical path, this looked like a free win. It isn't.
+
+**Benchmark**: G1 (K562 PRO-seq, GSM1480327), chr1 only, single-threaded
+(`set_reader_threads(1)`, `numba.set_num_threads(1)`), best of 3, Apple
+Silicon (macOS), python-isal 1.8.0 (bundled ISA-L 2.31.1, the one layout
+figwig 0.2.0 has verified, so ISA-L was really in use). Engine forced per
+read via a reader proxy. Dense set = chr1's 1,628,945 informative
+positions; sparse set = 500 isolated points (non-overlapping windows), a
+stand-in for gap-filled positions.
+
+| stage | zlib | isal | isal speedup |
+|---|---|---|---|
+| infp scan | 0.70 s | 0.74 s | 0.94x |
+| dense extraction (wall) | 7.66 s | 7.66 s | 1.00x |
+| ↳ fetch only (both strands) | 1.78 s | 1.87 s | 0.95x |
+| ↳ cumsum + binning only | 5.29 s | 5.29 s | — |
+| sparse extraction (wall) | 1.24 s | 1.58 s | 0.78x |
+| ↳ fetch only | 0.70 s | 0.83 s | 0.85x |
+
+ISA-L is slightly *slower* on every read-bound stage, which held when
+re-run with the engine order alternated (isal first). The likely reason
+(not tested directly) is that bigWig data is many small compressed blocks,
+so ISA-L's per-block setup cost outweighs its faster inflate. Features
+were bit-identical across engines. Untested: x86 Linux, where ISA-L's
+SIMD paths differ, though decompression's small share of extraction time
+caps any possible gain there anyway.
+
+**Where extraction time actually goes**: for dense positions, ~70% is
+cumsum + binning and ~25% is fetching. Within fetching, the actual figwig
+read is the minor part: per-cluster raw reads of chr1's plus strand
+total 0.18 s (same as one whole-chromosome read, so clustering itself
+costs nothing: 59 clusters, 0.94x of chr1's span), but `io.fetch_raw`
+over the same clusters takes 0.68 s. The difference is `fetch_raw`'s
+float64 cast (~0.13 s for chr1) and especially its `np.nan_to_num`
+(~0.47 s for chr1), which exists only to zero the NaNs figwig returns for
+bases past a chromosome's end. Not changed here; noted as a candidate.
+
+Not adopted: no `isal` dependency or extra. figwig's `cuda` extra (device
+reads) was also considered and rejected without benchmarking, since its
+reads still decode on the CPU and pydreg's binning consumes raw signal on
+the CPU.
