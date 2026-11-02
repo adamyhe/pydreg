@@ -88,7 +88,23 @@ def extract_features(bw_plus, bw_minus, chrom, center, window_sizes, half_n_wind
     raw_rev = np.abs(
         io.fetch_raw(bw_minus, chrom, center - max_dist, center + max_dist + 1)
     )
+    _check_finite(raw_fwd.sum(), chrom, center - max_dist, center + max_dist + 1)
+    _check_finite(raw_rev.sum(), chrom, center - max_dist, center + max_dist + 1)
     return np.concatenate([strand_vector(raw_fwd), strand_vector(raw_rev)])
+
+
+def _check_finite(total, chrom, lo, hi):
+    """Raises ValueError if `total` -- the sum of an abs()'d raw read over
+    [lo, hi) -- is non-finite. io.fetch_raw's output is NaN-free and abs()
+    makes every term non-negative, so the sum is infinite exactly when some
+    base holds an infinite value: one O(1) check on a total the caller
+    already has (the cumsum's last element) instead of a pass over the
+    whole buffer."""
+    if not np.isfinite(total):
+        raise ValueError(
+            f"bigWig holds an infinite value in {chrom}:{max(lo, 0)}-{hi}; "
+            f"dREG input must be finite read counts."
+        )
 
 
 @numba.njit(cache=True, parallel=True)
@@ -209,6 +225,8 @@ def _extract_features_cluster(
         raw_rev = np.abs(rev_future.result())
     csum_fwd = np.concatenate([[0.0], np.cumsum(raw_fwd)])
     csum_rev = np.concatenate([[0.0], np.cumsum(raw_rev)])
+    _check_finite(csum_fwd[-1], chrom, lo, hi)
+    _check_finite(csum_rev[-1], chrom, lo, hi)
 
     fwd = _binned_sums_batch(csum_fwd, offsets, window_sizes, half_n_windows)
     rev = _binned_sums_batch(csum_rev, offsets, window_sizes, half_n_windows)

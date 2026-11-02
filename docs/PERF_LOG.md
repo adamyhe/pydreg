@@ -4560,3 +4560,55 @@ Not adopted: no `isal` dependency or extra. figwig's `cuda` extra (device
 reads) was also considered and rejected without benchmarking, since its
 reads still decode on the CPU and pydreg's binning consumes raw signal on
 the CPU.
+
+## 2026-11-01 (cont.) — `fetch_raw` clamps reads to the chromosome instead of NaN-cleaning every base; infinite input now raises
+
+The entry above found `io.fetch_raw`'s `np.nan_to_num` costing more than
+the figwig read it cleans up after. Its only job: with `missing=0.0`,
+figwig (0.1.0 and 0.2.0 alike, probed directly) already returns 0 for
+uncovered bases *and* for stored NaNs; the one NaN source left is bases
+past a chromosome's end, which `fetch_raw` asks for whenever a position
+sits within `max_dist` of a chromosome end. So the read is now clamped to
+`[0, chrom_size)` and the overhang zero-padded (the start side already
+worked this way), and `nan_to_num` is gone.
+
+Correction to the entry above: its "59 clusters" read pattern came from
+calling `extract_features_batch` once on all of chr1. The real pipeline
+calls it per `query_chunk` (4,096 positions by default), giving 419 reads
+per strand on chr1 (median 547 kb, 1.23x chr1's span read in total, since
+adjacent chunks each re-read their `max_dist` margins). All numbers below
+use that real chunking.
+
+`nan_to_num` also silently mapped ±inf to ±1.8e308. Rather than keep that,
+infinite input is now an error, checked without a pass over the raw
+signal: in feature extraction the abs()'d buffer is non-negative and
+NaN-free, so its cumsum's last element is infinite exactly when some base
+is (`features._check_finite`, O(1) per cluster); in the infp scan,
+`windowed_sum` reads never leave the chromosome, so a non-finite tile sum
+can only come from an infinite base (`io._check_finite_sums`, one pass
+over the sums, 1/50th the size of the raw read). figwig itself refuses to
+write infinite values; this guards against bigWigs from other writers.
+
+**Benchmark** (G1 chr1, single-threaded, best of 3, old/new run
+alternately twice, Apple Silicon):
+
+| | old | new |
+|---|---|---|
+| `fetch_raw`, plus strand, chunked reads | 0.86 s | 0.49 s |
+| chunked extraction, 1,628,945 positions | 8.54 / 8.73 s | 8.22 / 8.12 s |
+| infp scan | 0.71 / 0.70 s | 0.70 / 0.67 s |
+
+`fetch_raw` is 43% faster; extraction gains ~5%, under the ~11% that
+`nan_to_num`'s measured share suggested, likely because the minus strand's
+`fetch_raw` already ran on a background thread overlapping the plus
+strand's, hiding part of its saving. On GPU runs, where extraction is
+overlapped with scoring, the end-to-end effect will be smaller still; the
+CPU backends and the extraction-bound gap-fill stage are where it shows.
+
+**Output unchanged**: features bit-identical before/after for all
+1,633,817 positions checked on G1 — chr1's informative positions plus
+positions every 997 bp within `max_dist` of both ends of every chromosome.
+
+Tests: 106 -> 112 (`fetch_raw` past-end, both-ends, and entirely-past-end
+zero-padding; infinite input raising in `windowed_sum`, `extract_features`
+and `extract_features_batch`, for +inf and -inf).

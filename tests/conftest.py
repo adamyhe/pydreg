@@ -8,6 +8,27 @@ from figwig import BigWigWriter
 
 
 @pytest.fixture
+def array_reader():
+    """A stand-in BigWigReader class over in-memory signal ({chrom: array}),
+    for inputs figwig refuses to write (e.g. infinite values). Like figwig,
+    its reads return NaN past the chromosome end."""
+
+    class ArrayReader:
+        def __init__(self, signals):
+            self.signals = signals
+            self.chrom_sizes = {c: len(v) for c, v in signals.items()}
+
+        def read(self, chroms, starts, width, missing=0.0, n_jobs=1):
+            vals = self.signals[chroms[0]]
+            out = np.full(width, np.nan, dtype=np.float32)
+            avail = vals[starts[0]:starts[0] + width]
+            out[:len(avail)] = avail
+            return out[None, :]
+
+    return ArrayReader
+
+
+@pytest.fixture
 def synthetic_bigwig_pair(tmp_path):
     """A small, self-contained bigWig pair with one clear signal peak
     around position 50,000 on a 100,000bp "chr1" -- no dependency on the

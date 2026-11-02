@@ -248,3 +248,17 @@ def test_extract_features_handles_contig_present_only_in_plus_bigwig(tmp_path):
 
     assert X.shape == (len(positions), 4)
     np.testing.assert_allclose(X[:, 2:], 0.01)
+
+
+@pytest.mark.parametrize("bad_value", [np.inf, -np.inf])
+def test_extract_features_raises_on_infinite_value(bad_value, array_reader):
+    plus = np.zeros(5000, dtype=np.float32)
+    minus = np.zeros(5000, dtype=np.float32)
+    minus[2010] = bad_value
+    bw_plus = array_reader({"chr1": plus})
+    bw_minus = array_reader({"chr1": minus})
+
+    with pytest.raises(ValueError, match="infinite value in chr1"):
+        features.extract_features_batch(bw_plus, bw_minus, "chr1", [2000], [10], [2])
+    with pytest.raises(ValueError, match="infinite value in chr1"):
+        features.extract_features(bw_plus, bw_minus, "chr1", 2000, [10], [2])
