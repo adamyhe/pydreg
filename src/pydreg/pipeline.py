@@ -70,10 +70,11 @@ def _score_positions(
     usefully since there's no GPU wait to hide behind.
 
     Within each chunk, extract_features_batch processes clusters serially
-    (only each cluster's plus/minus reads overlap), so --cores doesn't
-    speed up extraction: threading across clusters was measured and
-    rejected for its memory cost (see docs/OPTIMIZATION.md's
-    "Feature-extraction clustering" section).
+    (only each cluster's plus/minus reads overlap); --cores parallelizes
+    each cluster's binning (features._binned_sums_batch_numba), not the
+    clusters themselves or their reads and cumsums. Threading across
+    clusters was measured and rejected for its memory cost (see
+    docs/OPTIMIZATION.md's "Feature-extraction clustering" section).
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).
