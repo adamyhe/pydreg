@@ -81,12 +81,15 @@ def _check_finite_sums(sums, chrom):
         )
 
 
-def fetch_raw(bw, chrom, start, end):
+def fetch_raw(bw, chrom, start, end, dtype=np.float64):
     """Raw per-bp signal over [start, end), zero-filled at uncovered
     positions AND at any portion of the range outside the chromosome
     (start < 0 or end > chrom size). If the bigWig lacks `chrom` entirely,
     that strand contributes all-zero signal over the requested span. Always
-    returns an array of length end - start.
+    returns an array of length end - start, of `dtype`. figwig reads
+    float32, so dtype=np.float32 skips a full-size cast copy -- what
+    features._extract_features_cluster asks for, since its _abs_cumsum
+    widens each value to float64 itself.
 
     The read itself is clamped to the chromosome and the overhang
     zero-padded here, rather than reading past the end and NaN-cleaning:
@@ -98,19 +101,19 @@ def fetch_raw(bw, chrom, start, end):
     features._check_finite)."""
     length = end - start
     if length <= 0:
-        return np.zeros(0, dtype=np.float64)
+        return np.zeros(0, dtype=dtype)
     if chrom not in bw.chrom_sizes:
-        return np.zeros(length, dtype=np.float64)
+        return np.zeros(length, dtype=dtype)
     read_start = max(0, start)
     read_end = min(end, bw.chrom_sizes[chrom])
     if read_end <= read_start:
-        return np.zeros(length, dtype=np.float64)
+        return np.zeros(length, dtype=dtype)
     raw = bw.read([chrom], [read_start], width=read_end - read_start,
                   missing=0.0, n_jobs=_N_JOBS)
-    vals = raw[0].astype(np.float64)
+    vals = raw[0].astype(dtype, copy=False)
     if read_start == start and read_end == end:
         return vals
-    result = np.zeros(length, dtype=np.float64)
+    result = np.zeros(length, dtype=dtype)
     result[read_start - start:read_end - start] = vals
     return result
 

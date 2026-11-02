@@ -262,3 +262,15 @@ def test_extract_features_raises_on_infinite_value(bad_value, array_reader):
         features.extract_features_batch(bw_plus, bw_minus, "chr1", [2000], [10], [2])
     with pytest.raises(ValueError, match="infinite value in chr1"):
         features.extract_features(bw_plus, bw_minus, "chr1", 2000, [10], [2])
+
+
+def test_abs_cumsum_bit_identical_to_numpy():
+    rng = np.random.default_rng(0)
+    raw = (rng.poisson(0.3, 200_000) * rng.choice([-1, 1], 200_000)).astype(np.float32)
+    raw[::7] *= np.float32(0.37)  # non-integer values too, so rounding order matters
+
+    expected = np.concatenate([[0.0], np.cumsum(np.abs(raw.astype(np.float64)))])
+
+    np.testing.assert_array_equal(features._abs_cumsum(raw), expected)
+    np.testing.assert_array_equal(features._abs_cumsum(raw.astype(np.float64)), expected)
+    np.testing.assert_array_equal(features._abs_cumsum(raw[:0]), [0.0])

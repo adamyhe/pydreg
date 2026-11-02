@@ -4612,3 +4612,42 @@ positions every 997 bp within `max_dist` of both ends of every chromosome.
 Tests: 106 -> 112 (`fetch_raw` past-end, both-ends, and entirely-past-end
 zero-padding; infinite input raising in `windowed_sum`, `extract_features`
 and `extract_features_batch`, for +inf and -inf).
+
+## 2026-11-01 (cont.) — one-pass `_abs_cumsum` kernel replaces four full-size copies per cluster strand
+
+After the `fetch_raw` clamp above, each cluster strand's prefix-sum buffer
+was still built as `np.concatenate([[0.0], np.cumsum(np.abs(raw))])` on a
+float64 copy of figwig's float32 read: four full-size passes (cast, abs,
+cumsum, concat), each allocating. Measured on G1 chr1's plus strand with
+the real 4,096-position chunking (419 clusters, 306 Mb), that chain took
+1.04 s, versus 1.97 s for the (already parallel) binning kernel that
+consumes it — and unlike binning, none of it used `--cores`.
+
+`features._abs_cumsum` (numba, `nogil=True`) builds the same buffer in one
+pass straight from float32 (`fetch_raw` gained a `dtype` argument; the
+batched path asks for float32, everything else keeps float64). It
+accumulates in the same sequential left-to-right order `np.cumsum` does,
+so it's bit-identical, not just close: 0.31 s for the same plus-strand
+chr1 reads. `nogil=True` also lets the minus strand's cumsum run on the
+existing background thread alongside the plus strand's, where before only
+the two reads overlapped.
+
+**Benchmark** (G1 chr1, single-threaded, best of 3, alternating runs
+against the `fetch_raw`-clamp branch, Apple Silicon):
+
+| | before | after |
+|---|---|---|
+| chunked extraction, 1,628,945 positions | 8.01 / 7.84 s | 6.05 / 5.79 s |
+
+~25% faster extraction, above the ~18% the isolated kernel timing
+predicted, the difference being the newly overlapped minus-strand cumsum.
+Combined with the `fetch_raw` clamp, chr1 extraction went from ~8.6 s to
+~5.9 s (~31%). Same caveat as above on end-to-end effect: largest for the
+CPU backends and the extraction-bound gap-fill stage, mostly hidden behind
+GPU scoring in the main scan.
+
+**Output unchanged**: features bit-identical to the pre-clamp baseline on
+the same 1,633,817 G1 positions (chr1's informative positions plus every
+chromosome's ends). New test pins `_abs_cumsum` bit-identical to the numpy
+expression on float32 and float64 input with signed, non-integer values.
+Tests: 112 -> 113.

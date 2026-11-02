@@ -210,6 +210,27 @@ def _binned_sums_batch(csum, offsets, window_sizes, half_n_windows):
 _MAX_SHARED_FETCH_WIDTH = 5_000_000
 
 
+@numba.njit(cache=True, nogil=True)
+def _abs_cumsum(raw):
+    """[0, cumsum(abs(raw))...] as float64, in one pass: the prefix-sum
+    buffer _binned_sums_batch reads bin sums out of. abs() per base pair
+    matches the C reference's bigwig_readi(..., abs=1, ...) read (see
+    extract_features). Replaces np.concatenate([[0.0],
+    np.cumsum(np.abs(raw.astype(np.float64)))]), which made four full-size
+    copies; the accumulation order is the same sequential left-to-right
+    sum np.cumsum does, so the result is bit-identical (see
+    docs/PERF_LOG.md). nogil=True lets the minus strand's call run on
+    _extract_features_cluster's background thread alongside the plus
+    strand's."""
+    out = np.empty(raw.shape[0] + 1, dtype=np.float64)
+    out[0] = 0.0
+    acc = 0.0
+    for i in range(raw.shape[0]):
+        acc += abs(np.float64(raw[i]))
+        out[i + 1] = acc
+    return out
+
+
 def _extract_features_cluster(
     bw_plus, bw_minus, chrom, cluster_centers, max_dist, window_sizes, half_n_windows
 ):
@@ -219,12 +240,13 @@ def _extract_features_cluster(
 
     from concurrent.futures import ThreadPoolExecutor
 
+    def strand_csum(bw):
+        return _abs_cumsum(io.fetch_raw(bw, chrom, lo, hi, dtype=np.float32))
+
     with ThreadPoolExecutor(max_workers=1) as pool:
-        rev_future = pool.submit(io.fetch_raw, bw_minus, chrom, lo, hi)
-        raw_fwd = np.abs(io.fetch_raw(bw_plus, chrom, lo, hi))
-        raw_rev = np.abs(rev_future.result())
-    csum_fwd = np.concatenate([[0.0], np.cumsum(raw_fwd)])
-    csum_rev = np.concatenate([[0.0], np.cumsum(raw_rev)])
+        rev_future = pool.submit(strand_csum, bw_minus)
+        csum_fwd = strand_csum(bw_plus)
+        csum_rev = rev_future.result()
     _check_finite(csum_fwd[-1], chrom, lo, hi)
     _check_finite(csum_rev[-1], chrom, lo, hi)
 
