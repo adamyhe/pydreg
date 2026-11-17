@@ -108,6 +108,7 @@ dev = [
 Homepage = "https://github.com/adamyhe/pydreg"
 Repository = "https://github.com/adamyhe/pydreg"
 Issues = "https://github.com/adamyhe/pydreg/issues"
+Changelog = "https://github.com/adamyhe/pydreg/blob/main/CHANGELOG.md"
 Paper = "https://doi.org/10.64898/2026.09.06.745329"
 
 [tool.hatch.build]
