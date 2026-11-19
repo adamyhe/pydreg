@@ -1,9 +1,9 @@
 import logging
-import re
 import sys
 import types
 
 import numpy as np
+import pytest
 
 from pydreg import backend
 from pydreg.models import DREGModel
@@ -122,26 +122,24 @@ def _tiny_svr_model():
     return model
 
 
-class _FakeElementwiseKernel:
-    # Real cupy.ElementwiseKernel compiles `operation` (CUDA C) into a
-    # single broadcasting kernel; this stand-in instead `eval`s it as a
-    # Python expression against NumPy arrays standing in for CuPy ones.
-    # The kernel body is CUDA C, not Python -- expf(...) and float literals
-    # with an "f" suffix (e.g. "0.05f") are valid CUDA C but not valid
-    # Python syntax, so both get normalized away before eval. This
-    # exercises the actual formula/broadcasting/dtype these tests care
-    # about, not cupy's own kernel compilation (which needs a real GPU to
-    # mean anything).
-    def __init__(self, in_params, out_params, operation, name):
-        self._in_names = [p.strip().split()[-1] for p in in_params.split(",")]
-        rhs = operation.split("=", 1)[1].strip()
-        rhs = rhs.replace("expf(", "exp(")
-        rhs = re.sub(r"(?<=[0-9.])f\b", "", rhs)
-        self._rhs = rhs
+class _FakeRawKernel:
+    # Stand-in for cupy.RawKernel compiling backend._RBF_GEMV_SRC: applies
+    # the same semantics in NumPy (y[row] += sum_j coefs_j *
+    # exp(-gamma * (sq_x[row] + sq_sv_j - 2*cross[row, j]))), taking the
+    # arguments in the exact order the CUDA signature declares. That makes
+    # these CPU tests check _build_cupy_predict_fn's wiring (argument order,
+    # chunking, shapes, dtypes of the scalar args); the CUDA C itself is
+    # checked against the float64 reference by
+    # test_cupy_fused_kernel_matches_reference_on_real_gpu, which needs a GPU.
+    def __init__(self, source, name):
+        assert name in source
 
-    def __call__(self, *args):
-        ns = {"exp": np.exp, **dict(zip(self._in_names, args))}
-        return eval(self._rhs, ns)  # noqa: S307 -- fixed test-only expression
+    def __call__(self, grid, block, args):
+        cross, sq_x, sq_sv, coefs, gamma, n_cols, y = args
+        assert isinstance(gamma, np.float32) and isinstance(n_cols, np.int32)
+        assert grid == (cross.shape[0],) and cross.shape[1] == n_cols
+        K = np.exp(-gamma * (sq_x[:, None] + sq_sv[None, :] - 2 * cross))
+        y += K @ coefs
 
 
 def _fake_cupy_module():
@@ -151,11 +149,12 @@ def _fake_cupy_module():
     # a deliberate drop-in match for NumPy's.
     return types.SimpleNamespace(
         asarray=np.asarray,
+        ascontiguousarray=np.ascontiguousarray,
         zeros=np.zeros,
         sum=np.sum,
         exp=np.exp,
         asnumpy=np.asarray,
-        ElementwiseKernel=_FakeElementwiseKernel,
+        RawKernel=_FakeRawKernel,
         float32=np.float32,
         float64=np.float64,
     )
@@ -190,6 +189,42 @@ def test_build_cupy_predict_fn_chunks_over_support_vectors(monkeypatch):
     y_scaled = predict(X_scaled)
     reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
     np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
+
+
+def _real_cuda_available():
+    try:
+        import cupy
+
+        return cupy.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _real_cuda_available(), reason="needs a real CUDA GPU")
+def test_cupy_fused_kernel_matches_reference_on_real_gpu():
+    # The real compiled RawKernel, not the NumPy stand-in: n_sv not a
+    # multiple of sv_chunk (ragged last chunk) and a query count that isn't
+    # a multiple of the block size, against DREGModel.predict's float64
+    # formula.
+    model = object.__new__(DREGModel)
+    rng = np.random.default_rng(4)
+    model.n_features = 40
+    model.n_sv = 1_003
+    model.SV = rng.normal(size=(model.n_sv, model.n_features))
+    model.coefs = rng.normal(size=model.n_sv)
+    model.x_center = np.zeros(model.n_features)
+    model.x_scale = np.ones(model.n_features)
+    model.gamma = 0.01
+    model.rho = 0.1
+    model.y_scale = 1.0
+    model.y_center = 0.0
+    model._sq_sv = np.sum(model.SV**2, axis=1)
+    model._scorer_cache = {}
+
+    predict = backend._build_cupy_predict_fn(model, sv_chunk=256)
+    X = rng.normal(size=(301, model.n_features))
+    np.testing.assert_allclose(predict(X), model.predict(X), rtol=1e-4, atol=1e-4)
+    assert predict(X[:0]).shape == (0,)
 
 
 def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
