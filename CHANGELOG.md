@@ -20,6 +20,12 @@ approaches that were tried and rejected, are in
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for
   reproducible peak calling.
+- GPU (`cupy`) scoring is about 1.2x faster: the RBF step and the
+  multiplication by the SVR coefficients now run as one fused kernel, so the
+  full kernel matrix is never written to GPU memory. Scores move by at most
+  ~1e-3 (float32 noise) and are closer to the float64 reference than before;
+  peak agreement with real dREG on Jurkat_ChROseq_1 went from 0.999552 to
+  0.999764 Jaccard.
 
 ## [0.3.4] - 2026-11-01
 
