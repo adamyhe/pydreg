@@ -4746,11 +4746,6 @@ A100's real speedup lever, but the expanded-form distance
 `sq_x + sq_sv - 2*cross` cancels catastrophically at TF32's 10-bit
 mantissa. That's a fidelity question, not a scheduling one.
 
-Unexplained, logged so it's not lost: one benchmark run hit
-`cudaErrorIllegalAddress` inside `cp.asnumpy` at the end of `predict()`
-(full SV set, first overlapped pass). It did not recur in three
-identical reruns. It could be WSL2-driver flakiness; watch for it.
-
 ## 2026-11-18 (cont.) — cupy tier: RBF + GEMV fused into one RawKernel, `K` never materialized (~1.2x scoring, closer to the float64 reference)
 
 Follows the per-chunk breakdown in the entry above (sgemm 102 ms, RBF
@@ -4811,13 +4806,3 @@ argument order and semantics, asserting the scalar dtypes. A new
 `test_cupy_fused_kernel_matches_reference_on_real_gpu` (skipped without
 CUDA) runs the real compiled kernel against `DREGModel.predict`, with a
 ragged last sv-chunk and an empty query batch. Tests: 113 -> 114.
-
-**Correction to the entry above:** the `cudaErrorIllegalAddress` is not
-a one-off. It hit again on the *unmodified* baseline (ElementwiseKernel +
-GEMV) about 50 s into informative-position scoring of a full pipeline run.
-The immediate rerun succeeded. So it is an intermittent fault in the old
-path, or in the cupy 14.1.1 / cuBLAS / WSL2-driver stack under it, and
-predates the fused kernel. The fused path completed both its full run and
-every benchmark run, but one clean full run doesn't prove it's immune.
-Root-causing needs `compute-sanitizer` or `CUDA_LAUNCH_BLOCKING=1` on a
-reproduction.

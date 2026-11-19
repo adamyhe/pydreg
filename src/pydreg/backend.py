@@ -409,7 +409,9 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
             return cp.asnumpy(y_scaled)
         for start in range(0, n_sv, sv_chunk):
             end = min(start + sv_chunk, n_sv)
-            cross = X @ SV[start:end].T
+            # The kernel indexes cross as dense row-major; ascontiguousarray
+            # is a no-op for cuBLAS's C-ordered output but guards the layout.
+            cross = cp.ascontiguousarray(X @ SV[start:end].T)
             _rbf_gemv(
                 (n,),
                 (_RBF_GEMV_THREADS,),

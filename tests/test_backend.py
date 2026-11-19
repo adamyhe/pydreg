@@ -149,6 +149,7 @@ def _fake_cupy_module():
     # a deliberate drop-in match for NumPy's.
     return types.SimpleNamespace(
         asarray=np.asarray,
+        ascontiguousarray=np.ascontiguousarray,
         zeros=np.zeros,
         sum=np.sum,
         exp=np.exp,
