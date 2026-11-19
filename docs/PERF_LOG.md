@@ -4806,3 +4806,45 @@ argument order and semantics, asserting the scalar dtypes. A new
 `test_cupy_fused_kernel_matches_reference_on_real_gpu` (skipped without
 CUDA) runs the real compiled kernel against `DREGModel.predict`, with a
 ragged last sv-chunk and an empty query batch. Tests: 113 -> 114.
+
+## 2026-11-19 — fused RBF+GEMV RawKernel re-measured on Pascal (TITAN Xp, CC 6.1): 1.28x, same accuracy gain (diagnostic only, no code change)
+
+Checks the previous entry's kernel on pre-Volta hardware, the compute
+capability range where cuML silently returned wrong scores (see
+`docs/OPTIMIZATION.md`). Measured on an NVIDIA TITAN Xp (12 GB, CC 6.1,
+~548 GB/s peak bandwidth), cupy 14.1.1, CUDA runtime 12.9, branch
+`cupy-fused-rbf-gemv` (aba2356). The "old" path is `main`'s (3f31302)
+`_build_cupy_predict_fn` (ElementwiseKernel writing `K`, then cuBLAS GEMV),
+built in the same process. Default `query_chunk=4096`/`sv_chunk=16,384`.
+Inputs were synthetic: the `scripts/bench_backends.py` generator, seed 0.
+Timing depends only on shapes, so no real positions were needed. The
+script was scratch-only (not committed).
+
+**Wall clock per 4096-query chunk (median of 5, synchronized):** 272.4 ->
+212.3 ms (1.28x), 15,037 -> 19,295 pos/s.
+
+**Device-time breakdown per chunk (CUDA events, summed over 36.9
+sv-chunks):**
+
+| step | ms |
+|---|---|
+| sgemm `X @ SV.T` (unchanged; 9.7 TFLOP/s) | 184.3 |
+| old: RBF ElementwiseKernel | 71.0 |
+| old: GEMV | 28.2 |
+| new: fused RBF+GEMV RawKernel | 27.3 |
+
+The fused kernel reads all of `cross` (9.92 GB per chunk) at ~364 GB/s,
+about 2/3 of the card's peak, so it is near its roofline here as well.
+The sgemm is now ~87% of device time. The speedup is larger than the 3080's
+1.20x because the old RBF step cost relatively more on Pascal (71 ms
+against the 3080's 29 ms, beside a 184 ms rather than 102 ms sgemm).
+
+**Accuracy vs the float64 NumPy reference (4,096 positions):** max |error|
+old 3.20e-4 (mean 6.2e-5), fused 2.87e-5 (mean 6.8e-6), both well inside
+`CUPY_SMOKE_TEST_ATOL` (1e-3). This is the same ~10x improvement the 3080
+showed. `tests/test_backend.py` passed in full on this card (29 passed,
+none skipped), including `test_cupy_fused_kernel_matches_reference_on_real_gpu`.
+So the RawKernel compiles and is correct on CC 6.1.
+
+Not measured: the full pipeline on this host, and the second card in the
+machine (TITAN X Pascal, the same GP102 chip).
