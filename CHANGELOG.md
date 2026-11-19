@@ -26,6 +26,10 @@ approaches that were tried and rejected, are in
   ~1e-3 (float32 noise) and are closer to the float64 reference than before;
   peak agreement with real dREG on Jurkat_ChROseq_1 went from 0.999552 to
   0.999764 Jaccard.
+- Apple Silicon GPU (`mlx`) scoring is about 1.3x faster, using the same fused
+  kernel approach as `cupy` (a Metal kernel via `mx.fast.metal_kernel`
+  replaces the `mx.compile`d RBF step and second matmul). Scores are closer
+  to the float64 reference than before.
 
 ## [0.3.4] - 2026-11-01
 

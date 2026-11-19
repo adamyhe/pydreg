@@ -4806,3 +4806,57 @@ argument order and semantics, asserting the scalar dtypes. A new
 `test_cupy_fused_kernel_matches_reference_on_real_gpu` (skipped without
 CUDA) runs the real compiled kernel against `DREGModel.predict`, with a
 ragged last sv-chunk and an empty query batch. Tests: 113 -> 114.
+
+## 2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a `mx.fast.metal_kernel` (~1.3x scoring)
+
+The cupy entry above guessed the mlx tier still materialized `K`. It did:
+`_build_mlx_predict_fn` wrapped `cross = X @ SV.T`, the RBF glue and
+`K @ coefs` in one `mx.compile`d function, but `mx.compile` fuses
+elementwise ops only, not into a matmul, so `K` was written and then read
+back by a second GEMM. `_RBF_GEMV_METAL_SRC` is the Metal port of
+`_RBF_GEMV_SRC`, run via `mx.fast.metal_kernel`: MLX's own matmul still
+writes `cross`, then one threadgroup (256 threads) per query row strides
+over the support vectors accumulating `coef_j * exp(-gamma*(sq_x + sq_sv_j
+- 2*cross_ij))`, reduced with `simd_sum` within each SIMD group and then
+across groups. Metal has no double, so that in-row reduction is float32
+(the CUDA kernel's is double); cross-chunk accumulation stays float64 on
+the host, as before. `gamma` is a float32 `(1,)` input array, the explicit
+typing role `np.float32` plays for the RawKernel.
+
+**Isolated, real SVR, 4,096 synthetic queries (x_center + x_scale * N(0,1),
+clipped at 0), Apple M4 (10-core GPU, 16 GB), mlx 0.32.0, median of 5:**
+
+| sv_chunk | `X @ SV.T` GEMMs only | fused | previous (`mx.compile`) |
+|---|---|---|---|
+| 8,192 | 822.8 ms | 937.2 ms | 1640.0 ms |
+| 16,384 (default) | 813.3 ms | 908.0 ms | 1156.9-1306.9 ms |
+| 32,768 | 819.5 ms | 913.5 ms | 1433.2 ms |
+| 65,536 | 842.4 ms | 943.8 ms | 1498.0 ms |
+
+(The "previous" column is noisier than the other two across runs; the
+dedicated head-to-head at 16,384 was 1203.9 ms median / 1156.9 ms min
+against 913.5 / 909.1 fused, 1.32x.) The fused kernel sits ~95 ms (~12%)
+above the GEMM-only floor, the same shape as the cupy result, and 16,384
+stays the best default. The GEMMs themselves run at ~2.2 TFLOP/s, about
+half the M4 GPU's fp32 peak; fusing the GEMM in too (simdgroup_matrix
+tiles) would at most save the remaining ~95 ms and would need to match
+MLX's own GEMM, so it was not attempted. Evaluating 8 sv-chunks per host
+sync instead of 1 made no difference (912.8 vs 913.5 ms), so the
+per-chunk host round trip was kept.
+
+Accuracy, max |error| vs a float64 NumPy dual sum on 512 of those rows,
+in y_scaled space: previous 1.20e-3, fused 7.33e-4. Through
+`build_scorer(model, "mlx")` (unscaled output space, 1,024 rows vs
+`DREGModel.predict`): 1.26e-4, well inside `MLX_SMOKE_TEST_ATOL = 1e-3`.
+Packaged scorer, same 4,096 rows: 933.5 ms/call median.
+
+Not yet run: a full-pipeline before/after on a real library (wall clock,
+peak count, Jaccard vs dREG), as the cupy entry has.
+
+Tests: the fake `mlx.core` drops `compile`/`exp` and gains
+`fast.metal_kernel` (`_FakeMetalKernel`, NumPy semantics in `input_names`
+order, asserting gamma's dtype/shape and the grid/threadgroup). New
+`test_mlx_fused_kernel_matches_reference_on_real_gpu` (skipped without
+Metal) runs the compiled kernel against `DREGModel.predict` with a ragged
+last sv-chunk shorter than the threadgroup and an empty batch; it passes
+on the M4. Tests: 114 -> 115.

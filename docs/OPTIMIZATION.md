@@ -247,19 +247,25 @@ chunk's small `(query_chunk,)` result is pulled back to a host NumPy
 float64 array and accumulated there — cheap, since it's one short vector
 per iteration, not the full kernel matrix.
 
-The elementwise glue is wrapped in `mx.compile`, MLX's graph-fusion
-mechanism, which — unlike cupy's `cp.fuse()` — handled this function's
-actual call pattern (including the ragged last chunk, since
-`n_sv=605,187` isn't divisible by `sv_chunk`) correctly on the first try,
-so no fallback to a hand-written Metal kernel was needed.
+Since 2026-11-18 this tier uses the same fused design as cupy: MLX's
+matmul computes `X @ SV.T`, and one `mx.fast.metal_kernel` reads that
+result once, applies the RBF formula, multiplies by the coefficients and
+reduces each row, so the kernel matrix `K` is never written to GPU memory.
+It replaced an `mx.compile`d function, which fused the elementwise glue but
+not the final `K @ coefs` matmul, so `K` was still materialized. On a real
+M4 that took a 4096-query call from ~1.16-1.20s to ~0.91s (~1.3x), against
+~0.81s for the `X @ SV.T` GEMMs alone, and moved scores closer to the
+float64 reference. `sv_chunk=16,384` is still the fastest setting. See
+`docs/PERF_LOG.md`'s 2026-11-18 mlx entry.
 
-Confirmed against the real pretrained model: max-abs-diff ~1.1e-4 to
+Before that change, confirmed against the real pretrained model: max-abs-diff ~1.1e-4 to
 ~3.4e-4 against the float64 NumPy reference (comfortably inside
 `MLX_SMOKE_TEST_ATOL = 1e-3`, the same float32 cancellation limitation as
 cupy). Speed: **~6.1x** faster than the NumPy tier at a 4096-query batch on
 an Apple M4 (1.16s vs 7.06s per call, warm/post-compile, re-measured after
 the NumPy tier's own numba-fusion speedup). See `docs/PERF_LOG.md`'s
-2026-08-10 entry.
+2026-08-10 entry. With the fused kernel the same comparison is roughly
+7.7x (0.91s vs 7.06s).
 
 ## Batching
 
@@ -270,7 +276,7 @@ stays memory-manageable (this tier is memory-bandwidth-bound, not
 compute-bound); scikit-learn's chunk size is mainly for
 streaming/checkpointing, since libsvm isn't memory-bound the same way;
 cupy and mlx both materialize the same `(query_chunk, sv_chunk)`
-intermediate directly (unlike the old cuml tier, which tiled it internally
+`X @ SV.T` intermediate directly (unlike the old cuml tier, which tiled it internally
 in C++) and so reuse NumPy's default.
 
 ## Overlapping feature extraction with scoring

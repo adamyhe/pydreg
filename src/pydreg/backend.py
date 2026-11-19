@@ -431,6 +431,42 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     return predict
 
 
+# Metal counterpart to _RBF_GEMV_SRC, the body of an mx.fast.metal_kernel
+# (MLX generates the signature from input_names/output_names, so argument
+# types come from the arrays passed in -- gamma is a float32 (1,) array, the
+# same explicitly-typed-scalar role np.float32 plays for the RawKernel). One
+# threadgroup per query row of `cross`: each thread strides over the row's
+# support vectors accumulating coef_j * exp(-gamma * (sq_x + sq_sv_j -
+# 2*cross_ij)), then simd_sum reduces within each 32-wide SIMD group and
+# the first group reduces the per-group partials. Metal has no double, so
+# unlike the CUDA kernel the in-row reduction is float32; cross-chunk
+# accumulation is still float64, on the host (see _build_mlx_predict_fn).
+_RBF_GEMV_METAL_THREADS = 256
+_RBF_GEMV_METAL_SRC = """
+    uint row = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x;
+    uint n_cols = cross_shape[1];
+    const device float* crow = cross + (size_t)row * n_cols;
+    float sx = sq_x[row];
+    float g = gamma[0];
+    float acc = 0.0f;
+    for (uint j = tid; j < n_cols; j += %(threads)d) {
+        acc += coefs[j] * metal::exp(-g * (sx + sq_sv[j] - 2.0f * crow[j]));
+    }
+    acc = simd_sum(acc);
+    threadgroup float partial[%(groups)d];
+    uint lane = thread_index_in_simdgroup;
+    uint sg = simdgroup_index_in_threadgroup;
+    if (lane == 0) partial[sg] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        float v = lane < %(groups)d ? partial[lane] : 0.0f;
+        v = simd_sum(v);
+        if (lane == 0) out[row] = v;
+    }
+""" % {"threads": _RBF_GEMV_METAL_THREADS, "groups": _RBF_GEMV_METAL_THREADS // 32}
+
+
 def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
     """Apple Silicon counterpart to _build_cupy_predict_fn -- same near-
     verbatim port of DREGModel.predict's chunked RBF dual-sum formula (same
@@ -441,86 +477,78 @@ def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
     third-party SVM library applies here too -- see that function's and
     this module's docstrings.
 
-    The two matmuls (X @ SV.T and K @ coefs) are plain MLX ops, dispatched
-    to Metal Performance Shaders GEMMs. The elementwise glue between them
-    (sq_x + sq_sv - 2*cross, then exp(-gamma*...)) is wrapped in
-    `mx.compile`, MLX's own supported graph-fusion mechanism -- the direct
-    counterpart to the cupy tier's cupy.ElementwiseKernel, and chosen for
-    the same reason that tier didn't stick with cp.fuse(): both are "the
-    library's own mature, documented fusion path" rather than a hand-written
-    kernel, and mx.compile is exactly that (unlike cp.fuse, mx.compile
-    handles this function's actual call pattern correctly out of the box --
-    confirmed on real Apple M4 hardware with n_sv=605,187 and the default
-    sv_chunk below, where the last chunk is a smaller, different shape than
-    the rest, the same shape-mismatch case that broke cp.fuse()). gamma is
-    closed over as a plain Python float rather than passed as a traced
-    mx.compile argument, for the same reason cupy's ElementwiseKernel bakes
-    it in as a literal rather than a runtime argument -- avoiding any
-    dtype-promotion ambiguity between a Python scalar and the float32
-    arrays it's multiplied against (confirmed on real hardware: if this
-    silently promoted to float64 anywhere, the whole expression would raise
-    outright, since Metal has no float64 support at all -- see
-    MLX_SMOKE_TEST_ATOL's comment -- so getting a clean float32 result here
-    is itself evidence the promotion behaved as intended, not just an
-    assumption).
+    Per sv-chunk, X @ SV.T is a plain MLX matmul (an MLX Metal GEMM) writing
+    `cross`, and a single fused mx.fast.metal_kernel (_RBF_GEMV_METAL_SRC)
+    then reads `cross` once, applies the RBF formula, multiplies by coefs
+    and reduces over support vectors -- the same design as the cupy tier's
+    RawKernel. The (query_chunk, sv_chunk) kernel matrix K is never written
+    to GPU memory.
 
-    Unlike cupy, float32 for the GEMMs/kernel isn't a deliberate speed/
+    History: this tier used to wrap the elementwise glue (sq_x + sq_sv -
+    2*cross, then exp(-gamma*...)) and the final K @ coefs matmul in one
+    `mx.compile`d function. mx.compile fuses elementwise ops, but not into a
+    matmul, so K was still materialized and read back by a second GEMM. On
+    a real M4 (real SVR, 4096-query chunk, sv_chunk 16,384), the fused
+    kernel took a call from ~1160-1200 ms to ~910 ms (~1.3x), against an
+    ~813 ms floor for the cross GEMMs alone, and max |error| vs the float64
+    reference dropped from 1.2e-3 to 7.3e-4 (y_scaled space, synthetic
+    inputs), because K is no longer rounded to float32 before a second
+    GEMM. See docs/PERF_LOG.md's 2026-11-18 mlx entry.
+
+    Unlike cupy, float32 for the GEMM/kernel isn't a deliberate speed/
     precision tradeoff here -- it's the only option MLX's GPU backend
     supports at all (float64 arrays raise outright on the Metal device, see
-    MLX_SMOKE_TEST_ATOL's comment). That also means, unlike cupy's
-    `y_scaled` (a float64 *device* array accumulated entirely on-GPU),
-    there is no float64 accumulator MLX can hold on-device here -- so this
-    function pulls each chunk's small (query_chunk,)-sized MLX result back
-    to a host NumPy float64 array and accumulates there instead. This is a
-    small, cheap transfer (one (query_chunk,) vector per iteration, not the
-    full (query_chunk, sv_chunk) kernel matrix), and gives the same
-    cross-chunk summation insurance cupy's float64 accumulator does, just
-    on the host instead of the device.
-
-    Confirmed on real Apple M4 hardware at a realistic problem size
-    (605,187 SVs x 360 features, 4096-query batches): agrees with the
-    NumPy float64 reference to ~1e-5 max-abs-diff on synthetic data of that
-    shape, comfortably inside MLX_SMOKE_TEST_ATOL, and ~22x faster
-    wall-clock than the NumPy tier at that same size once mx.compile has
-    warmed up (first call per distinct chunk shape pays a one-time Metal
-    shader compile cost).
+    MLX_SMOKE_TEST_ATOL's comment), and Metal Shading Language has no
+    double either, so the in-row reduction is float32 too. There is no
+    float64 accumulator MLX can hold on-device, so this function pulls each
+    chunk's small (query_chunk,)-sized result back to a host NumPy float64
+    array and accumulates there instead: one (query_chunk,) vector per
+    iteration, not the full kernel matrix, giving the same cross-chunk
+    summation insurance cupy's float64 accumulator does. (Batching several
+    chunks per host sync was measured and made no difference.)
 
     sv_chunk's default (16,384, lowered from an earlier, unvalidated
-    32,768 once a real `--mlx-sv-chunk` sweep confirmed it) sits in the
-    same flat/cheap throughput region as every value from 4,096 up through
-    32,768 (~1140-1165ms/call on a real M4, ordinary run-to-run noise) while
-    using ~19% less peak Metal memory than 32,768 did. Unlike the `cupy`
-    tier, growing `sv_chunk` much further genuinely costs throughput here
-    (up to ~2x slower by 524,288) rather than being a pure memory-vs-launch-
-    count tradeoff -- and an unchunked call (sv_chunk >= n_sv) can crash
-    outright: Metal enforces a hard per-buffer allocation ceiling
-    (`mx.device_info()["max_buffer_length"]`, ~9.53GB on this M4,
-    independent of total unified memory) that a `(query_chunk=4096,
+    32,768 once a real `--mlx-sv-chunk` sweep confirmed it) is still the
+    fastest value with the fused kernel (8,192: 937 ms, 16,384: 908 ms,
+    32,768: 914 ms, 65,536: 944 ms on a real M4). An unchunked call
+    (sv_chunk >= n_sv) can crash outright: Metal enforces a hard per-buffer
+    allocation ceiling (`mx.device_info()["max_buffer_length"]`, ~9.53GB on
+    this M4, independent of total unified memory) that a `(query_chunk=4096,
     sv_chunk=605_187)` float32 `cross` buffer (~9.92GB) exceeds. See
     docs/OPTIMIZATION.md and docs/PERF_LOG.md's 2026-08-22 entry for the
-    full sweep."""
+    original sweep."""
     import mlx.core as mx
 
     SV = mx.array(dreg_model.SV, dtype=mx.float32)
     coefs = mx.array(dreg_model.coefs, dtype=mx.float32)
     sq_sv = mx.sum(SV**2, axis=1)
-    gamma = dreg_model.gamma
+    gamma = mx.array([dreg_model.gamma], dtype=mx.float32)
     rho = dreg_model.rho
     n_sv = dreg_model.n_sv
 
-    @mx.compile
-    def _rbf_chunk(X, sq_x, sv_block, sq_sv_block, coefs_block):
-        cross = X @ sv_block.T
-        K = mx.exp(-gamma * (sq_x + sq_sv_block[None, :] - 2 * cross))
-        return K @ coefs_block
+    _rbf_gemv = mx.fast.metal_kernel(
+        name="pydreg_rbf_gemv",
+        input_names=["cross", "sq_x", "sq_sv", "coefs", "gamma"],
+        output_names=["out"],
+        source=_RBF_GEMV_METAL_SRC,
+    )
 
     def predict(X_scaled):
+        n = X_scaled.shape[0]
+        y_scaled = np.zeros(n, dtype=np.float64)
+        if n == 0:
+            return y_scaled
         X = mx.array(X_scaled, dtype=mx.float32)
-        sq_x = mx.sum(X**2, axis=1)[:, None]
-        y_scaled = np.zeros(X_scaled.shape[0], dtype=np.float64)
+        sq_x = mx.sum(X**2, axis=1)
         for start in range(0, n_sv, sv_chunk):
             end = min(start + sv_chunk, n_sv)
-            chunk = _rbf_chunk(X, sq_x, SV[start:end], sq_sv[start:end], coefs[start:end])
+            (chunk,) = _rbf_gemv(
+                inputs=[X @ SV[start:end].T, sq_x, sq_sv[start:end], coefs[start:end], gamma],
+                grid=(n * _RBF_GEMV_METAL_THREADS, 1, 1),
+                threadgroup=(_RBF_GEMV_METAL_THREADS, 1, 1),
+                output_shapes=[(n,)],
+                output_dtypes=[mx.float32],
+            )
             y_scaled += np.array(chunk, dtype=np.float64)
         y_scaled -= rho
         return y_scaled
