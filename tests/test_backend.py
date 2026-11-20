@@ -1,9 +1,12 @@
 import logging
+import os
 import re
+import subprocess
 import sys
 import types
 
 import numpy as np
+import pytest
 
 from pydreg import backend
 from pydreg.models import DREGModel
@@ -314,6 +317,9 @@ def _fake_mlx_module():
 
 
 def _install_fake_mlx(monkeypatch):
+    # _disable_mlx_tf32 setdefaults MLX_ENABLE_TF32 in os.environ; recording
+    # it here makes monkeypatch restore the real environment afterwards.
+    monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
     fake_core = _fake_mlx_module()
     monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_core))
     monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
@@ -452,6 +458,60 @@ def test_explicit_mlx_build_scorer_raises_when_not_installed(monkeypatch):
         assert "mlx is not installed" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
+
+
+def test_disable_mlx_tf32_defaults_env_to_off_and_respects_explicit_value(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    backend._disable_mlx_tf32()
+    assert os.environ["MLX_ENABLE_TF32"] == "0"
+
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    backend._disable_mlx_tf32()  # fake matmul is full precision, so no raise
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
+def _round_to_tf32(x):
+    """Rounds float32 values to TF32's 10-bit mantissa (truncation)."""
+    bits = np.asarray(x, dtype=np.float32).view(np.uint32) & np.uint32(0xFFFFE000)
+    return bits.view(np.float32)
+
+
+def test_disable_mlx_tf32_raises_when_matmuls_are_reduced_precision(monkeypatch):
+    fake_core = _install_fake_mlx(monkeypatch)
+    # Stands in for MLX having already locked TF32 on earlier in the process:
+    # arrays come back with TF32-rounded values, so the probe's matmul is off.
+    fake_core.array = lambda data, dtype=None: _round_to_tf32(np.asarray(data, dtype=np.float32))
+
+    with pytest.raises(backend.BackendUnavailable, match="MLX_ENABLE_TF32=0"):
+        backend._disable_mlx_tf32()
+    with pytest.raises(backend.BackendUnavailable, match="TF32"):
+        backend.build_scorer(_tiny_svr_model(), "mlx")
+
+
+@pytest.mark.skipif(
+    not (backend._mlx_installed() and backend._mlx_gpu_available()),
+    reason="needs mlx with a real Metal GPU",
+)
+def test_disable_mlx_tf32_gives_full_float32_gemm_on_real_gpu():
+    # Subprocess: MLX caches MLX_ENABLE_TF32 at the process's first matmul,
+    # so this has to start from a process where mlx hasn't run one yet.
+    code = (
+        "import numpy as np, mlx.core as mx\n"
+        "from pydreg import backend\n"
+        "backend._disable_mlx_tf32()\n"
+        "rng = np.random.default_rng(0)\n"
+        "a = rng.standard_normal((1024, 360)).astype(np.float32)\n"
+        "b = rng.standard_normal((2048, 360)).astype(np.float32)\n"
+        "ref = a.astype(np.float64) @ b.T.astype(np.float64)\n"
+        "got = np.array(mx.array(a) @ mx.array(b).T)\n"
+        "print(np.abs(got - ref).max())\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"}
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    # Full float32 is ~1e-4 here; TF32 is ~1e-1 (measured on an M5).
+    assert float(out.stdout.strip()) < 1e-3
 
 
 class TinyDREGModel:

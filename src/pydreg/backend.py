@@ -132,6 +132,48 @@ CUPY_SMOKE_TEST_ATOL = 1e-3
 MLX_SMOKE_TEST_ATOL = CUPY_SMOKE_TEST_ATOL
 
 
+def _disable_mlx_tf32():
+    """Keeps MLX's float32 GEMMs at full float32 precision, then checks that
+    this took effect. Called before the mlx tier's first matmul.
+
+    MLX runs float32 matmuls with TF32-class inputs (10-bit mantissa) by
+    default on GPUs that have the hardware for it -- the Apple M5's neural
+    accelerators ("NAX" kernels), not the M4. Measured on a real M5 (mlx
+    0.32.0): the `X @ SV.T` product's max error vs float64 was 2.1e-1 with
+    TF32 against 3.0e-4 for NumPy float32, and final scores on 16,384 real
+    Jurkat ChRO-seq positions were off by up to 2.6e-3 (10% above 1e-3),
+    which failed the smoke test on the first batch of every real run. Same
+    fidelity call as the cupy tier's (docs/PERF_LOG.md, 2026-11-18): the
+    expanded-form distance cancels too badly for TF32. With TF32 off the
+    GEMM is ~1.9x slower on the M5 but matches NumPy float32.
+
+    MLX reads MLX_ENABLE_TF32 once, at the first float32 matmul in the
+    process, and caches it (mlx/utils.h's enable_tf32()). So this sets it
+    with setdefault (an explicit user value wins) and then verifies with a
+    small matmul whose exact answer TF32 can't represent: if mlx already
+    ran a matmul earlier in this process with TF32 on, or the user forced
+    it on, raise BackendUnavailable with the fix rather than letting the
+    smoke test fail without an explanation. A (32, 360, 32) product is
+    large enough to take the TF32 path on an M5 (anything from (8, 360, 8)
+    up did; (1, 360, 8) did not)."""
+    import os
+
+    import mlx.core as mx
+
+    os.environ.setdefault("MLX_ENABLE_TF32", "0")
+    k = 360
+    a = np.full((32, k), 1 + 2.0**-12, dtype=np.float32)
+    b = np.ones((32, k), dtype=np.float32)
+    got = np.array(mx.array(a) @ mx.array(b).T, dtype=np.float64)
+    err = float(np.max(np.abs(got - k * (1 + 2.0**-12))))
+    if err > 1e-3:
+        raise BackendUnavailable(
+            f"mlx is running float32 matmuls at reduced (TF32) precision "
+            f"(probe error {err:.3g}); set MLX_ENABLE_TF32=0 in the environment "
+            "before starting Python. MLX reads it once, at the first matmul."
+        )
+
+
 @functools.lru_cache(maxsize=1)
 def detect_backend():
     """Probes once per process and returns "cupy", "mlx", or "numpy" -- the
@@ -458,9 +500,13 @@ def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
     independent of total unified memory) that a `(query_chunk=4096,
     sv_chunk=605_187)` float32 `cross` buffer (~9.92GB) exceeds. See
     docs/OPTIMIZATION.md and docs/PERF_LOG.md's 2026-08-22 entry for the
-    full sweep."""
+    full sweep.
+
+    TF32 is switched off first (_disable_mlx_tf32): MLX turns it on by
+    default on M5-class GPUs, and it breaks this formula's fidelity."""
     import mlx.core as mx
 
+    _disable_mlx_tf32()
     SV = mx.array(dreg_model.SV, dtype=mx.float32)
     coefs = mx.array(dreg_model.coefs, dtype=mx.float32)
     sq_sv = mx.sum(SV**2, axis=1)
