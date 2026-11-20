@@ -123,9 +123,9 @@ def _rbf_accumulate(cross, sq_x, sq_sv_block, gamma, coefs_block, y_scaled):
     """Fuses DREGModel.predict's per-chunk `sqdist = sq_x + sq_sv - 2*cross`
     / `exp(-gamma*sqdist)` / `K @ coefs_block` into one pass, parallelized
     over queries via numba.prange -- the CPU-tier counterpart to
-    backend.py's `_build_cupy_predict_fn` (whose fused RawKernel does the
-    same elementwise-plus-reduction in one pass) and `_build_mlx_predict_fn`
-    (whose mx.compile fuses the elementwise glue). Measured directly
+    backend.py's `_build_cupy_predict_fn` and `_build_mlx_predict_fn`, whose
+    fused RawKernel / mx.fast.metal_kernel do the same elementwise-plus-
+    reduction in one pass. Measured directly
     (not assumed) that this glue step, not either GEMM, was the actual
     bottleneck: on a real 605,187 SV x 360 feature model, it was ~70% of
     predict()'s wall time and ran at ~1.1x CPU/wall ratio on a 10-core
