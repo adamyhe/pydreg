@@ -252,6 +252,17 @@ an Apple M4 (1.16s vs 7.06s per call, warm/post-compile, re-measured after
 the NumPy tier's own numba-fusion speedup). See `docs/PERF_LOG.md`'s
 2026-08-10 entry.
 
+**TF32 is switched off.** MLX runs float32 matmuls at TF32 input precision
+by default on GPUs with the hardware for it (the Apple M5's neural
+accelerators; not the M4). On an M5 that made scores up to ~2.6e-3 off
+the float64 reference and failed the smoke test on every real run, so
+`_build_mlx_predict_fn` sets `MLX_ENABLE_TF32=0` before its first matmul
+and checks that it took effect. Error drops to ~3e-4, at ~1.5x the
+per-call time on the M5 (822 ms vs 552 ms; the NumPy tier is 5,059 ms).
+MLX reads the variable once per process, so a script that ran mlx matmuls
+before building the scorer must set `MLX_ENABLE_TF32=0` itself. See
+`docs/PERF_LOG.md`'s 2026-11-20 entry.
+
 ## Batching
 
 Each backend gets its own default query-chunk size

@@ -4651,3 +4651,64 @@ the same 1,633,817 G1 positions (chr1's informative positions plus every
 chromosome's ends). New test pins `_abs_cumsum` bit-identical to the numpy
 expression on float32 and float64 input with signed, non-integer values.
 Tests: 112 -> 113.
+
+## 2026-11-20 — mlx tier: MLX's default TF32 matmuls on the Apple M5 broke fidelity; switched off (~1.5x slower scoring on M5, fixes a crash)
+
+**Symptom.** On an Apple M5 (10-core, 16 GB, mlx 0.32.0), every real run
+with `--backend mlx` (or `auto`, which picks mlx on Apple Silicon) failed
+`_wrap_sklearn_like`'s first-batch smoke test about 4 s into scoring:
+max_abs_diff 1.60e-3 against `MLX_SMOKE_TEST_ATOL = 1e-3`, on merged
+Jurkat ChRO-seq. The pipeline has no fallback at that point, so the run
+crashed. Same on current `main` and on the fused-kernel branch (1.62e-3),
+so it predates that kernel.
+
+**Cause: TF32, not float32.** The `X @ SV.T` product alone (1,024 real
+queries x 16,384 SVs, |cross| up to 287) had max error 2.1e-1 vs float64
+on MLX, against 3.0e-4 for NumPy float32: about a 10-bit mantissa. MLX
+reads `MLX_ENABLE_TF32` (default on; `mlx/utils.h`'s `enable_tf32()`) and
+on the M5 dispatches float32 GEMMs to its neural-accelerator ("NAX")
+kernels at TF32 input precision. The M4 has no such kernels, which is why
+none of the earlier M4 measurements saw it. Synthetic 4096x16384x360
+GEMM on the M5:
+
+| `MLX_ENABLE_TF32` | max err vs f64 | time | |
+|---|---|---|---|
+| unset (default on) | 9.4e-2 | 8.4 ms | 5.8 TFLOP/s |
+| `0` | 1.1e-4 | 15.7 ms | 3.1 TFLOP/s |
+| (NumPy float32) | 9.7e-5 | | |
+
+Through the scorer, on 16,384 real Jurkat ChRO-seq positions (the first
+4,096, which the smoke test samples, plus 12,288 random), score error vs
+the float64 reference:
+
+| | max | p99 | mean | > 1e-3 |
+|---|---|---|---|---|
+| TF32 on | 2.59e-3 | 1.65e-3 | 4.75e-4 | 10.1% |
+| TF32 off | 2.94e-4 | 1.61e-4 | 4.71e-5 | 0% |
+
+This is the same fidelity question the 2026-11-18 entry declined for the
+cupy tier (`CUPY_TF32=1`): the expanded-form distance cancels too badly
+at a 10-bit mantissa. Loosening the tolerance would have hidden a 10x
+precision loss, so the fix is to turn TF32 off, not to raise the bar.
+
+**Fix.** `backend._disable_mlx_tf32()`, called at the top of
+`_build_mlx_predict_fn`, does `os.environ.setdefault("MLX_ENABLE_TF32",
+"0")` (an explicit user setting wins) and then verifies with a (32, 360,
+32) matmul of `1 + 2**-12` values, whose exact answer TF32 can't
+represent. MLX caches the variable at the process's first float32 matmul,
+so if mlx already ran one with TF32 on (or the user forced it), the
+probe raises `BackendUnavailable` naming `MLX_ENABLE_TF32=0` instead of
+letting the smoke test fail unexplained. Probe sizing measured on the M5:
+(1, 360, 8) did not take the TF32 path, (8, 360, 8) and up did.
+
+**Cost, per 4,096-row call on the M5 (real rows, warm, median of 5):**
+822.5 ms with TF32 off vs 551.7 ms with it on (1.49x slower). The NumPy
+tier on the same rows at 10 threads is 5,058.6 ms, so mlx stays 6.2x
+ahead and remains the right auto choice. `MLX_SMOKE_TEST_ATOL` is
+unchanged.
+
+Tests: the fake-mlx fixture now records `MLX_ENABLE_TF32` so the env is
+restored; new tests cover the env default and an explicit value, the
+probe raising (and `build_scorer` surfacing it) when the fake rounds to
+TF32, and, on a real Metal GPU, a fresh subprocess getting full-float32
+GEMM accuracy. Tests: 113 -> 116.
