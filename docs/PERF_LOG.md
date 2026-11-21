@@ -4857,8 +4857,8 @@ in y_scaled space: previous 1.20e-3, fused 7.33e-4. Through
 `DREGModel.predict`): 1.26e-4, well inside `MLX_SMOKE_TEST_ATOL = 1e-3`.
 Packaged scorer, same 4,096 rows: 933.5 ms/call median.
 
-Not yet run: a full-pipeline before/after on a real library (wall clock,
-peak count, Jaccard vs dREG), as the cupy entry has.
+Full-pipeline before/after on a real library: see the 2026-11-21 entry
+(run on an M5, after the TF32 fix below).
 
 Tests: the fake `mlx.core` drops `compile`/`exp` and gains
 `fast.metal_kernel` (`_FakeMetalKernel`, NumPy semantics in `input_names`
@@ -5138,6 +5138,54 @@ to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
 89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
 or TF32 GEMMs on the A100) would make extraction the bottleneck. At
 `-p 16` there is a ~5x margin.
+
+## 2026-11-21 — mlx fused kernel: full-pipeline before/after on merged Jurkat ChRO-seq (Apple M5, TF32 off): 1.26x scoring, 1.24x wall clock
+
+The full-pipeline check the 2026-11-18 mlx entry left open. Apple M5
+(10-core, 16 GB), mlx 0.32.0, merged Jurkat_ChROseq (8,153,557
+informative positions), `--backend mlx -p 10 --seed 1`. Both sides carry
+the 2026-11-20 TF32 fix (without it, neither passes the smoke test on
+this machine): "before" is `main` + the fix, "after" adds the fused
+kernel. Run under `caffeinate -ims`, after first, then a 5-minute
+cool-down, then before. An earlier attempt without `caffeinate` was
+discarded: the Mac idle-slept 4 minutes in and cycled through 231
+sleep/wake events, inflating every stage ~1.9x. Its outputs, which sleep
+can't change, are where the agreement numbers below come from; the
+timing rerun reproduced the same peak counts.
+
+| | before | after | |
+|---|---|---|---|
+| informative-position `scorer.predict` | 1816.65s | 1417.69s | 1.28x |
+| gap-filled `scorer.predict` | 31.76s | 26.09s | 1.22x |
+| densified `scorer.predict` | 889.02s | 726.63s | 1.22x |
+| total scoring | 2737.43s | 2170.41s | 1.26x |
+| peak calling | 155.30s | 151.86s | |
+| wall clock | 2940.88s | 2370.51s | 1.24x |
+| max RSS | 6.15 GB | 6.14 GB | |
+| significant peaks | 56,615 | 56,614 | |
+
+Informative scoring works out to 712 ms per 4,096-row chunk after vs
+912 ms before, against 655 / 822 ms measured per call in isolation; the
+difference is the pipeline's own overhead plus sustained-load clocks.
+
+**Agreement.** Peak Jaccard (bedtools, `peak.prob.bed.gz`): after vs
+before 0.999641; after vs real dREG 0.999654; before vs real dREG
+0.999515 (dREG called 56,599). On the 2,596,496 informative positions on
+chr1/17/19/X scored by both runs and by dREG, |after - before| has max
+4.76e-4 and mean 5.5e-5 (float32 noise), and both sit 2.53e-3 mean from
+dREG, which is dREG's own float32 GPU noise. 435 positions were scored
+by only one run (densification follows slightly different broad peaks).
+Within the noise floor per this log's ground rule, and agreement with
+dREG improved, as it did for cupy.
+
+**Peak-calling "regression" was run order.** The first, discarded
+session (TF32 on, before first) had the after run's peak calling 7.9%
+slower per CDF evaluation, with identical work (CDF evals within 0.1%)
+and no peak-calling code changed. Here, with the order reversed and a
+cool-down between runs, the second run (now before) was the slower one:
+155.8 vs 151.8 us per CDF evaluation (2.6%). The slowdown follows run
+order, not the branch: sustained load lowers clocks on this machine.
+Benchmarks here should alternate order and cool down between runs.
 
 ## 2026-11-22 — cupy `--tf32` on real L40S and A100: 2.99x per chunk on the A100 with the fused kernel, 0.9962 peak Jaccard vs dREG; the TF32 setting is now applied per call
 

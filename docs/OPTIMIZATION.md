@@ -258,8 +258,11 @@ It replaced an `mx.compile`d function, which fused the elementwise glue but
 not the final `K @ coefs` matmul, so `K` was still materialized. On a real
 M4 that took a 4096-query call from ~1.16-1.20s to ~0.91s (~1.3x), against
 ~0.81s for the `X @ SV.T` GEMMs alone, and moved scores closer to the
-float64 reference. `sv_chunk=16,384` is still the fastest setting. See
-`docs/PERF_LOG.md`'s 2026-11-18 mlx entry.
+float64 reference. `sv_chunk=16,384` is still the fastest setting. On a
+full merged Jurkat ChRO-seq run on an M5 (TF32 off), scoring went from
+2737s to 2170s (1.26x) and wall clock from 2941s to 2371s (1.24x), with
+peak agreement vs real dREG 0.999515 -> 0.999654 Jaccard. See
+`docs/PERF_LOG.md`'s 2026-11-18 mlx and 2026-11-21 entries.
 
 Before that change, confirmed against the real pretrained model: max-abs-diff ~1.1e-4 to
 ~3.4e-4 against the float64 NumPy reference (comfortably inside
