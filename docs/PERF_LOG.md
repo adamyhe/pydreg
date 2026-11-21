@@ -5187,6 +5187,27 @@ cool-down between runs, the second run (now before) was the slower one:
 order, not the branch: sustained load lowers clocks on this machine.
 Benchmarks here should alternate order and cool down between runs.
 
+## 2026-11-21 (cont.) — mlx chunk sizes re-swept on the M5 (fused kernel, TF32 off): defaults stay (no code change)
+
+The `sv_chunk`/`query_chunk` defaults were tuned on an M4 (2026-08-22,
+re-checked for the fused kernel 2026-11-18). Re-swept on the M5 with the
+fused kernel and TF32 off: the same 16,384 real Jurkat ChRO-seq rows
+scored at every combination, 3 interleaved rounds (each round visits
+every configuration, so thermal drift spreads evenly), median, under
+`caffeinate`. Time per 4,096 rows:
+
+| sv_chunk \ query_chunk | 2,048 | 4,096 | 8,192 |
+|---|---|---|---|
+| 8,192 | 726.1 ms | 694.3 ms | 704.2 ms |
+| 16,384 | 712.9 ms | **685.7 ms** (default) | 719.7 ms |
+| 32,768 | 694.9 ms | 685.6 ms | 700.5 ms |
+| 65,536 | 703.8 ms | 681.9 ms | 729.1 ms |
+
+Everything is within 6% and the best cell is 0.6% faster than the
+default, inside run-to-run noise. `query_chunk=4,096` is the best column
+at every `sv_chunk`; larger `sv_chunk` only raises memory. Defaults
+unchanged.
+
 ## 2026-11-22 — cupy `--tf32` on real L40S and A100: 2.99x per chunk on the A100 with the fused kernel, 0.9962 peak Jaccard vs dREG; the TF32 setting is now applied per call
 
 First CUDA measurements of the cupy side of `--tf32` (the 2026-11-20
