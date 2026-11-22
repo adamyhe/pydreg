@@ -4651,3 +4651,297 @@ the same 1,633,817 G1 positions (chr1's informative positions plus every
 chromosome's ends). New test pins `_abs_cumsum` bit-identical to the numpy
 expression on float32 and float64 input with signed, non-integer values.
 Tests: 112 -> 113.
+
+## 2026-11-18 — why the A100 didn't saturate: not reproducible on a fast host; the GPU side and the overlap loop are fine, the shortfall is host-side (diagnostic only, no code change)
+
+Follow-up to the open question in the 2026-08-20 (cont.) entry (A100
+utilization never saturated, even with sv-chunking disabled). Measured on
+a Ryzen 9800X3D (16 threads) + RTX 3080 10GB under WSL2, current `main`
+(3f31302), cupy 14.1.1, Jurkat_ChROseq_1 bigWigs on local disk, default
+`query_chunk=4096`/`sv_chunk=16,384`, `-p 16`. Scripts were scratch-only
+(not committed); everything below is `_score_positions` itself or direct
+calls into `features`/`backend`.
+
+**1. Not reproducible here: the 3080 is saturated.** 400k informative
+positions: extraction alone 23.5 ms/chunk; `scorer.predict` alone 143.5
+ms/chunk (CUDA-event device time 144.4 ms); the real overlapped
+`_score_positions` matched predict-only time to within 0.5%. NVML
+utilization averaged 96-98%. Same at `-p 1` (extraction 18.5 ms/chunk,
+94.7%). The one-chunk prefetch hides extraction completely at this ratio.
+
+**2. Where the device time goes (per 4096-query chunk):** sgemm 102 ms
+(17.5 TFLOP/s), fused RBF elementwise 29 ms, GEMV 14 ms; total 146 ms,
+matching the measured 144 ms. 70% is compute-bound GEMM, and 30% is the
+memory traffic of materializing `cross`/`K`, which a fused kernel that
+never writes `K` could remove. Relevant to the A100 question: the A100's
+FP32 (non-tensor-core) peak is 19.5 TFLOP/s, barely above what this
+3080's sgemm actually achieves, so **an A100 should not be much faster
+per chunk than this 3080** (it gains on the memory-bound 30% via ~2x
+bandwidth). A host that keeps a 3080 fed should keep an A100 fed too.
+
+**3. Headroom of the host side, by emulating faster GPUs.** Scored a
+contiguous 1.5M-position block (chr2-chr20) against every k-th support
+vector (`SV[::k]`), which shrinks GPU work k-fold while leaving
+extraction, scaling, H2D and the prefetch loop untouched:
+
+| GPU work | pos/s | mean util |
+|---|---|---|
+| 1x (real) | 26,271 | 97.8% |
+| 1/4 | 95,137 | 92.0% |
+| 1/16 | 307,987 | 69.1% |
+
+The loop holds over 90% until the GPU is about 4x faster than a 3080.
+Host-side cost inside `predict()` is small: 0.9 ms CPU x-scaling plus
+0.7 ms pageable H2D per chunk, and running extraction concurrently
+inflated predict time by only 2% (1x) and 12% (1/16). At 1/16 the cap
+is that per-chunk synchronous bubble plus extraction (~9 ms/chunk)
+approaching the device time (~9 ms/chunk). That is not a regime any real
+card here is in.
+
+**4. Red herring worth recording: the GIL.** A first pass showed
+extraction taking 18.7s during overlap against ~3s on its own, and adding
+`nogil=True` to `features._binned_sums_batch_numba` appeared to fix it
+(18.7s -> 3.9s, 1/4-emulation util 81% -> 92%). It didn't. Two repeat
+runs of the *unmodified* code gave identical numbers to the `nogil` run.
+The slow first pass was a cold OS page cache on the bigWigs (the later
+script happened to warm it with an extraction-only pass first). So
+GIL-holding in extraction is not a measurable bottleneck on current code.
+Cold-cache extraction on local NVMe was ~5x slower than warm, though,
+and that *is* the kind of host effect that could starve a GPU on
+networked storage.
+
+**5. The old extraction code isn't slow here either.** 0.3.0 (525dd5d,
+the code the 2026-08-20 A100 sweep ran; pybigtools, pre-figwig) on the
+same 500k positions on this host: ~200k pos/s, ~20 ms/chunk, still ~7x
+faster than the GPU consumes. On the A100 node, by contrast, the
+2026-07-15 log measured 141 ms/chunk extraction (older code still).
+That host's I/O/CPU was roughly an order of magnitude slower at
+extraction than this one.
+
+**Conclusion.** Neither the cupy kernel path nor `_score_positions`'s
+overlap explains the A100 result. On a host whose extraction keeps up,
+the GPU saturates with ~4x margin. The shortfall on the A100 node is
+almost certainly host-side: bigWig reads from networked/cold storage
+and/or slower cores (note `--cores` defaults to 1). This can't be
+confirmed from here because no current-code `-v` log from that node
+exists (the HF dataset only holds `/usr/bin/time` logs). The deciding
+measurement is one current-code `-v` run on the A100 node, reading
+`_score_positions`'s "X s extracting features, Y s in scorer.predict"
+line for the informative-position step:
+
+- **X >= Y (extraction-bound):** the fix is more extraction
+  parallelism: several prefetch workers, each with its own
+  `BigWigReader` pair, so reads overlap each other's I/O latency. This
+  was rejected in 0.2.7 for memory (pybigtools' per-reader caching, see
+  the 2026-08-14/15 entries), and needs re-measuring under figwig.
+  Copying the bigWigs to node-local scratch first is the zero-code
+  check.
+- **X << Y but util still low:** a GPU-side bubble this host can't show.
+  The fix is making `predict()` asynchronous: pinned host buffers, a
+  side stream for H2D, and two chunks in flight instead of a blocking
+  `cp.asnumpy` per chunk.
+
+Not pursued: TF32 tensor-core GEMMs (`CUPY_TF32=1`) would be the
+A100's real speedup lever, but the expanded-form distance
+`sq_x + sq_sv - 2*cross` cancels catastrophically at TF32's 10-bit
+mantissa. That's a fidelity question, not a scheduling one.
+
+**Update (2026-11-21):** the deciding measurement has now been taken on a
+real A100 node. Extraction is ~7x faster than predict and the GPU stays
+~95% busy, so neither branch above applies. See the 2026-11-21 entry.
+
+## 2026-11-18 (cont.) — cupy tier: RBF + GEMV fused into one RawKernel, `K` never materialized (~1.2x scoring, closer to the float64 reference)
+
+Follows the per-chunk breakdown in the entry above (sgemm 102 ms, RBF
+ElementwiseKernel 29 ms, GEMV 14 ms per 4096-query chunk on an RTX
+3080). The RBF and GEMV steps were pure memory traffic on the
+`(query_chunk, sv_chunk)` matrix `K`, written by one kernel and read back
+by the next. `_build_cupy_predict_fn` now keeps the cuBLAS sgemm for
+`cross = X @ SV.T` and replaces the other two with `_RBF_GEMV_SRC`, a
+`cupy.RawKernel`. It uses one thread block per query row: each thread
+strides over the row's support vectors, accumulating
+`coef_j * expf(-gamma*(sq_x + sq_sv_j - 2*cross_ij))` in float32, and the
+block reduces those sums in double and adds the result into the float64
+`y_scaled`. Per sv-chunk memory traffic halves: the sgemm writes `cross`
+once and the kernel reads it once. `gamma` is now an explicitly typed
+`np.float32` kernel argument rather than a baked-in literal. RawKernel
+does no implicit promotion, so this keeps the no-ambiguity property the
+ElementwiseKernel's literal was protecting (see the 2026-07-15 `cp.fuse`
+entry).
+
+**Isolated, 200k real Jurkat_ChROseq_1 positions:** 138.0 -> 114.6
+ms/chunk (1.20x). The remaining ~13 ms above the sgemm is about one read
+of `cross` at the 3080's bandwidth, so this design is at its roofline.
+Max |error| vs the float64 NumPy reference (4,096 sampled positions):
+current 2.6e-4, fused 3.5e-5. The fused kernel is *more* accurate,
+because `K` is no longer rounded to float32 before the dot product and
+the per-row reduction is in double.
+
+**Full pipeline, Jurkat_ChROseq_1, `-p 16 --seed 1`, before vs after:**
+
+| | before | after |
+|---|---|---|
+| informative-position `scorer.predict` | 192.14s | 160.84s |
+| densified-position `scorer.predict` | 129.78s | 109.99s |
+| total wall clock | 7:24.9 | 6:32.0 |
+| significant peaks | 48,168 | 48,171 |
+| peak Jaccard vs real dREG | 0.999552 | 0.999764 |
+
+Before-vs-after peak Jaccard was 0.999605. On the 1,455,951 positions
+(chr1/17/19/X) scored by both runs and by dREG, the per-position
+|after - before| has max 1.07e-3 and mean 5.2e-5, which is the old
+kernel's own float32 error. Both are 2.49e-3 mean from dREG (dREG's own
+float32 GPU noise dominates). 258 positions were scored by only one run,
+because densification follows the slightly different broad peaks. Within
+the existing noise floor, per this log's ground rule, and agreement with
+dREG improved.
+
+Fusing the sgemm in too was considered and not pursued: it could save at
+most the ~13 ms `cross` write (~11%), but only if a hand-written GEMM
+matched cuBLAS's 17.5 TFLOP/s, which a plain tiled RawKernel won't.
+CUTLASS/Triton could, at a heavy dependency cost. The numba CPU tier
+already does this fusion (`models._rbf_accumulate`, 2026-08-13). The mlx
+tier probably still materializes `K` for its final matmul. An
+`mx.fast.metal_kernel` equivalent is plausible but not attempted, since it
+can't be validated without Apple hardware.
+
+Tests: the CPU-side fake now stands in for `cp.RawKernel` with the same
+argument order and semantics, asserting the scalar dtypes. A new
+`test_cupy_fused_kernel_matches_reference_on_real_gpu` (skipped without
+CUDA) runs the real compiled kernel against `DREGModel.predict`, with a
+ragged last sv-chunk and an empty query batch. Tests: 113 -> 114.
+
+## 2026-11-19 — fused RBF+GEMV RawKernel re-measured on Pascal (TITAN Xp, CC 6.1): 1.28x, same accuracy gain (diagnostic only, no code change)
+
+Checks the previous entry's kernel on pre-Volta hardware, the compute
+capability range where cuML silently returned wrong scores (see
+`docs/OPTIMIZATION.md`). Measured on an NVIDIA TITAN Xp (12 GB, CC 6.1,
+~548 GB/s peak bandwidth), cupy 14.1.1, CUDA runtime 12.9, branch
+`cupy-fused-rbf-gemv` (aba2356). The "old" path is `main`'s (3f31302)
+`_build_cupy_predict_fn` (ElementwiseKernel writing `K`, then cuBLAS GEMV),
+built in the same process. Default `query_chunk=4096`/`sv_chunk=16,384`.
+Inputs were synthetic: the `scripts/bench_backends.py` generator, seed 0.
+Timing depends only on shapes, so no real positions were needed. The
+script was scratch-only (not committed).
+
+**Wall clock per 4096-query chunk (median of 5, synchronized):** 272.4 ->
+212.3 ms (1.28x), 15,037 -> 19,295 pos/s.
+
+**Device-time breakdown per chunk (CUDA events, summed over 36.9
+sv-chunks):**
+
+| step | ms |
+|---|---|
+| sgemm `X @ SV.T` (unchanged; 9.7 TFLOP/s) | 184.3 |
+| old: RBF ElementwiseKernel | 71.0 |
+| old: GEMV | 28.2 |
+| new: fused RBF+GEMV RawKernel | 27.3 |
+
+The fused kernel reads all of `cross` (9.92 GB per chunk) at ~364 GB/s,
+about 2/3 of the card's peak, so it is near its roofline here as well.
+The sgemm is now ~87% of device time. The speedup is larger than the 3080's
+1.20x because the old RBF step cost relatively more on Pascal (71 ms
+against the 3080's 29 ms, beside a 184 ms rather than 102 ms sgemm).
+
+**Accuracy vs the float64 NumPy reference (4,096 positions):** max |error|
+old 3.20e-4 (mean 6.2e-5), fused 2.87e-5 (mean 6.8e-6), both well inside
+`CUPY_SMOKE_TEST_ATOL` (1e-3). This is the same ~10x improvement the 3080
+showed. `tests/test_backend.py` passed in full on this card (29 passed,
+none skipped), including `test_cupy_fused_kernel_matches_reference_on_real_gpu`.
+So the RawKernel compiles and is correct on CC 6.1.
+
+Not measured: the full pipeline on this host, and the second card in the
+machine (TITAN X Pascal, the same GP102 chip).
+
+## 2026-11-21 — fused RBF+GEMV kernel on real L40S and A100: 1.29x / 1.05x per chunk; the A100 utilization question resolved, it saturates (diagnostic only, no code change)
+
+Measured on Stanford's Sherlock cluster: an NVIDIA L40S (48 GB, CC 8.9) on
+a Xeon Gold 6426Y host, and an A100-SXM4-80GB (CC 8.0) on an EPYC 7763
+host, driver 550.163.01, 16 cores allocated on each. The locked
+environment (`uv sync --frozen --extra gpu`: cupy 14.1.1 with its pip
+CUDA 12.9 toolkit) ran inside a Debian 12 container, because the hosts'
+glibc 2.17 is too old for the locked wheels. Branch `cupy-fused-rbf-gemv`
+(aba2356) against `main` (3f31302), each in its own process.
+Jurkat_ChROseq_1, downloaded from the GEO URLs in
+`figures/timing_scripts_download.sh`, on node-local disk unless noted.
+Scripts were scratch-only (not committed).
+
+**Per 4096-query chunk** (200,704 real positions, the first ones after
+chr1; default `sv_chunk=16,384`; median of 49 chunks):
+
+| | L40S main | L40S fused | A100 main | A100 fused |
+|---|---|---|---|---|
+| wall per chunk | 96.4 ms | 75.0 ms (1.29x) | 119.8 ms | 113.7 ms (1.05x) |
+| sgemm `X @ SV.T` alone | 55.7 ms | 55.6 ms | 94.6 ms | 94.6 ms |
+| everything else | 40.7 ms | 19.4 ms | 25.2 ms | 19.1 ms |
+| max \|error\| vs float64 (4,096 positions) | 2.73e-4 | 3.51e-5 | 2.73e-4 | 3.51e-5 |
+
+"Everything else" is the RBF/GEMV steps plus ~1-2 ms of host scaling and
+H2D per chunk. The A100 gains least because its float32 sgemm runs at
+18.9 TFLOP/s, ~97% of the card's 19.5 TFLOP/s FP32 peak, and is 83% of
+the chunk. The L40S is the faster FP32 card of the two (32.0 TFLOP/s on
+the same sgemm). On the A100 the fused kernel reads `cross` (9.92 GB per
+chunk) at ~0.5 TB/s, about a quarter of HBM bandwidth, so the kernel may
+have headroom on HBM cards. That is at most a few ms against a 95 ms
+sgemm, so it was not investigated. Max error drops 7.8x, the same on both
+cards, in line with the 3080 (7.4x) and TITAN Xp (11x).
+
+**`sv_chunk` sweep (8,192 to 65,536):** the fused path is flat within
+1.5% from 8,192 to 32,768 on both cards. At 65,536 it is 11% slower on
+the L40S, where the sgemm itself slows (55.6 -> 64.2 ms), and flat on the
+A100. The 16,384 default stands. Max error grows with `sv_chunk` (3.5e-5
+at 16,384, 1.0e-4 at 65,536), consistent with each thread's float32
+partial sum covering more support vectors.
+
+**Full pipeline, `-p 16 --seed 1`:**
+
+| | L40S main | L40S fused | A100 main | A100 fused |
+|---|---|---|---|---|
+| total wall clock | 5:57.8 | 5:10.9 | 7:27.4 | 7:09.1 |
+| informative-position `scorer.predict` | 115.61s | 84.89s | 147.52s | 134.19s |
+| densified-position `scorer.predict` | 73.56s | 54.44s | 93.35s | 85.12s |
+| significant peaks | 48,169 | 48,171 | 48,168 | 48,171 |
+| peak Jaccard vs real dREG | 0.999553 | 0.999764 | 0.999552 | 0.999764 |
+
+Before-vs-after peak Jaccard was 0.999617 (L40S) and 0.999605 (A100).
+Agreement with dREG after the change is the same 0.999764 the 3080 run
+gave. This is within the existing noise floor, per this log's ground
+rule. The A100 run is also slower in the CPU-only stages (densify
+129-135s vs 93-111s, peak calling 131-133s vs 96-98s), a host difference
+unrelated to the GPU. The cupy tests in `tests/test_backend.py` passed on
+both cards (12 selected by `-k cupy`, none skipped), including
+`test_cupy_fused_kernel_matches_reference_on_real_gpu`.
+
+**The A100 utilization question (2026-08-20 (cont.), 2026-11-18) is
+resolved: the A100 saturates.** This is the measurement the 2026-11-18
+entry asked for, current code with `-v` on an A100 node. Runs covered
+only informative-position scanning and scoring (the same calls as
+`pipeline.run`), 4,997,104 positions, with `nvidia-smi dmon` at 1 Hz
+windowed to the scoring phase. dmon's SM% is the fraction of time any
+kernel was running, not occupancy.
+
+| A100 run | extract | predict | mean SM% | samples >= 90% |
+|---|---|---|---|---|
+| main, Lustre `$SCRATCH`, `-p 16` | 21.6s | 147.6s | 95.4 | 99% |
+| main, node-local, `-p 16` | 21.4s | 147.4s | 95.5 | 99% |
+| main, Lustre `$SCRATCH`, `-p 1` | 72.2s | 148.3s | 90.7 | 84% |
+| main, node-local, `-p 1` | 71.1s | 147.4s | 88.0 | 73% |
+| fused, node-local, `-p 16` | 20.5s | 133.8s | 94.7 | 98% |
+| fused, node-local, `-p 1` | 71.5s | 134.6s | 88.9 | 73% |
+
+At `-p 16` extraction takes ~18 ms per chunk against ~120 ms of predict,
+and the GPU is busy ~95% of the time. So neither branch of the
+2026-11-18 decision applies, and no fix is needed. Storage location
+makes no difference: the bigWigs are ~50 MB each and sit in the page
+cache after the scan. At the default `--cores 1`, extraction is ~3x
+slower (~58 ms per chunk) and utilization drops to 88-91%, but extraction
+still trails predict. The original observation is best explained by
+older code on a slower host. The 2026-07-15 A100 numbers had extraction
+at ~141 ms per chunk.
+
+The L40S shows where this is heading. With the fused kernel, `-p 1`
+extraction (66.1s) comes close to predict (86.2s), and utilization falls
+to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
+89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
+or TF32 GEMMs on the A100) would make extraction the bottleneck. At
+`-p 16` there is a ~5x margin.
