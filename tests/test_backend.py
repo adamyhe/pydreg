@@ -145,12 +145,13 @@ class _FakeRawKernel:
         y += K @ coefs
 
 
-def _fake_cupy_core(supports_tf32=True):
+def _fake_cupy_core(supports_tf32=True, initial_tf32=False):
     """Stands in for cupy._core's float32 compute-type switch: same
     constants and set/get pair, and the same fallback to DEFAULT that real
-    CuPy applies on GPUs below compute capability 8.0."""
+    CuPy applies on GPUs below compute capability 8.0. initial_tf32 starts
+    it at TF32, as CuPy does when CUPY_TF32=1 is set."""
     linalg = types.SimpleNamespace(COMPUTE_TYPE_DEFAULT=1, COMPUTE_TYPE_TF32=7)
-    state = {}
+    state = {"float32": 7 if initial_tf32 and supports_tf32 else 1}
 
     def set_compute_type(dtype, compute_type):
         assert np.dtype(dtype) == np.float32
@@ -251,6 +252,37 @@ def test_cupy_fused_kernel_matches_reference_on_real_gpu():
     assert predict(X[:0]).shape == (0,)
 
 
+@pytest.mark.skipif(not _real_cuda_available(), reason="needs a real CUDA GPU")
+def test_cupy_float32_scorer_unaffected_by_a_tf32_scorer_on_real_gpu():
+    # The real cuBLAS path: a float32 predict function gives bit-identical
+    # output before and after a TF32 one is built and used in the same
+    # process. On compute capability 8.0+ the TF32 output must also differ,
+    # or this test would pass vacuously.
+    model = object.__new__(DREGModel)
+    rng = np.random.default_rng(9)
+    model.n_features = 360
+    model.n_sv = 4_096
+    model.SV = rng.normal(size=(model.n_sv, model.n_features))
+    model.coefs = rng.normal(size=model.n_sv)
+    model.x_center = np.zeros(model.n_features)
+    model.x_scale = np.ones(model.n_features)
+    model.gamma = 1.0 / model.n_features
+    model.rho = 0.1
+    model.y_scale = 1.0
+    model.y_center = 0.0
+    model._sq_sv = np.sum(model.SV**2, axis=1)
+    model._scorer_cache = {}
+    X = rng.normal(size=(512, model.n_features))
+
+    plain = backend._build_cupy_predict_fn(model)
+    before = plain(X)
+    asked = backend._build_cupy_predict_fn(model, tf32=True)
+    tf32_out = asked(X)
+    np.testing.assert_array_equal(plain(X), before)
+    if asked.tf32:
+        assert np.max(np.abs(tf32_out - before)) > 0
+
+
 def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
     model = _tiny_svr_model()
@@ -336,16 +368,77 @@ def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
+def _record_gemm_compute_types(fake):
+    """Records cupy's float32 compute type each time the fused path's
+    `cross = ascontiguousarray(X @ SV.T)` runs, i.e. what the GEMM saw."""
+    seen = []
+    contiguous = fake.ascontiguousarray
+
+    def recording(a):
+        seen.append(fake._core.get_compute_type(np.float32))
+        return contiguous(a)
+
+    fake.ascontiguousarray = recording
+    return seen
+
+
 def test_cupy_tf32_defaults_off_and_follows_the_flag(monkeypatch):
     fake = _fake_cupy_module()
     monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
+    model = _tiny_svr_model()
+    X_raw = np.random.default_rng(6).normal(size=(4, model.n_features))
+
+    plain = backend.build_scorer(model, "cupy")
+    assert plain.tf32 is False
+    plain.predict(X_raw)
+    assert set(seen) == {1}  # DEFAULT
+
+    seen.clear()
+    asked = backend.build_scorer(model, "cupy", tf32=True)
+    assert asked.tf32 is True
+    asked.predict(X_raw)
+    assert set(seen) == {7}  # TF32
+    # Neither building nor predicting leaves cupy's own setting changed.
+    assert fake._core.get_compute_type(np.float32) == 1
+
+
+def test_cupy_float32_scorer_stays_float32_after_a_tf32_scorer_is_built(monkeypatch):
+    # cupy's compute type is process-wide. Setting it at build time let a
+    # float32 scorer silently run at TF32 once a TF32 scorer existed.
+    fake = _fake_cupy_module()
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
+    model = _tiny_svr_model()
+    X_raw = np.random.default_rng(7).normal(size=(4, model.n_features))
+
+    plain = backend.build_scorer(model, "cupy")
+    asked = backend.build_scorer(model, "cupy", tf32=True)
+    seen.clear()
+    plain.predict(X_raw)
+    assert set(seen) == {1}
+    seen.clear()
+    asked.predict(X_raw)
+    assert set(seen) == {7}
+    seen.clear()
+    plain.predict(X_raw)
+    assert set(seen) == {1}
+
+
+def test_cupy_tf32_flag_overrides_cupy_tf32_env_and_restores_it(monkeypatch):
+    # CUPY_TF32=1 makes CuPy start at TF32; --tf32 off must still run the
+    # GEMM in full float32, and leave CuPy's own setting as it was.
+    fake = _fake_cupy_module()
+    fake._core = _fake_cupy_core(initial_tf32=True)
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
     model = _tiny_svr_model()
 
-    assert backend.build_scorer(model, "cupy").tf32 is False
-    assert fake._core.get_compute_type(np.float32) == 1  # DEFAULT, overriding any CUPY_TF32
-
-    assert backend.build_scorer(model, "cupy", tf32=True).tf32 is True
-    assert fake._core.get_compute_type(np.float32) == 7  # TF32
+    backend.build_scorer(model, "cupy").predict(
+        np.random.default_rng(8).normal(size=(4, model.n_features))
+    )
+    assert set(seen) == {1}
+    assert fake._core.get_compute_type(np.float32) == 7
 
 
 def test_cupy_tf32_uses_the_looser_smoke_tolerance_only_when_in_effect(monkeypatch):

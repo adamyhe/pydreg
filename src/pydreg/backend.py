@@ -195,37 +195,62 @@ def _configure_mlx_tf32(enabled):
     return in_effect
 
 
-def _configure_cupy_tf32(enabled):
-    """Sets whether cupy's float32 GEMMs (the `X @ SV.T` cuBLAS call) may use
-    TF32 tensor cores, and returns whether TF32 is actually in effect.
-
-    CuPy checks its float32 compute type on every matmul
-    (cupy._core._routines_linalg.get_compute_type): COMPUTE_TYPE_TF32
-    selects CUBLAS_COMPUTE_32F_FAST_TF32, COMPUTE_TYPE_DEFAULT plain FP32.
-    Its own default is FP32 unless CUPY_TF32=1 is set; setting the type
-    explicitly here makes the flag win over that env var in both
-    directions. CuPy itself falls back to DEFAULT (with a warning, silenced
-    here in favor of this log line) on GPUs below compute capability 8.0,
-    which have no TF32 (Pascal, Volta, Turing). Off by default for the same
-    fidelity reason as the mlx tier (_configure_mlx_tf32); the speedup is
-    only large on datacenter Ampere/Hopper (A100: ~8x FP32 GEMM rate), and
-    small on consumer Ampere/Ada, whose dense TF32 peak is about their FP32
-    peak."""
+def _set_cupy_compute_type(compute_type):
+    """Sets cupy's float32 compute type and returns the one that actually
+    took effect. CuPy falls back to DEFAULT, with a warning, on GPUs below
+    compute capability 8.0; the warning is silenced here because callers
+    check the returned value instead."""
     import warnings
 
     import cupy
 
-    linalg = cupy._core._routines_linalg
-    wanted = linalg.COMPUTE_TYPE_TF32 if enabled else linalg.COMPUTE_TYPE_DEFAULT
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        cupy._core.set_compute_type(np.float32, wanted)
-    in_effect = cupy._core.get_compute_type(np.float32) == linalg.COMPUTE_TYPE_TF32
+        cupy._core.set_compute_type(np.float32, compute_type)
+    return cupy._core.get_compute_type(np.float32)
+
+
+def _configure_cupy_tf32(enabled):
+    """Returns the float32 compute type a cupy scorer should run its
+    `X @ SV.T` cuBLAS GEMM under, and whether that is TF32. Leaves cupy's
+    own setting as it found it.
+
+    CuPy reads its float32 compute type on every matmul
+    (cupy._core._routines_linalg.get_compute_type): COMPUTE_TYPE_TF32
+    selects CUBLAS_COMPUTE_32F_FAST_TF32, COMPUTE_TYPE_DEFAULT plain FP32.
+    That setting is process-wide, so _build_cupy_predict_fn applies the
+    returned type around each predict call and restores the previous one,
+    rather than setting it once at build time. Setting it once let a
+    float32 scorer silently run at TF32 after a TF32 scorer was built in the
+    same process, while still reporting tf32=False (measured on a real L40S
+    and A100: max score change 1.7e-3, identical to the TF32 scorer's
+    output). Applying it per call also makes the flag win over CuPy's own
+    CUPY_TF32 env var in both directions.
+
+    TF32 is probed here by setting it and reading it back, because CuPy
+    falls back to DEFAULT on GPUs below compute capability 8.0 (Pascal,
+    Volta, Turing), which have no TF32. Off by default for the same fidelity
+    reason as the mlx tier (_configure_mlx_tf32). The GEMM speedup is large
+    on both datacenter and Ada cards: measured 4.9x on an A100 and 2.4x on
+    an L40S, which with the fused RBF+GEMV kernel is 2.99x and 1.43x per
+    scoring chunk, and 1.48x and 1.25x end to end on Jurkat_ChROseq_1. Peak
+    agreement with real dREG drops from 0.99976 to 0.99620 Jaccard on both
+    cards (see docs/PERF_LOG.md's 2026-11-22 entry)."""
+    import cupy
+
+    linalg = cupy._core._routines_linalg
+    previous = cupy._core.get_compute_type(np.float32)
+    wanted = linalg.COMPUTE_TYPE_TF32 if enabled else linalg.COMPUTE_TYPE_DEFAULT
+    try:
+        compute_type = _set_cupy_compute_type(wanted)
+    finally:
+        _set_cupy_compute_type(previous)
+    in_effect = compute_type == linalg.COMPUTE_TYPE_TF32
     if enabled and not in_effect:
         logger.warning(
             "--tf32 has no effect on this GPU (TF32 needs compute capability 8.0+)"
         )
-    return in_effect
+    return compute_type, in_effect
 
 
 @functools.lru_cache(maxsize=1)
@@ -488,12 +513,14 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     error across the 605,187 support vectors (37 sv-chunks at the default
     sv_chunk), independent of the float32 GEMM itself.
 
-    tf32: sets cuBLAS's float32 compute type first (_configure_cupy_tf32),
-    off by default, so every caller gets full float32 unless it asks. The
-    returned function's `.tf32` says whether TF32 is in effect."""
+    tf32: whether the `X @ SV.T` GEMM runs at TF32. _configure_cupy_tf32
+    picks the compute type once, and each predict call applies it and then
+    restores cupy's previous setting, so scorers built with different tf32
+    values can share a process. Off by default. The returned function's
+    `.tf32` says whether TF32 is in effect."""
     import cupy as cp
 
-    tf32_in_effect = _configure_cupy_tf32(tf32)
+    compute_type, tf32_in_effect = _configure_cupy_tf32(tf32)
     SV = cp.asarray(dreg_model.SV, dtype=cp.float32)
     coefs = cp.asarray(dreg_model.coefs, dtype=cp.float32)
     sq_sv = cp.sum(SV**2, axis=1)
@@ -504,6 +531,16 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     _rbf_gemv = cp.RawKernel(_RBF_GEMV_SRC, "pydreg_rbf_gemv")
 
     def predict(X_scaled):
+        # cupy's compute type is process-wide; apply this scorer's for the
+        # duration of the call only (see _configure_cupy_tf32).
+        previous = cp._core.get_compute_type(np.float32)
+        _set_cupy_compute_type(compute_type)
+        try:
+            return _predict(X_scaled)
+        finally:
+            _set_cupy_compute_type(previous)
+
+    def _predict(X_scaled):
         X = cp.asarray(X_scaled, dtype=cp.float32)
         n = X.shape[0]
         sq_x = cp.sum(X**2, axis=1)
