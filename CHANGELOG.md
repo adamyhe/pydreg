@@ -19,10 +19,13 @@ approaches that were tried and rejected, are in
 
 - `--tf32` (`tf32=` in `pipeline.run` and `build_scorer`): opt-in TF32 matrix
   multiplies for both GPU backends (`cupy` on compute capability 8.0+, `mlx`
-  on M5-class GPUs). About 1.57x faster end to end on an M5, at the cost of
-  peak agreement with real dREG (0.995 vs 0.9997 Jaccard) and
-  GPU-model-dependent results. Off by default, which also overrides
-  `CUPY_TF32` / `MLX_ENABLE_TF32` if they are set.
+  on M5-class GPUs). End to end on Jurkat_ChROseq_1 it is about 1.48x faster
+  on an A100, 1.25x on an L40S and 1.57x on an M5. The cost is peak agreement
+  with real dREG (0.9962 vs 0.9998 Jaccard on the CUDA cards, 0.995 vs 0.9997
+  on the M5) and GPU-model-dependent results. Off by default, which also
+  overrides `CUPY_TF32` / `MLX_ENABLE_TF32` if they are set. On `cupy` each
+  scorer applies its own setting per call, so float32 and TF32 scorers can
+  share a process.
 
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for

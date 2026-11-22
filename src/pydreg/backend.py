@@ -137,8 +137,9 @@ MLX_SMOKE_TEST_ATOL = CUPY_SMOKE_TEST_ATOL
 # MLX's TF32 matmuls: max |error| 2.59e-3 over 16,384 real Jurkat ChRO-seq
 # positions, 1.6e-3 on the smoke test's own 8-row sample. The cupy tier's
 # TF32 (cuBLAS CUBLAS_COMPUTE_32F_FAST_TF32) keeps the same 10-bit
-# mantissa on the same formula, so the same bound is used there; it has
-# not been measured on CUDA hardware yet.
+# mantissa on the same formula, so the same bound is used there. Measured
+# on a real L40S and A100 (identical on both): max |error| 1.84e-3 over
+# 200,704 real Jurkat ChRO-seq positions with the fused RBF+GEMV kernel.
 TF32_SMOKE_TEST_ATOL = 5e-3
 
 
@@ -698,9 +699,11 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None
 
     tf32: let the GPU tiers ("cupy", "mlx") run their float32 `X @ SV.T`
     GEMM at TF32 input precision, on hardware that has it (Apple M5,
-    NVIDIA compute capability 8.0+). Off by default: on an M5 it was ~1.57x
-    faster end to end but dropped peak agreement with real dREG from 0.9997
-    to 0.9953 Jaccard, and it makes results depend on the GPU model. When
+    NVIDIA compute capability 8.0+). Off by default: end to end it was
+    ~1.48x faster on an A100, ~1.25x on an L40S and ~1.57x on an M5, but it
+    dropped peak agreement with real dREG from 0.99976 to 0.99620 Jaccard
+    on the CUDA cards (0.9997 to 0.9953 on the M5), and it makes results
+    depend on the GPU model. When
     TF32 is actually in effect the smoke test uses TF32_SMOKE_TEST_ATOL
     instead of the tier's float32 one. Ignored, with a warning, on the CPU
     tiers. Off also overrides CUPY_TF32 / MLX_ENABLE_TF32 if set."""

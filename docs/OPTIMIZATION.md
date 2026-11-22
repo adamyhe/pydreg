@@ -282,11 +282,19 @@ in, for both GPU tiers: mlx via that variable, cupy via
 compute capability 8.0+ only; CuPy falls back to FP32 on older cards).
 The flag wins over `CUPY_TF32`/`MLX_ENABLE_TF32` in both directions.
 When TF32 is actually in effect the smoke test uses
-`TF32_SMOKE_TEST_ATOL = 5e-3` (measured worst case on the M5: 2.6e-3).
-The cupy side is unmeasured on real hardware; the gain should be large
-only on datacenter Ampere/Hopper (A100's TF32 GEMM rate is ~8x its FP32),
-small on consumer Ampere/Ada, and nothing on Pascal/Volta/Turing. See
-`docs/PERF_LOG.md`'s 2026-11-20 entries.
+`TF32_SMOKE_TEST_ATOL = 5e-3` (measured worst case: 2.6e-3 on the M5,
+1.84e-3 on CUDA). On real CUDA hardware, with the fused RBF+GEMV kernel,
+TF32 sped up the `X @ SV.T` GEMM 4.9x on an A100 and 2.4x on an L40S. That
+is 2.99x and 1.43x per scoring chunk, and 1.48x and 1.25x end to end on
+Jurkat_ChROseq_1. Peak agreement with real dREG dropped from 0.99976 to
+0.99620 Jaccard on both cards, and scores moved by up to 2.2e-3. Nearly all
+of that error comes from TF32 rounding inside `X @ SV.T`, where
+`sq_x + sq_sv - 2*cross` loses most of its significant digits. There is no
+gain on Pascal/Volta/Turing, which have no TF32. cupy's compute type is
+process-wide, so each cupy scorer applies its own setting around every
+predict call and restores the previous one: float32 and TF32 scorers can
+share a process. See `docs/PERF_LOG.md`'s 2026-11-20 and 2026-11-22
+entries.
 
 ## Batching
 

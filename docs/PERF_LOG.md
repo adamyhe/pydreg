@@ -5079,3 +5079,90 @@ to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
 89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
 or TF32 GEMMs on the A100) would make extraction the bottleneck. At
 `-p 16` there is a ~5x margin.
+
+## 2026-11-22 — cupy `--tf32` on real L40S and A100: 2.99x per chunk on the A100 with the fused kernel, 0.9962 peak Jaccard vs dREG; the TF32 setting is now applied per call
+
+First CUDA measurements of the cupy side of `--tf32` (the 2026-11-20
+(cont.) entry left it unmeasured). Same Sherlock setup as the 2026-11-21
+entry: an L40S on a Xeon Gold 6426Y host and an A100-SXM4-80GB on an EPYC
+7763 host, 16 cores, the locked environment in a Debian 12 container,
+Jurkat_ChROseq_1. fp32 and TF32 scorers ran in separate processes on the
+same 200,704 real positions (the first ones after chr1), and full runs
+used `-p 16 --seed 1`. Measured twice: on this branch before it merged
+`main` (c028150, the old ElementwiseKernel + GEMV path), and after (the
+fused RBF+GEMV RawKernel). Scripts were scratch-only (not committed).
+
+**Per 4096-query chunk, with the fused kernel (median of 49):**
+
+| | L40S fp32 | L40S TF32 | A100 fp32 | A100 TF32 |
+|---|---|---|---|---|
+| wall per chunk | 67.3 ms | 47.0 ms (1.43x) | 115.5 ms | 38.7 ms (2.99x) |
+| sgemm `X @ SV.T` alone | 53.8 ms | 22.3 ms (2.41x) | 94.5 ms | 19.2 ms (4.91x) |
+| everything else | 13.5 ms | 24.7 ms | 21.0 ms | 19.5 ms |
+| max \|error\| vs float64 (4,096 positions) | 3.51e-5 | 1.84e-3 | 3.51e-5 | 1.84e-3 |
+
+Before the merge, on the old unfused path, TF32 was 1.17x per chunk on the
+L40S (93.5 -> 80.1 ms) and 2.51x on the A100 (119.8 -> 47.7 ms), for the
+same ~2.4x and ~4.9x sgemm speedups. The fused kernel makes the sgemm a
+larger share of each chunk, so TF32 now buys more. Under TF32 the
+non-sgemm part grows by 11 ms on the L40S, with no float32 GEMV left for
+TF32 to touch, and it does not grow on the A100. That is unexplained (not
+profiled). On the old path it grew by 18 ms on the L40S as well.
+
+**Fidelity.** Errors are identical on both cards. Over all 200,704
+positions, |TF32 - fp32| has max 2.16e-3, p99 1.20e-3 and mean 3.9e-4.
+3.6% of positions differ by more than 1e-3, and none by more than 5e-3,
+so `TF32_SMOKE_TEST_ATOL` (5e-3) holds on CUDA where the float32 1e-3
+would not. On the old path the max error was 2.06e-3, barely different:
+almost all of TF32's error comes from rounding inside `X @ SV.T` (the
+`sq_x + sq_sv - 2*cross` cancellation the 2026-11-18 entry warned about),
+not from the old float32 GEMV.
+
+**Full pipeline, with the fused kernel:**
+
+| | L40S fp32 | L40S TF32 | A100 fp32 | A100 TF32 |
+|---|---|---|---|---|
+| total wall clock | 5:19.3 | 4:15.4 (1.25x) | 8:19.3 | 5:36.3 (1.48x) |
+| informative-position extract / predict | 17.7s / 87.3s | 16.9s / 53.9s | 29.8s / 138.9s | 29.5s / 45.1s |
+| significant peaks | 48,171 | 48,190 | 48,171 | 48,190 |
+| peak Jaccard vs real dREG | 0.999764 | 0.996198 | 0.999764 | 0.996198 |
+
+fp32-vs-TF32 peak Jaccard was 0.996295 on both cards. On the old path
+it was 1.15x (L40S) and 1.50x (A100) end to end, with 0.9961 against
+dREG. This A100 run was on a different node (sh03-17n01) from the
+2026-11-21 entry's (sh03-16n09), with the same CPU model, and its
+CPU-only stages ran 15-30% slower. Compare end-to-end times within a
+table, not across entries. Two consequences on the A100 with TF32:
+- **Extraction is close behind the GPU.** Extraction is now within 1.5x
+  of predict at `-p 16` (29.5s vs 45.1s). At the default `--cores 1`
+  (~71s of extraction per the 2026-11-21 entry) it would be the
+  bottleneck.
+- **The CPU stages dominate.** Densifying (79s) and peak calling (162s)
+  take most of the 5:36.
+
+**Bug found and fixed: the TF32 setting leaked between scorers.** cupy's
+float32 compute type is process-wide, and `_configure_cupy_tf32` used to
+set it when a scorer was built. A float32 scorer built before a TF32
+scorer in the same process therefore ran its GEMM at TF32 from then on,
+while still reporting `tf32=False`. On both cards its scores moved by up
+to 1.70e-3 and matched the TF32 scorer's output exactly. A normal
+`pydreg` run builds one scorer and was not affected. Now
+`_configure_cupy_tf32` probes the compute type (CuPy falls back to
+DEFAULT below compute capability 8.0) and restores cupy's setting. Each
+predict call applies its scorer's compute type and restores the previous
+one afterward, which also makes `--tf32` off win over `CUPY_TF32=1`
+without changing it.
+Validated on a real L40S (911b9b1). A float32 scorer's output after a TF32
+scorer is built now differs by 0.0, where it differed by 1.70e-3 before.
+The TF32 scorer still differs from float32 by 1.70e-3, so the check is not
+vacuous, and cupy's own setting stays DEFAULT before and after. TF32
+predict time and error are unchanged by the per-call switch (47.2 ms vs
+47.0 ms per chunk, max error 1.84e-3).
+
+Tests: the fake cupy core now starts at a real default compute type
+(optionally TF32, like `CUPY_TF32=1`), and the flag test checks the type
+the GEMM actually sees rather than the global left after building. Three
+new tests: a float32 scorer built before a TF32 one stays float32 (fake,
+and on a real GPU with bit-identical output), and `CUPY_TF32=1` is
+overridden and then restored. The full suite passed on the L40S (127
+passed, 2 skipped: Metal-only). Tests: 126 -> 129.
