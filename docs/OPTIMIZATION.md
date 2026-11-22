@@ -252,18 +252,29 @@ an Apple M4 (1.16s vs 7.06s per call, warm/post-compile, re-measured after
 the NumPy tier's own numba-fusion speedup). See `docs/PERF_LOG.md`'s
 2026-08-10 entry.
 
-**TF32 is switched off.** MLX runs float32 matmuls at TF32 input precision
+**TF32 is off unless asked for (`--tf32`).** MLX runs float32 matmuls at TF32 input precision
 by default on GPUs with the hardware for it (the Apple M5's neural
 accelerators; not the M4). On an M5 that made scores up to ~2.6e-3 off
 the float64 reference, dropped peak agreement with real dREG from 0.9997
 to 0.9953 Jaccard on Jurkat ChRO-seq (peak boundaries shift), and failed
-the smoke test on every real run, so
-`_build_mlx_predict_fn` sets `MLX_ENABLE_TF32=0` before its first matmul
-and checks that it took effect. Error drops to ~3e-4, at ~1.5x the
-per-call time on the M5 (822 ms vs 552 ms; the NumPy tier is 5,059 ms).
-MLX reads the variable once per process, so a script that ran mlx matmuls
-before building the scorer must set `MLX_ENABLE_TF32=0` itself. See
-`docs/PERF_LOG.md`'s 2026-11-20 entry.
+the smoke test on every real run, so `_build_mlx_predict_fn` sets
+`MLX_ENABLE_TF32=0` before the tier's first matmul and checks that it
+took effect. Error drops to ~3e-4, at ~1.5x the per-call time on the M5
+(822 ms vs 552 ms; the NumPy tier is 5,059 ms). MLX reads the variable
+once per process, so a script that ran mlx matmuls before building the
+scorer must set `MLX_ENABLE_TF32` itself.
+
+`--tf32` (`build_scorer(tf32=True)`, `pipeline.run(tf32=True)`) opts back
+in, for both GPU tiers: mlx via that variable, cupy via
+`cupy._core.set_compute_type` (cuBLAS `CUBLAS_COMPUTE_32F_FAST_TF32`,
+compute capability 8.0+ only; CuPy falls back to FP32 on older cards).
+The flag wins over `CUPY_TF32`/`MLX_ENABLE_TF32` in both directions.
+When TF32 is actually in effect the smoke test uses
+`TF32_SMOKE_TEST_ATOL = 5e-3` (measured worst case on the M5: 2.6e-3).
+The cupy side is unmeasured on real hardware; the gain should be large
+only on datacenter Ampere/Hopper (A100's TF32 GEMM rate is ~8x its FP32),
+small on consumer Ampere/Ada, and nothing on Pascal/Volta/Turing. See
+`docs/PERF_LOG.md`'s 2026-11-20 entries.
 
 ## Batching
 

@@ -4740,3 +4740,48 @@ restored; new tests cover the env default and an explicit value, the
 probe raising (and `build_scorer` surfacing it) when the fake rounds to
 TF32, and, on a real Metal GPU, a fresh subprocess getting full-float32
 GEMM accuracy. Tests: 113 -> 116.
+
+## 2026-11-20 (cont.) — one `--tf32` flag for both GPU tiers (opt-in; defaults unchanged)
+
+Follows the TF32 entry above: rather than an mlx-only switch, TF32 is one
+option across the GPU tiers, `--tf32` / `pipeline.run(tf32=)` /
+`build_scorer(tf32=)`, off by default. Default output is unchanged (the
+default path is exactly the previous entry's TF32-off path).
+
+- **mlx**: `_configure_mlx_tf32(enabled)` (was `_disable_mlx_tf32`)
+  assigns `MLX_ENABLE_TF32` from the flag, overriding the environment,
+  then runs the same probe. Wanted off but on: `BackendUnavailable`, as
+  before. Wanted on but off (no TF32 hardware, e.g. an M4, or locked off
+  by an earlier matmul): info log, keeps going. MLX caches the variable
+  per process, so the first mlx scorer built in a process decides it.
+- **cupy**: `_configure_cupy_tf32(enabled)` calls
+  `cupy._core.set_compute_type(float32, COMPUTE_TYPE_TF32 or _DEFAULT)`.
+  Read from CuPy 14.1.1's source (`_core/_routines_linalg.pyx`): the type
+  is checked on every matmul and maps TF32 to
+  `CUBLAS_COMPUTE_32F_FAST_TF32`, so unlike MLX it can change at any time.
+  `CUPY_TF32=1` only sets the initial value; the explicit call makes the
+  flag win. On compute capability < 8.0 CuPy itself falls back to DEFAULT
+  with a warning; pydreg silences that and logs its own. Not run on CUDA
+  hardware yet.
+- **Smoke test**: `TF32_SMOKE_TEST_ATOL = 5e-3` applies only when TF32 is
+  actually in effect (2x the M5's measured worst case of 2.59e-3 over
+  16,384 real rows). Scorers are cached per `(backend, tf32)`.
+- **CPU tiers**: `tf32=True` logs a warning and is ignored.
+- **Where it's applied**: both configure functions run inside
+  `_build_cupy_predict_fn` / `_build_mlx_predict_fn` (`tf32=False` by
+  default), which report the result as the returned function's `.tf32`,
+  rather than in `build_scorer`. A first version configured it in
+  `build_scorer`, and a test calling `_build_mlx_predict_fn` directly then
+  silently got MLX's default TF32 on the M5; any direct caller would
+  have.
+
+Checked through `build_scorer` on the M5, real Jurkat ChRO-seq rows, one
+process each: `tf32=False` 871 ms / 4,096 rows, max |err| 2.84e-4;
+`tf32=True` 565 ms, 2.59e-3 (passes the TF32 tolerance).
+
+Tests: mlx env/probe tests reworked for the flag (both directions, flag
+overriding the env); new tests for per-`tf32` scorer caching, the CPU
+warning, cupy's compute type following the flag (with a fake
+`cupy._core` that mimics the compute-capability fallback), the looser
+tolerance applying only when TF32 is in effect, and the CLI pass-through;
+the real-Metal test is parametrized over both settings. Tests: 116 -> 125.

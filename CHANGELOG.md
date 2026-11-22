@@ -17,6 +17,13 @@ approaches that were tried and rejected, are in
   out of scope, and where contributions help.
 - A `Changelog` link in the package metadata, shown in the PyPI sidebar.
 
+- `--tf32` (`tf32=` in `pipeline.run` and `build_scorer`): opt-in TF32 matrix
+  multiplies for both GPU backends (`cupy` on compute capability 8.0+, `mlx`
+  on M5-class GPUs). About 1.57x faster end to end on an M5, at the cost of
+  peak agreement with real dREG (0.995 vs 0.9997 Jaccard) and
+  GPU-model-dependent results. Off by default, which also overrides
+  `CUPY_TF32` / `MLX_ENABLE_TF32` if they are set.
+
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for
   reproducible peak calling.
@@ -27,8 +34,8 @@ approaches that were tried and rejected, are in
   M5-class GPUs, which put scores up to ~2.6e-3 off and dropped peak
   agreement with real dREG on Jurkat ChRO-seq from 0.9997 to 0.9953 Jaccard
   (same peaks, shifted boundaries). pydreg now sets
-  `MLX_ENABLE_TF32=0` and checks it took effect (raising a clear error if
-  mlx already locked TF32 on in the same process). Scoring on the M5 is
+  `MLX_ENABLE_TF32=0` unless `--tf32` is given and checks it took effect
+  (raising a clear error if mlx already locked TF32 on in the same process). Scoring on the M5 is
   ~1.5x slower than with TF32 (~1.57x end to end), and still ~6x faster
   than the CPU tier.
 
