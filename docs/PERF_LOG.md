@@ -4866,7 +4866,8 @@ order, asserting gamma's dtype/shape and the grid/threadgroup). New
 `test_mlx_fused_kernel_matches_reference_on_real_gpu` (skipped without
 Metal) runs the compiled kernel against `DREGModel.predict` with a ragged
 last sv-chunk shorter than the threadgroup and an empty batch; it passes
-on the M4. Tests: 114 -> 115.
+on the M4. Tests: 114 -> 115 on its branch; it merged after the TF32
+entries below, so on `main` 129 -> 130.
 
 ## 2026-11-19 — fused RBF+GEMV RawKernel re-measured on Pascal (TITAN Xp, CC 6.1): 1.28x, same accuracy gain (diagnostic only, no code change)
 
@@ -4969,9 +4970,8 @@ unchanged.
 error (mean 4.75e-4) is well below real dREG's own float32 GPU noise
 (2.53e-3 mean), so this was checked end to end rather than assumed. Full
 merged Jurkat_ChROseq runs on the M5 with the fused mlx Metal kernel
-(branch `mlx-fused-rbf-gemv`, not yet on `main`; its PERF_LOG entry is
-"2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a
-`mx.fast.metal_kernel`"), `-p 10 --seed 1`, under `caffeinate`, identical except for
+(the 2026-11-18 (cont.) mlx entry above), `-p 10 --seed 1`, under
+`caffeinate`, identical except for
 the TF32 setting (the TF32-on run with the probe skipped and the
 smoke-test limit raised to 5e-3 in a scratch copy):
 
