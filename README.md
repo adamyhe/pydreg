@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pydreg)](https://pypi.org/project/pydreg/)
 [![Tests](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/pydreg/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-83%25-brightgreen)](https://github.com/adamyhe/pydreg)
+[![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen)](https://github.com/adamyhe/pydreg)
 [![Weights](https://img.shields.io/badge/%F0%9F%A4%97-Weights-yellow)](https://huggingface.co/adamyhe/pydreg)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/pydreg?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pydreg)
 
@@ -39,9 +39,9 @@ If you want the Python API (`from pydreg import pipeline`, see below) available 
 
 `[gpu]` installs [CuPy](https://cupy.dev/) and enables GPU-accelerated scoring on Linux with an NVIDIA GPU (auto-selected whenever one's detected). On macOS with Apple Silicon, install `[mlx]` instead (`pip install pydreg[mlx]`) for GPU-accelerated scoring via [MLX](https://github.com/ml-explore/mlx) on the machine's Metal GPU (also auto-selected whenever usable). Neither is required, but CPU-only scoring is **much** slower and so is not generally recommended.
 
-**GPU requirement (NVIDIA/`cupy`):** compute capability ≥3.0 (essentially any CUDA-capable NVIDIA GPU from the last decade-plus, including older Pascal-class cards). Scoring runs pydreg's own RBF kernel implementation directly on a CuPy device array (`pydreg.backend._build_cupy_predict_fn`) and enables broad CUDA compatibility and fp32 support. v0.1.x used cuML, which came with significant GPU restrictions (no Pascal support) and no fp32 support — see `docs/OPTIMIZATION.md` for the full writeup, including why that library was dropped in favor of a handrolled `cupy` SVM implementation.
+**GPU requirement (NVIDIA/`cupy`):** compute capability ≥3.0 (essentially any CUDA-capable NVIDIA GPU from the last decade-plus, including older Pascal-class cards). Scoring runs pydreg's own RBF kernel implementation directly on a CuPy device array (`pydreg.backend._build_cupy_predict_fn`), with the RBF step and the SVR-coefficient multiply fused into one CUDA kernel, and enables broad CUDA compatibility and fp32 support. Matrix multiplies run at full float32 precision unless you pass `--tf32` (see the options table below). v0.1.x used cuML, which came with significant GPU restrictions (no Pascal support) and no fp32 support — see `docs/OPTIMIZATION.md` for the full writeup, including why that library was dropped in favor of a handrolled `cupy` SVM implementation.
 
-**GPU requirement (Apple Silicon/`mlx`):** any Apple Silicon Mac (M1 or later) with a working Metal GPU. Scoring runs the same RBF kernel formula directly on an MLX device array (`pydreg.backend._build_mlx_predict_fn`); see `docs/OPTIMIZATION.md` for the full writeup and real-hardware benchmark numbers.
+**GPU requirement (Apple Silicon/`mlx`):** any Apple Silicon Mac (M1 or later) with a working Metal GPU. Scoring runs the same RBF kernel formula directly on an MLX device array (`pydreg.backend._build_mlx_predict_fn`), using the same fused design as a Metal kernel. On M5-class GPUs, pydreg turns off MLX's default TF32 matmuls so scores stay faithful to real dREG (`--tf32` turns them back on). See `docs/OPTIMIZATION.md` for the full writeup and real-hardware benchmark numbers.
 
 Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/pydreg`](https://huggingface.co/adamyhe/pydreg) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub`.
 

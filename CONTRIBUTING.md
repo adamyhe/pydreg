@@ -19,7 +19,7 @@ rather than a failure.
 uv run pytest tests/ -q
 ```
 
-The suite (40 tests as of this writing) covers each module in isolation
+The suite (130 tests as of this writing) covers each module in isolation
 plus a full synthetic end-to-end pipeline run. Model-dependent tests are
 skipped (not failed) if the Hugging Face repo hosting the pretrained
 weights is unreachable.
