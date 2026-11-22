@@ -484,18 +484,37 @@ def test_mlx_gpu_available_uses_mlx(monkeypatch):
     assert backend._mlx_gpu_available()
 
 
+class _FakeMetalKernel:
+    # Stand-in for mx.fast.metal_kernel compiling
+    # backend._RBF_GEMV_METAL_SRC: applies the same semantics in NumPy
+    # (out[row] = sum_j coefs_j * exp(-gamma * (sq_x[row] + sq_sv_j -
+    # 2*cross[row, j]))), taking inputs in the order input_names declares.
+    # Like _FakeRawKernel, this checks _build_mlx_predict_fn's wiring
+    # (input order, chunking, grid/threadgroup, gamma's dtype); the Metal
+    # source itself is checked by
+    # test_mlx_fused_kernel_matches_reference_on_real_gpu.
+    def __init__(self, name, input_names, output_names, source, **kwargs):
+        assert input_names == ["cross", "sq_x", "sq_sv", "coefs", "gamma"]
+        assert output_names == ["out"]
+        assert all(f"{n}" in source for n in input_names + output_names)
+
+    def __call__(self, inputs, grid, threadgroup, output_shapes, output_dtypes):
+        cross, sq_x, sq_sv, coefs, gamma = inputs
+        assert gamma.dtype == np.float32 and gamma.shape == (1,)
+        n = cross.shape[0]
+        assert grid == (n * threadgroup[0], 1, 1) and output_shapes == [(n,)]
+        K = np.exp(-gamma[0] * (sq_x[:, None] + sq_sv[None, :] - 2 * cross))
+        return [(K @ coefs).astype(output_dtypes[0])]
+
+
 def _fake_mlx_module():
-    # Unlike cupy's kernel-source-string ElementwiseKernel, mx.compile just
-    # wraps a plain Python function operating on mx arrays -- so, since
     # MLX's array API is (like CuPy's) a deliberate drop-in match for
-    # NumPy's, this fake can reuse real NumPy functions directly and treat
-    # mx.compile as a no-op decorator, with no GPU-specific behavior left
-    # to stand in for.
+    # NumPy's, so this fake reuses real NumPy functions directly; the one
+    # GPU-specific piece, the fused Metal kernel, is _FakeMetalKernel.
     return types.SimpleNamespace(
         array=lambda data, dtype=None: np.asarray(data, dtype=dtype),
         sum=np.sum,
-        exp=np.exp,
-        compile=lambda f: f,
+        fast=types.SimpleNamespace(metal_kernel=_FakeMetalKernel),
         float32=np.float32,
         float64=np.float64,
     )
@@ -541,6 +560,42 @@ def test_build_mlx_predict_fn_chunks_over_support_vectors(monkeypatch):
     y_scaled = predict(X_scaled)
     reference_y_scaled = (model.predict(X_raw) - model.y_center) / model.y_scale
     np.testing.assert_allclose(y_scaled, reference_y_scaled, atol=1e-5)
+
+
+def _real_metal_available():
+    try:
+        import mlx.core as mx
+
+        return mx.metal.is_available()
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _real_metal_available(), reason="needs a real Metal GPU")
+def test_mlx_fused_kernel_matches_reference_on_real_gpu():
+    # The real compiled Metal kernel, not the NumPy stand-in: n_sv not a
+    # multiple of sv_chunk (ragged last chunk), a row shorter than the
+    # threadgroup (last chunk of 235 < 256 threads), and an empty query
+    # batch, against DREGModel.predict's float64 formula.
+    model = object.__new__(DREGModel)
+    rng = np.random.default_rng(4)
+    model.n_features = 40
+    model.n_sv = 1_003
+    model.SV = rng.normal(size=(model.n_sv, model.n_features))
+    model.coefs = rng.normal(size=model.n_sv)
+    model.x_center = np.zeros(model.n_features)
+    model.x_scale = np.ones(model.n_features)
+    model.gamma = 0.01
+    model.rho = 0.1
+    model.y_scale = 1.0
+    model.y_center = 0.0
+    model._sq_sv = np.sum(model.SV**2, axis=1)
+    model._scorer_cache = {}
+
+    predict = backend._build_mlx_predict_fn(model, sv_chunk=256)
+    X = rng.normal(size=(301, model.n_features))
+    np.testing.assert_allclose(predict(X), model.predict(X), rtol=1e-4, atol=1e-4)
+    assert predict(X[:0]).shape == (0,)
 
 
 def test_explicit_mlx_build_scorer_builds_a_working_scorer(monkeypatch):

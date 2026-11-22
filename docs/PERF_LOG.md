@@ -4814,6 +4814,61 @@ argument order and semantics, asserting the scalar dtypes. A new
 CUDA) runs the real compiled kernel against `DREGModel.predict`, with a
 ragged last sv-chunk and an empty query batch. Tests: 113 -> 114.
 
+## 2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a `mx.fast.metal_kernel` (~1.3x scoring)
+
+The cupy entry above guessed the mlx tier still materialized `K`. It did:
+`_build_mlx_predict_fn` wrapped `cross = X @ SV.T`, the RBF glue and
+`K @ coefs` in one `mx.compile`d function, but `mx.compile` fuses
+elementwise ops only, not into a matmul, so `K` was written and then read
+back by a second GEMM. `_RBF_GEMV_METAL_SRC` is the Metal port of
+`_RBF_GEMV_SRC`, run via `mx.fast.metal_kernel`: MLX's own matmul still
+writes `cross`, then one threadgroup (256 threads) per query row strides
+over the support vectors accumulating `coef_j * exp(-gamma*(sq_x + sq_sv_j
+- 2*cross_ij))`, reduced with `simd_sum` within each SIMD group and then
+across groups. Metal has no double, so that in-row reduction is float32
+(the CUDA kernel's is double); cross-chunk accumulation stays float64 on
+the host, as before. `gamma` is a float32 `(1,)` input array, the explicit
+typing role `np.float32` plays for the RawKernel.
+
+**Isolated, real SVR, 4,096 synthetic queries (x_center + x_scale * N(0,1),
+clipped at 0), Apple M4 (10-core GPU, 16 GB), mlx 0.32.0, median of 5:**
+
+| sv_chunk | `X @ SV.T` GEMMs only | fused | previous (`mx.compile`) |
+|---|---|---|---|
+| 8,192 | 822.8 ms | 937.2 ms | 1640.0 ms |
+| 16,384 (default) | 813.3 ms | 908.0 ms | 1156.9-1306.9 ms |
+| 32,768 | 819.5 ms | 913.5 ms | 1433.2 ms |
+| 65,536 | 842.4 ms | 943.8 ms | 1498.0 ms |
+
+(The "previous" column is noisier than the other two across runs; the
+dedicated head-to-head at 16,384 was 1203.9 ms median / 1156.9 ms min
+against 913.5 / 909.1 fused, 1.32x.) The fused kernel sits ~95 ms (~12%)
+above the GEMM-only floor, the same shape as the cupy result, and 16,384
+stays the best default. The GEMMs themselves run at ~2.2 TFLOP/s, about
+half the M4 GPU's fp32 peak; fusing the GEMM in too (simdgroup_matrix
+tiles) would at most save the remaining ~95 ms and would need to match
+MLX's own GEMM, so it was not attempted. Evaluating 8 sv-chunks per host
+sync instead of 1 made no difference (912.8 vs 913.5 ms), so the
+per-chunk host round trip was kept.
+
+Accuracy, max |error| vs a float64 NumPy dual sum on 512 of those rows,
+in y_scaled space: previous 1.20e-3, fused 7.33e-4. Through
+`build_scorer(model, "mlx")` (unscaled output space, 1,024 rows vs
+`DREGModel.predict`): 1.26e-4, well inside `MLX_SMOKE_TEST_ATOL = 1e-3`.
+Packaged scorer, same 4,096 rows: 933.5 ms/call median.
+
+Full-pipeline before/after on a real library: see the 2026-11-21 entry
+(run on an M5, after the TF32 fix below).
+
+Tests: the fake `mlx.core` drops `compile`/`exp` and gains
+`fast.metal_kernel` (`_FakeMetalKernel`, NumPy semantics in `input_names`
+order, asserting gamma's dtype/shape and the grid/threadgroup). New
+`test_mlx_fused_kernel_matches_reference_on_real_gpu` (skipped without
+Metal) runs the compiled kernel against `DREGModel.predict` with a ragged
+last sv-chunk shorter than the threadgroup and an empty batch; it passes
+on the M4. Tests: 114 -> 115 on its branch; it merged after the TF32
+entries below, so on `main` 129 -> 130.
+
 ## 2026-11-19 — fused RBF+GEMV RawKernel re-measured on Pascal (TITAN Xp, CC 6.1): 1.28x, same accuracy gain (diagnostic only, no code change)
 
 Checks the previous entry's kernel on pre-Volta hardware, the compute
@@ -4915,9 +4970,8 @@ unchanged.
 error (mean 4.75e-4) is well below real dREG's own float32 GPU noise
 (2.53e-3 mean), so this was checked end to end rather than assumed. Full
 merged Jurkat_ChROseq runs on the M5 with the fused mlx Metal kernel
-(branch `mlx-fused-rbf-gemv`, not yet on `main`; its PERF_LOG entry is
-"2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a
-`mx.fast.metal_kernel`"), `-p 10 --seed 1`, under `caffeinate`, identical except for
+(the 2026-11-18 (cont.) mlx entry above), `-p 10 --seed 1`, under
+`caffeinate`, identical except for
 the TF32 setting (the TF32-on run with the probe skipped and the
 smoke-test limit raised to 5e-3 in a scratch copy):
 
@@ -5084,6 +5138,75 @@ to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
 89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
 or TF32 GEMMs on the A100) would make extraction the bottleneck. At
 `-p 16` there is a ~5x margin.
+
+## 2026-11-21 — mlx fused kernel: full-pipeline before/after on merged Jurkat ChRO-seq (Apple M5, TF32 off): 1.26x scoring, 1.24x wall clock
+
+The full-pipeline check the 2026-11-18 mlx entry left open. Apple M5
+(10-core, 16 GB), mlx 0.32.0, merged Jurkat_ChROseq (8,153,557
+informative positions), `--backend mlx -p 10 --seed 1`. Both sides carry
+the 2026-11-20 TF32 fix (without it, neither passes the smoke test on
+this machine): "before" is `main` + the fix, "after" adds the fused
+kernel. Run under `caffeinate -ims`, after first, then a 5-minute
+cool-down, then before. An earlier attempt without `caffeinate` was
+discarded: the Mac idle-slept 4 minutes in and cycled through 231
+sleep/wake events, inflating every stage ~1.9x. Its outputs, which sleep
+can't change, are where the agreement numbers below come from; the
+timing rerun reproduced the same peak counts.
+
+| | before | after | |
+|---|---|---|---|
+| informative-position `scorer.predict` | 1816.65s | 1417.69s | 1.28x |
+| gap-filled `scorer.predict` | 31.76s | 26.09s | 1.22x |
+| densified `scorer.predict` | 889.02s | 726.63s | 1.22x |
+| total scoring | 2737.43s | 2170.41s | 1.26x |
+| peak calling | 155.30s | 151.86s | |
+| wall clock | 2940.88s | 2370.51s | 1.24x |
+| max RSS | 6.15 GB | 6.14 GB | |
+| significant peaks | 56,615 | 56,614 | |
+
+Informative scoring works out to 712 ms per 4,096-row chunk after vs
+912 ms before, against 655 / 822 ms measured per call in isolation; the
+difference is the pipeline's own overhead plus sustained-load clocks.
+
+**Agreement.** Peak Jaccard (bedtools, `peak.prob.bed.gz`): after vs
+before 0.999641; after vs real dREG 0.999654; before vs real dREG
+0.999515 (dREG called 56,599). On the 2,596,496 informative positions on
+chr1/17/19/X scored by both runs and by dREG, |after - before| has max
+4.76e-4 and mean 5.5e-5 (float32 noise), and both sit 2.53e-3 mean from
+dREG, which is dREG's own float32 GPU noise. 435 positions were scored
+by only one run (densification follows slightly different broad peaks).
+Within the noise floor per this log's ground rule, and agreement with
+dREG improved, as it did for cupy.
+
+**Peak-calling "regression" was run order.** The first, discarded
+session (TF32 on, before first) had the after run's peak calling 7.9%
+slower per CDF evaluation, with identical work (CDF evals within 0.1%)
+and no peak-calling code changed. Here, with the order reversed and a
+cool-down between runs, the second run (now before) was the slower one:
+155.8 vs 151.8 us per CDF evaluation (2.6%). The slowdown follows run
+order, not the branch: sustained load lowers clocks on this machine.
+Benchmarks here should alternate order and cool down between runs.
+
+## 2026-11-21 (cont.) — mlx chunk sizes re-swept on the M5 (fused kernel, TF32 off): defaults stay (no code change)
+
+The `sv_chunk`/`query_chunk` defaults were tuned on an M4 (2026-08-22,
+re-checked for the fused kernel 2026-11-18). Re-swept on the M5 with the
+fused kernel and TF32 off: the same 16,384 real Jurkat ChRO-seq rows
+scored at every combination, 3 interleaved rounds (each round visits
+every configuration, so thermal drift spreads evenly), median, under
+`caffeinate`. Time per 4,096 rows:
+
+| sv_chunk \ query_chunk | 2,048 | 4,096 | 8,192 |
+|---|---|---|---|
+| 8,192 | 726.1 ms | 694.3 ms | 704.2 ms |
+| 16,384 | 712.9 ms | **685.7 ms** (default) | 719.7 ms |
+| 32,768 | 694.9 ms | 685.6 ms | 700.5 ms |
+| 65,536 | 703.8 ms | 681.9 ms | 729.1 ms |
+
+Everything is within 6% and the best cell is 0.6% faster than the
+default, inside run-to-run noise. `query_chunk=4,096` is the best column
+at every `sv_chunk`; larger `sv_chunk` only raises memory. Defaults
+unchanged.
 
 ## 2026-11-22 — cupy `--tf32` on real L40S and A100: 2.99x per chunk on the A100 with the fused kernel, 0.9962 peak Jaccard vs dREG; the TF32 setting is now applied per call
 
