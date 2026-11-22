@@ -264,6 +264,38 @@ an Apple M4 (1.16s vs 7.06s per call, warm/post-compile, re-measured after
 the NumPy tier's own numba-fusion speedup). See `docs/PERF_LOG.md`'s
 2026-08-10 entry.
 
+**TF32 is off unless asked for (`--tf32`).** MLX runs float32 matmuls at TF32 input precision
+by default on GPUs with the hardware for it (the Apple M5's neural
+accelerators; not the M4). On an M5 that made scores up to ~2.6e-3 off
+the float64 reference, dropped peak agreement with real dREG from 0.9997
+to 0.9953 Jaccard on Jurkat ChRO-seq (peak boundaries shift), and failed
+the smoke test on every real run, so `_build_mlx_predict_fn` sets
+`MLX_ENABLE_TF32=0` before the tier's first matmul and checks that it
+took effect. Error drops to ~3e-4, at ~1.5x the per-call time on the M5
+(822 ms vs 552 ms; the NumPy tier is 5,059 ms). MLX reads the variable
+once per process, so a script that ran mlx matmuls before building the
+scorer must set `MLX_ENABLE_TF32` itself.
+
+`--tf32` (`build_scorer(tf32=True)`, `pipeline.run(tf32=True)`) opts back
+in, for both GPU tiers: mlx via that variable, cupy via
+`cupy._core.set_compute_type` (cuBLAS `CUBLAS_COMPUTE_32F_FAST_TF32`,
+compute capability 8.0+ only; CuPy falls back to FP32 on older cards).
+The flag wins over `CUPY_TF32`/`MLX_ENABLE_TF32` in both directions.
+When TF32 is actually in effect the smoke test uses
+`TF32_SMOKE_TEST_ATOL = 5e-3` (measured worst case: 2.6e-3 on the M5,
+1.84e-3 on CUDA). On real CUDA hardware, with the fused RBF+GEMV kernel,
+TF32 sped up the `X @ SV.T` GEMM 4.9x on an A100 and 2.4x on an L40S. That
+is 2.99x and 1.43x per scoring chunk, and 1.48x and 1.25x end to end on
+Jurkat_ChROseq_1. Peak agreement with real dREG dropped from 0.99976 to
+0.99620 Jaccard on both cards, and scores moved by up to 2.2e-3. Nearly all
+of that error comes from TF32 rounding inside `X @ SV.T`, where
+`sq_x + sq_sv - 2*cross` loses most of its significant digits. There is no
+gain on Pascal/Volta/Turing, which have no TF32. cupy's compute type is
+process-wide, so each cupy scorer applies its own setting around every
+predict call and restores the previous one: float32 and TF32 scorers can
+share a process. See `docs/PERF_LOG.md`'s 2026-11-20 and 2026-11-22
+entries.
+
 ## Batching
 
 Each backend gets its own default query-chunk size

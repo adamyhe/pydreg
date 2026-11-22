@@ -4749,6 +4749,9 @@ mantissa. That's a fidelity question, not a scheduling one.
 **Update (2026-11-21):** the deciding measurement has now been taken on a
 real A100 node. Extraction is ~7x faster than predict and the GPU stays
 ~95% busy, so neither branch above applies. See the 2026-11-21 entry.
+Also, the "needs re-measuring under figwig" above was already out of
+date: the 2026-10-04 entry re-measured cross-cluster threaded extraction
+under figwig and rejected it (+1.2 GiB RSS for 16 concurrent clusters).
 
 ## 2026-11-18 (cont.) — cupy tier: RBF + GEMV fused into one RawKernel, `K` never materialized (~1.2x scoring, closer to the float64 reference)
 
@@ -4853,6 +4856,142 @@ So the RawKernel compiles and is correct on CC 6.1.
 Not measured: the full pipeline on this host, and the second card in the
 machine (TITAN X Pascal, the same GP102 chip).
 
+## 2026-11-20 — mlx tier: MLX's default TF32 matmuls on the Apple M5 broke fidelity; switched off (~1.5x slower scoring on M5, fixes a crash)
+
+**Symptom.** On an Apple M5 (10-core, 16 GB, mlx 0.32.0), every real run
+with `--backend mlx` (or `auto`, which picks mlx on Apple Silicon) failed
+`_wrap_sklearn_like`'s first-batch smoke test about 4 s into scoring:
+max_abs_diff 1.60e-3 against `MLX_SMOKE_TEST_ATOL = 1e-3`, on merged
+Jurkat ChRO-seq. The pipeline has no fallback at that point, so the run
+crashed. Same on current `main` and on the fused-kernel branch (1.62e-3),
+so it predates that kernel.
+
+**Cause: TF32, not float32.** The `X @ SV.T` product alone (1,024 real
+queries x 16,384 SVs, |cross| up to 287) had max error 2.1e-1 vs float64
+on MLX, against 3.0e-4 for NumPy float32: about a 10-bit mantissa. MLX
+reads `MLX_ENABLE_TF32` (default on; `mlx/utils.h`'s `enable_tf32()`) and
+on the M5 dispatches float32 GEMMs to its neural-accelerator ("NAX")
+kernels at TF32 input precision. The M4 has no such kernels, which is why
+none of the earlier M4 measurements saw it. Synthetic 4096x16384x360
+GEMM on the M5:
+
+| `MLX_ENABLE_TF32` | max err vs f64 | time | |
+|---|---|---|---|
+| unset (default on) | 9.4e-2 | 8.4 ms | 5.8 TFLOP/s |
+| `0` | 1.1e-4 | 15.7 ms | 3.1 TFLOP/s |
+| (NumPy float32) | 9.7e-5 | | |
+
+Through the scorer, on 16,384 real Jurkat ChRO-seq positions (the first
+4,096, which the smoke test samples, plus 12,288 random), score error vs
+the float64 reference:
+
+| | max | p99 | mean | > 1e-3 |
+|---|---|---|---|---|
+| TF32 on | 2.59e-3 | 1.65e-3 | 4.75e-4 | 10.1% |
+| TF32 off | 2.94e-4 | 1.61e-4 | 4.71e-5 | 0% |
+
+This is the same fidelity question the 2026-11-18 entry declined for the
+cupy tier (`CUPY_TF32=1`): the expanded-form distance cancels too badly
+at a 10-bit mantissa. Loosening the tolerance would have hidden a 10x
+precision loss, so the fix is to turn TF32 off, not to raise the bar.
+
+**Fix.** `backend._disable_mlx_tf32()`, called at the top of
+`_build_mlx_predict_fn`, does `os.environ.setdefault("MLX_ENABLE_TF32",
+"0")` (an explicit user setting wins) and then verifies with a (32, 360,
+32) matmul of `1 + 2**-12` values, whose exact answer TF32 can't
+represent. MLX caches the variable at the process's first float32 matmul,
+so if mlx already ran one with TF32 on (or the user forced it), the
+probe raises `BackendUnavailable` naming `MLX_ENABLE_TF32=0` instead of
+letting the smoke test fail unexplained. Probe sizing measured on the M5:
+(1, 360, 8) did not take the TF32 path, (8, 360, 8) and up did.
+
+**Cost, per 4,096-row call on the M5 (real rows, warm, median of 5):**
+822.5 ms with TF32 off vs 551.7 ms with it on (1.49x slower). The NumPy
+tier on the same rows at 10 threads is 5,058.6 ms, so mlx stays 6.2x
+ahead and remains the right auto choice. `MLX_SMOKE_TEST_ATOL` is
+unchanged.
+
+**Does the score error actually move peaks? Yes.** Per position, TF32's
+error (mean 4.75e-4) is well below real dREG's own float32 GPU noise
+(2.53e-3 mean), so this was checked end to end rather than assumed. Full
+merged Jurkat_ChROseq runs on the M5 with the fused mlx Metal kernel
+(branch `mlx-fused-rbf-gemv`, not yet on `main`; its PERF_LOG entry is
+"2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a
+`mx.fast.metal_kernel`"), `-p 10 --seed 1`, under `caffeinate`, identical except for
+the TF32 setting (the TF32-on run with the probe skipped and the
+smoke-test limit raised to 5e-3 in a scratch copy):
+
+| | TF32 on | TF32 off |
+|---|---|---|
+| peak Jaccard vs real dREG | 0.995315 | 0.999654 |
+| significant peaks (dREG: 56,599) | 56,547 | 56,614 |
+| peaks overlapping a dREG peak | 56,584 | 56,600 |
+| informative scores < 0 | 3,764,158 | 3,736,429 |
+| peak score cutoff (`min_score`) | 0.0748 | 0.0746 |
+| total `scorer.predict` | 1294.8s | 2170.4s |
+| wall clock | 1506.7s | 2370.5s |
+
+TF32 on vs off: Jaccard 0.995278. On chr1/17/19/X, 23,544 informative
+positions change sign. Disagreement with dREG (1 - Jaccard) grows ~13x,
+to below the worst of the 12 validated libraries (0.997723). Nearly
+every peak still overlaps a dREG peak, so the loss is in peak
+boundaries: scores near zero cross sign, which shifts the noise estimate
+and the score cutoff, and with them where peaks start and end. An
+earlier TF32-on run (main's unfused kernel) gave the same signature
+(56,548 significant, 3,764,030 negative). TF32 stays off; on the M5 that
+costs ~1.57x wall clock.
+
+Tests: the fake-mlx fixture now records `MLX_ENABLE_TF32` so the env is
+restored; new tests cover the env default and an explicit value, the
+probe raising (and `build_scorer` surfacing it) when the fake rounds to
+TF32, and, on a real Metal GPU, a fresh subprocess getting full-float32
+GEMM accuracy. Tests: 114 -> 117.
+
+## 2026-11-20 (cont.) — one `--tf32` flag for both GPU tiers (opt-in; defaults unchanged)
+
+Follows the TF32 entry above: rather than an mlx-only switch, TF32 is one
+option across the GPU tiers, `--tf32` / `pipeline.run(tf32=)` /
+`build_scorer(tf32=)`, off by default. Default output is unchanged (the
+default path is exactly the previous entry's TF32-off path).
+
+- **mlx**: `_configure_mlx_tf32(enabled)` (was `_disable_mlx_tf32`)
+  assigns `MLX_ENABLE_TF32` from the flag, overriding the environment,
+  then runs the same probe. Wanted off but on: `BackendUnavailable`, as
+  before. Wanted on but off (no TF32 hardware, e.g. an M4, or locked off
+  by an earlier matmul): info log, keeps going. MLX caches the variable
+  per process, so the first mlx scorer built in a process decides it.
+- **cupy**: `_configure_cupy_tf32(enabled)` calls
+  `cupy._core.set_compute_type(float32, COMPUTE_TYPE_TF32 or _DEFAULT)`.
+  Read from CuPy 14.1.1's source (`_core/_routines_linalg.pyx`): the type
+  is checked on every matmul and maps TF32 to
+  `CUBLAS_COMPUTE_32F_FAST_TF32`, so unlike MLX it can change at any time.
+  `CUPY_TF32=1` only sets the initial value; the explicit call makes the
+  flag win. On compute capability < 8.0 CuPy itself falls back to DEFAULT
+  with a warning; pydreg silences that and logs its own. Not run on CUDA
+  hardware yet.
+- **Smoke test**: `TF32_SMOKE_TEST_ATOL = 5e-3` applies only when TF32 is
+  actually in effect (2x the M5's measured worst case of 2.59e-3 over
+  16,384 real rows). Scorers are cached per `(backend, tf32)`.
+- **CPU tiers**: `tf32=True` logs a warning and is ignored.
+- **Where it's applied**: both configure functions run inside
+  `_build_cupy_predict_fn` / `_build_mlx_predict_fn` (`tf32=False` by
+  default), which report the result as the returned function's `.tf32`,
+  rather than in `build_scorer`. A first version configured it in
+  `build_scorer`, and a test calling `_build_mlx_predict_fn` directly then
+  silently got MLX's default TF32 on the M5; any direct caller would
+  have.
+
+Checked through `build_scorer` on the M5, real Jurkat ChRO-seq rows, one
+process each: `tf32=False` 871 ms / 4,096 rows, max |err| 2.84e-4;
+`tf32=True` 565 ms, 2.59e-3 (passes the TF32 tolerance).
+
+Tests: mlx env/probe tests reworked for the flag (both directions, flag
+overriding the env); new tests for per-`tf32` scorer caching, the CPU
+warning, cupy's compute type following the flag (with a fake
+`cupy._core` that mimics the compute-capability fallback), the looser
+tolerance applying only when TF32 is in effect, and the CLI pass-through;
+the real-Metal test is parametrized over both settings. Tests: 117 -> 126.
+
 ## 2026-11-21 — fused RBF+GEMV kernel on real L40S and A100: 1.29x / 1.05x per chunk; the A100 utilization question resolved, it saturates (diagnostic only, no code change)
 
 Measured on Stanford's Sherlock cluster: an NVIDIA L40S (48 GB, CC 8.9) on
@@ -4945,3 +5084,90 @@ to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
 89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
 or TF32 GEMMs on the A100) would make extraction the bottleneck. At
 `-p 16` there is a ~5x margin.
+
+## 2026-11-22 — cupy `--tf32` on real L40S and A100: 2.99x per chunk on the A100 with the fused kernel, 0.9962 peak Jaccard vs dREG; the TF32 setting is now applied per call
+
+First CUDA measurements of the cupy side of `--tf32` (the 2026-11-20
+(cont.) entry left it unmeasured). Same Sherlock setup as the 2026-11-21
+entry: an L40S on a Xeon Gold 6426Y host and an A100-SXM4-80GB on an EPYC
+7763 host, 16 cores, the locked environment in a Debian 12 container,
+Jurkat_ChROseq_1. fp32 and TF32 scorers ran in separate processes on the
+same 200,704 real positions (the first ones after chr1), and full runs
+used `-p 16 --seed 1`. Measured twice: on this branch before it merged
+`main` (c028150, the old ElementwiseKernel + GEMV path), and after (the
+fused RBF+GEMV RawKernel). Scripts were scratch-only (not committed).
+
+**Per 4096-query chunk, with the fused kernel (median of 49):**
+
+| | L40S fp32 | L40S TF32 | A100 fp32 | A100 TF32 |
+|---|---|---|---|---|
+| wall per chunk | 67.3 ms | 47.0 ms (1.43x) | 115.5 ms | 38.7 ms (2.99x) |
+| sgemm `X @ SV.T` alone | 53.8 ms | 22.3 ms (2.41x) | 94.5 ms | 19.2 ms (4.91x) |
+| everything else | 13.5 ms | 24.7 ms | 21.0 ms | 19.5 ms |
+| max \|error\| vs float64 (4,096 positions) | 3.51e-5 | 1.84e-3 | 3.51e-5 | 1.84e-3 |
+
+Before the merge, on the old unfused path, TF32 was 1.17x per chunk on the
+L40S (93.5 -> 80.1 ms) and 2.51x on the A100 (119.8 -> 47.7 ms), for the
+same ~2.4x and ~4.9x sgemm speedups. The fused kernel makes the sgemm a
+larger share of each chunk, so TF32 now buys more. Under TF32 the
+non-sgemm part grows by 11 ms on the L40S, with no float32 GEMV left for
+TF32 to touch, and it does not grow on the A100. That is unexplained (not
+profiled). On the old path it grew by 18 ms on the L40S as well.
+
+**Fidelity.** Errors are identical on both cards. Over all 200,704
+positions, |TF32 - fp32| has max 2.16e-3, p99 1.20e-3 and mean 3.9e-4.
+3.6% of positions differ by more than 1e-3, and none by more than 5e-3,
+so `TF32_SMOKE_TEST_ATOL` (5e-3) holds on CUDA where the float32 1e-3
+would not. On the old path the max error was 2.06e-3, barely different:
+almost all of TF32's error comes from rounding inside `X @ SV.T` (the
+`sq_x + sq_sv - 2*cross` cancellation the 2026-11-18 entry warned about),
+not from the old float32 GEMV.
+
+**Full pipeline, with the fused kernel:**
+
+| | L40S fp32 | L40S TF32 | A100 fp32 | A100 TF32 |
+|---|---|---|---|---|
+| total wall clock | 5:19.3 | 4:15.4 (1.25x) | 8:19.3 | 5:36.3 (1.48x) |
+| informative-position extract / predict | 17.7s / 87.3s | 16.9s / 53.9s | 29.8s / 138.9s | 29.5s / 45.1s |
+| significant peaks | 48,171 | 48,190 | 48,171 | 48,190 |
+| peak Jaccard vs real dREG | 0.999764 | 0.996198 | 0.999764 | 0.996198 |
+
+fp32-vs-TF32 peak Jaccard was 0.996295 on both cards. On the old path
+it was 1.15x (L40S) and 1.50x (A100) end to end, with 0.9961 against
+dREG. This A100 run was on a different node (sh03-17n01) from the
+2026-11-21 entry's (sh03-16n09), with the same CPU model, and its
+CPU-only stages ran 15-30% slower. Compare end-to-end times within a
+table, not across entries. Two consequences on the A100 with TF32:
+- **Extraction is close behind the GPU.** Extraction is now within 1.5x
+  of predict at `-p 16` (29.5s vs 45.1s). At the default `--cores 1`
+  (~71s of extraction per the 2026-11-21 entry) it would be the
+  bottleneck.
+- **The CPU stages dominate.** Densifying (79s) and peak calling (162s)
+  take most of the 5:36.
+
+**Bug found and fixed: the TF32 setting leaked between scorers.** cupy's
+float32 compute type is process-wide, and `_configure_cupy_tf32` used to
+set it when a scorer was built. A float32 scorer built before a TF32
+scorer in the same process therefore ran its GEMM at TF32 from then on,
+while still reporting `tf32=False`. On both cards its scores moved by up
+to 1.70e-3 and matched the TF32 scorer's output exactly. A normal
+`pydreg` run builds one scorer and was not affected. Now
+`_configure_cupy_tf32` probes the compute type (CuPy falls back to
+DEFAULT below compute capability 8.0) and restores cupy's setting. Each
+predict call applies its scorer's compute type and restores the previous
+one afterward, which also makes `--tf32` off win over `CUPY_TF32=1`
+without changing it.
+Validated on a real L40S (911b9b1). A float32 scorer's output after a TF32
+scorer is built now differs by 0.0, where it differed by 1.70e-3 before.
+The TF32 scorer still differs from float32 by 1.70e-3, so the check is not
+vacuous, and cupy's own setting stays DEFAULT before and after. TF32
+predict time and error are unchanged by the per-call switch (47.2 ms vs
+47.0 ms per chunk, max error 1.84e-3).
+
+Tests: the fake cupy core now starts at a real default compute type
+(optionally TF32, like `CUPY_TF32=1`), and the flag test checks the type
+the GEMM actually sees rather than the global left after building. Three
+new tests: a float32 scorer built before a TF32 one stays float32 (fake,
+and on a real GPU with bit-identical output), and `CUPY_TF32=1` is
+overridden and then restored. The full suite passed on the L40S (127
+passed, 2 skipped: Metal-only). Tests: 126 -> 129.

@@ -62,6 +62,16 @@ def main(argv=None):
         "specifically; defaults to _build_mlx_predict_fn's own default",
     )
     parser.add_argument(
+        "--tf32",
+        action="store_true",
+        help="let the GPU backends (cupy, mlx) run their main matrix multiply "
+        "at TF32 precision on hardware that has it (NVIDIA compute capability "
+        "8.0+, Apple M5). Faster end to end (~1.48x on an A100, ~1.25x on an "
+        "L40S, ~1.57x on an M5), but peaks agree less closely with real dREG "
+        "(Jaccard ~0.996 vs ~0.9998 on Jurkat ChRO-seq) and results then "
+        "depend on the GPU model. Off by default; ignored on CPU backends",
+    )
+    parser.add_argument(
         "-p",
         "--cores",
         type=int,
@@ -174,6 +184,7 @@ def main(argv=None):
         query_chunk=args.query_chunk,
         cupy_sv_chunk=args.cupy_sv_chunk,
         mlx_sv_chunk=args.mlx_sv_chunk,
+        tf32=args.tf32,
         cores=args.cores,
         peak_calling_block_width=args.peak_calling_block_width,
         pmv_laplace_cdf_maxpts=args.pmv_laplace_cdf_maxpts,

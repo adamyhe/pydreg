@@ -1,4 +1,7 @@
 import logging
+import os
+import re
+import subprocess
 import sys
 import types
 
@@ -142,6 +145,27 @@ class _FakeRawKernel:
         y += K @ coefs
 
 
+def _fake_cupy_core(supports_tf32=True, initial_tf32=False):
+    """Stands in for cupy._core's float32 compute-type switch: same
+    constants and set/get pair, and the same fallback to DEFAULT that real
+    CuPy applies on GPUs below compute capability 8.0. initial_tf32 starts
+    it at TF32, as CuPy does when CUPY_TF32=1 is set."""
+    linalg = types.SimpleNamespace(COMPUTE_TYPE_DEFAULT=1, COMPUTE_TYPE_TF32=7)
+    state = {"float32": 7 if initial_tf32 and supports_tf32 else 1}
+
+    def set_compute_type(dtype, compute_type):
+        assert np.dtype(dtype) == np.float32
+        if compute_type == linalg.COMPUTE_TYPE_TF32 and not supports_tf32:
+            compute_type = linalg.COMPUTE_TYPE_DEFAULT
+        state["float32"] = compute_type
+
+    return types.SimpleNamespace(
+        _routines_linalg=linalg,
+        set_compute_type=set_compute_type,
+        get_compute_type=lambda dtype: state["float32"],
+    )
+
+
 def _fake_cupy_module():
     # A real GPU isn't available here -- this exercises
     # _build_cupy_predict_fn's own wiring/formula (chunking, kernel math)
@@ -157,6 +181,7 @@ def _fake_cupy_module():
         RawKernel=_FakeRawKernel,
         float32=np.float32,
         float64=np.float64,
+        _core=_fake_cupy_core(),
     )
 
 
@@ -227,6 +252,37 @@ def test_cupy_fused_kernel_matches_reference_on_real_gpu():
     assert predict(X[:0]).shape == (0,)
 
 
+@pytest.mark.skipif(not _real_cuda_available(), reason="needs a real CUDA GPU")
+def test_cupy_float32_scorer_unaffected_by_a_tf32_scorer_on_real_gpu():
+    # The real cuBLAS path: a float32 predict function gives bit-identical
+    # output before and after a TF32 one is built and used in the same
+    # process. On compute capability 8.0+ the TF32 output must also differ,
+    # or this test would pass vacuously.
+    model = object.__new__(DREGModel)
+    rng = np.random.default_rng(9)
+    model.n_features = 360
+    model.n_sv = 4_096
+    model.SV = rng.normal(size=(model.n_sv, model.n_features))
+    model.coefs = rng.normal(size=model.n_sv)
+    model.x_center = np.zeros(model.n_features)
+    model.x_scale = np.ones(model.n_features)
+    model.gamma = 1.0 / model.n_features
+    model.rho = 0.1
+    model.y_scale = 1.0
+    model.y_center = 0.0
+    model._sq_sv = np.sum(model.SV**2, axis=1)
+    model._scorer_cache = {}
+    X = rng.normal(size=(512, model.n_features))
+
+    plain = backend._build_cupy_predict_fn(model)
+    before = plain(X)
+    asked = backend._build_cupy_predict_fn(model, tf32=True)
+    tf32_out = asked(X)
+    np.testing.assert_array_equal(plain(X), before)
+    if asked.tf32:
+        assert np.max(np.abs(tf32_out - before)) > 0
+
+
 def test_explicit_cupy_build_scorer_builds_a_working_scorer(monkeypatch):
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
     model = _tiny_svr_model()
@@ -252,6 +308,7 @@ def _cupy_build_with_offset(offset):
         def offset_predict(X_scaled):
             return real_predict(X_scaled) + offset
 
+        offset_predict.tf32 = real_predict.tf32
         return offset_predict
 
     return build
@@ -307,8 +364,104 @@ def test_explicit_cupy_build_scorer_threads_cupy_sv_chunk_through(monkeypatch):
     scorer = backend.build_scorer(model, "cupy", cupy_sv_chunk=2)
     X_raw = np.random.default_rng(4).normal(size=(3, model.n_features))
 
-    assert seen_kwargs == {"sv_chunk": 2}
+    assert seen_kwargs == {"sv_chunk": 2, "tf32": False}
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
+
+
+def _record_gemm_compute_types(fake):
+    """Records cupy's float32 compute type each time the fused path's
+    `cross = ascontiguousarray(X @ SV.T)` runs, i.e. what the GEMM saw."""
+    seen = []
+    contiguous = fake.ascontiguousarray
+
+    def recording(a):
+        seen.append(fake._core.get_compute_type(np.float32))
+        return contiguous(a)
+
+    fake.ascontiguousarray = recording
+    return seen
+
+
+def test_cupy_tf32_defaults_off_and_follows_the_flag(monkeypatch):
+    fake = _fake_cupy_module()
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
+    model = _tiny_svr_model()
+    X_raw = np.random.default_rng(6).normal(size=(4, model.n_features))
+
+    plain = backend.build_scorer(model, "cupy")
+    assert plain.tf32 is False
+    plain.predict(X_raw)
+    assert set(seen) == {1}  # DEFAULT
+
+    seen.clear()
+    asked = backend.build_scorer(model, "cupy", tf32=True)
+    assert asked.tf32 is True
+    asked.predict(X_raw)
+    assert set(seen) == {7}  # TF32
+    # Neither building nor predicting leaves cupy's own setting changed.
+    assert fake._core.get_compute_type(np.float32) == 1
+
+
+def test_cupy_float32_scorer_stays_float32_after_a_tf32_scorer_is_built(monkeypatch):
+    # cupy's compute type is process-wide. Setting it at build time let a
+    # float32 scorer silently run at TF32 once a TF32 scorer existed.
+    fake = _fake_cupy_module()
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
+    model = _tiny_svr_model()
+    X_raw = np.random.default_rng(7).normal(size=(4, model.n_features))
+
+    plain = backend.build_scorer(model, "cupy")
+    asked = backend.build_scorer(model, "cupy", tf32=True)
+    seen.clear()
+    plain.predict(X_raw)
+    assert set(seen) == {1}
+    seen.clear()
+    asked.predict(X_raw)
+    assert set(seen) == {7}
+    seen.clear()
+    plain.predict(X_raw)
+    assert set(seen) == {1}
+
+
+def test_cupy_tf32_flag_overrides_cupy_tf32_env_and_restores_it(monkeypatch):
+    # CUPY_TF32=1 makes CuPy start at TF32; --tf32 off must still run the
+    # GEMM in full float32, and leave CuPy's own setting as it was.
+    fake = _fake_cupy_module()
+    fake._core = _fake_cupy_core(initial_tf32=True)
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+    seen = _record_gemm_compute_types(fake)
+    model = _tiny_svr_model()
+
+    backend.build_scorer(model, "cupy").predict(
+        np.random.default_rng(8).normal(size=(4, model.n_features))
+    )
+    assert set(seen) == {1}
+    assert fake._core.get_compute_type(np.float32) == 7
+
+
+def test_cupy_tf32_uses_the_looser_smoke_tolerance_only_when_in_effect(monkeypatch):
+    # 1.5e-3 in y_scaled space is 3e-3 in score space (y_scale=2): past the
+    # float32 tolerance (1e-3), inside TF32_SMOKE_TEST_ATOL (5e-3).
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_module())
+    monkeypatch.setattr(backend, "_build_cupy_predict_fn", _cupy_build_with_offset(1.5e-3))
+    X_raw = np.random.default_rng(5).normal(size=(4, 3))
+
+    backend.build_scorer(_tiny_svr_model(), "cupy", tf32=True).predict(X_raw)
+    with pytest.raises(backend.BackendUnavailable):
+        backend.build_scorer(_tiny_svr_model(), "cupy").predict(X_raw)
+
+
+def test_cupy_tf32_warns_and_stays_off_below_compute_capability_8(monkeypatch, caplog):
+    fake = _fake_cupy_module()
+    fake._core = _fake_cupy_core(supports_tf32=False)
+    monkeypatch.setitem(sys.modules, "cupy", fake)
+
+    with caplog.at_level(logging.WARNING, logger="pydreg.backend"):
+        scorer = backend.build_scorer(_tiny_svr_model(), "cupy", tf32=True)
+    assert scorer.tf32 is False
+    assert "compute capability 8.0+" in caplog.text
 
 
 def test_explicit_cupy_build_scorer_raises_when_not_installed(monkeypatch):
@@ -349,6 +502,9 @@ def _fake_mlx_module():
 
 
 def _install_fake_mlx(monkeypatch):
+    # _configure_mlx_tf32 sets MLX_ENABLE_TF32 in os.environ; recording
+    # it here makes monkeypatch restore the real environment afterwards.
+    monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
     fake_core = _fake_mlx_module()
     monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_core))
     monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
@@ -412,6 +568,7 @@ def _mlx_build_with_offset(offset):
         def offset_predict(X_scaled):
             return real_predict(X_scaled) + offset
 
+        offset_predict.tf32 = real_predict.tf32
         return offset_predict
 
     return build
@@ -468,7 +625,7 @@ def test_explicit_mlx_build_scorer_threads_mlx_sv_chunk_through(monkeypatch):
     scorer = backend.build_scorer(model, "mlx", mlx_sv_chunk=2)
     X_raw = np.random.default_rng(4).normal(size=(3, model.n_features))
 
-    assert seen_kwargs == {"sv_chunk": 2}
+    assert seen_kwargs == {"sv_chunk": 2, "tf32": False}
     np.testing.assert_allclose(scorer.predict(X_raw), model.predict(X_raw), atol=1e-5)
 
 
@@ -487,6 +644,104 @@ def test_explicit_mlx_build_scorer_raises_when_not_installed(monkeypatch):
         assert "mlx is not installed" in str(e)
     else:
         raise AssertionError("expected BackendUnavailable")
+
+
+def test_configure_mlx_tf32_sets_env_from_the_flag_either_way(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    assert backend._configure_mlx_tf32(False) is False
+    assert os.environ["MLX_ENABLE_TF32"] == "0"
+
+    # The flag wins over a value already in the environment.
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    backend._configure_mlx_tf32(False)
+    assert os.environ["MLX_ENABLE_TF32"] == "0"
+
+    # Fake matmuls are full precision, i.e. a device without TF32 (an M4):
+    # asking for it just reports it isn't in effect.
+    assert backend._configure_mlx_tf32(True) is False
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
+def _round_to_tf32(x):
+    """Rounds float32 values to TF32's 10-bit mantissa (truncation)."""
+    bits = np.asarray(x, dtype=np.float32).view(np.uint32) & np.uint32(0xFFFFE000)
+    return bits.view(np.float32)
+
+
+def _install_tf32_fake_mlx(monkeypatch):
+    # Stands in for MLX doing TF32 matmuls (an M5, or TF32 already locked on
+    # earlier in the process): arrays come back TF32-rounded, so the probe's
+    # matmul is off.
+    fake_core = _install_fake_mlx(monkeypatch)
+    fake_core.array = lambda data, dtype=None: _round_to_tf32(np.asarray(data, dtype=np.float32))
+    return fake_core
+
+
+def test_configure_mlx_tf32_raises_when_tf32_is_on_but_not_wanted(monkeypatch):
+    _install_tf32_fake_mlx(monkeypatch)
+
+    with pytest.raises(backend.BackendUnavailable, match="MLX_ENABLE_TF32=0"):
+        backend._configure_mlx_tf32(False)
+    with pytest.raises(backend.BackendUnavailable, match="TF32"):
+        backend.build_scorer(_tiny_svr_model(), "mlx")
+
+
+def test_configure_mlx_tf32_reports_tf32_in_effect_when_wanted(monkeypatch):
+    _install_tf32_fake_mlx(monkeypatch)
+    assert backend._configure_mlx_tf32(True) is True
+
+
+def test_build_scorer_caches_tf32_and_float32_scorers_separately(monkeypatch):
+    _install_fake_mlx(monkeypatch)
+    model = _tiny_svr_model()
+
+    plain = backend.build_scorer(model, "mlx")
+    asked = backend.build_scorer(model, "mlx", tf32=True)
+
+    assert plain is not asked
+    assert backend.build_scorer(model, "mlx") is plain
+    assert plain.tf32 is False
+    assert asked.tf32 is False  # fake device has no TF32
+
+
+def test_tf32_is_ignored_with_a_warning_on_cpu_backends(caplog):
+    model = _tiny_svr_model()
+    with caplog.at_level(logging.WARNING, logger="pydreg.backend"):
+        scorer = backend.build_scorer(model, "numpy", tf32=True)
+    assert scorer.tf32 is False
+    assert "--tf32 only affects the cupy and mlx backends" in caplog.text
+
+
+@pytest.mark.skipif(
+    not (backend._mlx_installed() and backend._mlx_gpu_available()),
+    reason="needs mlx with a real Metal GPU",
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_configure_mlx_tf32_matches_real_gemm_precision(enabled):
+    # Subprocess: MLX caches MLX_ENABLE_TF32 at the process's first matmul,
+    # so each setting needs a process where mlx hasn't run one yet.
+    code = (
+        "import numpy as np, mlx.core as mx\n"
+        "from pydreg import backend\n"
+        f"in_effect = backend._configure_mlx_tf32({enabled})\n"
+        "rng = np.random.default_rng(0)\n"
+        "a = rng.standard_normal((1024, 360)).astype(np.float32)\n"
+        "b = rng.standard_normal((2048, 360)).astype(np.float32)\n"
+        "ref = a.astype(np.float64) @ b.T.astype(np.float64)\n"
+        "got = np.array(mx.array(a) @ mx.array(b).T)\n"
+        "print(in_effect, np.abs(got - ref).max())\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "MLX_ENABLE_TF32"}
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    in_effect, err = out.stdout.split()
+    # Full float32 is ~1e-4 here; TF32 is ~1e-1 (measured on an M5). An M4
+    # has no TF32, so enabled=True legitimately reports False there.
+    if in_effect == "True":
+        assert enabled and float(err) > 1e-2
+    else:
+        assert float(err) < 1e-3
 
 
 class TinyDREGModel:

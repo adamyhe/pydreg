@@ -132,6 +132,128 @@ CUPY_SMOKE_TEST_ATOL = 1e-3
 MLX_SMOKE_TEST_ATOL = CUPY_SMOKE_TEST_ATOL
 
 
+# Smoke-test atol for either GPU tier when TF32 is actually in effect
+# (`--tf32`, build_scorer(tf32=True)). Measured on a real Apple M5 with
+# MLX's TF32 matmuls: max |error| 2.59e-3 over 16,384 real Jurkat ChRO-seq
+# positions, 1.6e-3 on the smoke test's own 8-row sample. The cupy tier's
+# TF32 (cuBLAS CUBLAS_COMPUTE_32F_FAST_TF32) keeps the same 10-bit
+# mantissa on the same formula, so the same bound is used there. Measured
+# on a real L40S and A100 (identical on both): max |error| 1.84e-3 over
+# 200,704 real Jurkat ChRO-seq positions with the fused RBF+GEMV kernel.
+TF32_SMOKE_TEST_ATOL = 5e-3
+
+
+def _configure_mlx_tf32(enabled):
+    """Sets whether MLX's float32 GEMMs run at TF32 input precision, checks
+    what actually took effect, and returns that (True = TF32 in effect).
+    Called before the mlx tier's first matmul.
+
+    MLX runs float32 matmuls with TF32-class inputs (10-bit mantissa) by
+    default on GPUs that have the hardware for it -- the Apple M5's neural
+    accelerators ("NAX" kernels), not the M4. pydreg turns that off unless
+    asked (`--tf32`): on a real M5 (mlx 0.32.0) TF32 put scores on 16,384
+    real Jurkat ChRO-seq positions up to 2.6e-3 off the float64 reference,
+    failed the 1e-3 smoke test on every real run, and dropped full-run peak
+    agreement with real dREG from 0.9997 to 0.9953 Jaccard. With TF32 off
+    the GEMM is ~1.9x slower on the M5 (~1.57x end to end) but matches
+    NumPy float32. See docs/PERF_LOG.md's 2026-11-20 entry.
+
+    MLX reads MLX_ENABLE_TF32 once, at the first float32 matmul in the
+    process, and caches it (mlx/utils.h's enable_tf32()). The flag is the
+    source of truth, so this assigns the variable either way (overriding a
+    value already in the environment), then measures with a small matmul
+    whose exact answer TF32 can't represent. If TF32 was wanted off but is
+    on (mlx already ran a TF32 matmul earlier in this process), raise
+    BackendUnavailable with the fix rather than letting the smoke test fail
+    unexplained. If it was wanted on but isn't (no TF32 hardware, e.g. an
+    M4, or an earlier full-precision matmul locked it off), that only costs
+    speed, so just log it. A (32, 360, 32) product is large enough to take
+    the TF32 path on an M5 (anything from (8, 360, 8) up did; (1, 360, 8)
+    did not)."""
+    import os
+
+    import mlx.core as mx
+
+    os.environ["MLX_ENABLE_TF32"] = "1" if enabled else "0"
+    k = 360
+    a = np.full((32, k), 1 + 2.0**-12, dtype=np.float32)
+    b = np.ones((32, k), dtype=np.float32)
+    got = np.array(mx.array(a) @ mx.array(b).T, dtype=np.float64)
+    err = float(np.max(np.abs(got - k * (1 + 2.0**-12))))
+    in_effect = err > 1e-3
+    if not enabled and in_effect:
+        raise BackendUnavailable(
+            f"mlx is running float32 matmuls at reduced (TF32) precision "
+            f"(probe error {err:.3g}); set MLX_ENABLE_TF32=0 in the environment "
+            "before starting Python, or pass --tf32 to accept it. MLX reads it "
+            "once, at the first matmul."
+        )
+    if enabled and not in_effect:
+        logger.info(
+            "--tf32 has no effect on this mlx device (no TF32 hardware, or an "
+            "earlier full-precision matmul in this process locked it off)"
+        )
+    return in_effect
+
+
+def _set_cupy_compute_type(compute_type):
+    """Sets cupy's float32 compute type and returns the one that actually
+    took effect. CuPy falls back to DEFAULT, with a warning, on GPUs below
+    compute capability 8.0; the warning is silenced here because callers
+    check the returned value instead."""
+    import warnings
+
+    import cupy
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cupy._core.set_compute_type(np.float32, compute_type)
+    return cupy._core.get_compute_type(np.float32)
+
+
+def _configure_cupy_tf32(enabled):
+    """Returns the float32 compute type a cupy scorer should run its
+    `X @ SV.T` cuBLAS GEMM under, and whether that is TF32. Leaves cupy's
+    own setting as it found it.
+
+    CuPy reads its float32 compute type on every matmul
+    (cupy._core._routines_linalg.get_compute_type): COMPUTE_TYPE_TF32
+    selects CUBLAS_COMPUTE_32F_FAST_TF32, COMPUTE_TYPE_DEFAULT plain FP32.
+    That setting is process-wide, so _build_cupy_predict_fn applies the
+    returned type around each predict call and restores the previous one,
+    rather than setting it once at build time. Setting it once let a
+    float32 scorer silently run at TF32 after a TF32 scorer was built in the
+    same process, while still reporting tf32=False (measured on a real L40S
+    and A100: max score change 1.7e-3, identical to the TF32 scorer's
+    output). Applying it per call also makes the flag win over CuPy's own
+    CUPY_TF32 env var in both directions.
+
+    TF32 is probed here by setting it and reading it back, because CuPy
+    falls back to DEFAULT on GPUs below compute capability 8.0 (Pascal,
+    Volta, Turing), which have no TF32. Off by default for the same fidelity
+    reason as the mlx tier (_configure_mlx_tf32). The GEMM speedup is large
+    on both datacenter and Ada cards: measured 4.9x on an A100 and 2.4x on
+    an L40S, which with the fused RBF+GEMV kernel is 2.99x and 1.43x per
+    scoring chunk, and 1.48x and 1.25x end to end on Jurkat_ChROseq_1. Peak
+    agreement with real dREG drops from 0.99976 to 0.99620 Jaccard on both
+    cards (see docs/PERF_LOG.md's 2026-11-22 entry)."""
+    import cupy
+
+    linalg = cupy._core._routines_linalg
+    previous = cupy._core.get_compute_type(np.float32)
+    wanted = linalg.COMPUTE_TYPE_TF32 if enabled else linalg.COMPUTE_TYPE_DEFAULT
+    try:
+        compute_type = _set_cupy_compute_type(wanted)
+    finally:
+        _set_cupy_compute_type(previous)
+    in_effect = compute_type == linalg.COMPUTE_TYPE_TF32
+    if enabled and not in_effect:
+        logger.warning(
+            "--tf32 has no effect on this GPU (TF32 needs compute capability 8.0+)"
+        )
+    return compute_type, in_effect
+
+
 @functools.lru_cache(maxsize=1)
 def detect_backend():
     """Probes once per process and returns "cupy", "mlx", or "numpy" -- the
@@ -178,11 +300,13 @@ def detect_backend():
 
 class Scorer:
     """Uniform `.predict(X_chunk) -> np.ndarray` wrapper hiding backend
-    differences from callers."""
+    differences from callers. `tf32` records whether TF32 GEMMs are actually
+    in effect (requested and supported), for logging."""
 
-    def __init__(self, backend, predict_fn):
+    def __init__(self, backend, predict_fn, tf32=False):
         self.backend = backend
         self._predict_fn = predict_fn
+        self.tf32 = tf32
 
     def predict(self, X):
         return self._predict_fn(X)
@@ -310,7 +434,7 @@ void pydreg_rbf_gemv(const float* __restrict__ cross,
 """ % _RBF_GEMV_THREADS
 
 
-def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
+def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     """Returns predict_fn(X_scaled) -> y_scaled (both host NumPy arrays --
     matching _wrap_sklearn_like's expected interface, so it composes with
     the same scaling/unscaling wrapper and smoke test as the sklearn tier)
@@ -388,9 +512,16 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     thread block reduces its float32 per-thread partial sums in double and
     adds them into the float64 y_scaled, cheap insurance against summation
     error across the 605,187 support vectors (37 sv-chunks at the default
-    sv_chunk), independent of the float32 GEMM itself."""
+    sv_chunk), independent of the float32 GEMM itself.
+
+    tf32: whether the `X @ SV.T` GEMM runs at TF32. _configure_cupy_tf32
+    picks the compute type once, and each predict call applies it and then
+    restores cupy's previous setting, so scorers built with different tf32
+    values can share a process. Off by default. The returned function's
+    `.tf32` says whether TF32 is in effect."""
     import cupy as cp
 
+    compute_type, tf32_in_effect = _configure_cupy_tf32(tf32)
     SV = cp.asarray(dreg_model.SV, dtype=cp.float32)
     coefs = cp.asarray(dreg_model.coefs, dtype=cp.float32)
     sq_sv = cp.sum(SV**2, axis=1)
@@ -401,6 +532,16 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
     _rbf_gemv = cp.RawKernel(_RBF_GEMV_SRC, "pydreg_rbf_gemv")
 
     def predict(X_scaled):
+        # cupy's compute type is process-wide; apply this scorer's for the
+        # duration of the call only (see _configure_cupy_tf32).
+        previous = cp._core.get_compute_type(np.float32)
+        _set_cupy_compute_type(compute_type)
+        try:
+            return _predict(X_scaled)
+        finally:
+            _set_cupy_compute_type(previous)
+
+    def _predict(X_scaled):
         X = cp.asarray(X_scaled, dtype=cp.float32)
         n = X.shape[0]
         sq_x = cp.sum(X**2, axis=1)
@@ -428,10 +569,11 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384):
         y_scaled -= rho
         return cp.asnumpy(y_scaled)
 
+    predict.tf32 = tf32_in_effect
     return predict
 
 
-def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
+def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     """Apple Silicon counterpart to _build_cupy_predict_fn -- same near-
     verbatim port of DREGModel.predict's chunked RBF dual-sum formula (same
     expanded squared-distance trick, same chunking over support vectors),
@@ -498,9 +640,16 @@ def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
     independent of total unified memory) that a `(query_chunk=4096,
     sv_chunk=605_187)` float32 `cross` buffer (~9.92GB) exceeds. See
     docs/OPTIMIZATION.md and docs/PERF_LOG.md's 2026-08-22 entry for the
-    full sweep."""
+    full sweep.
+
+    tf32: configured first (_configure_mlx_tf32), off by default: MLX turns
+    TF32 on by default on M5-class GPUs, and it costs this formula
+    measurable fidelity. Done here rather than in build_scorer so every
+    caller of this function gets full float32 unless it asks otherwise.
+    The returned function's `.tf32` says whether TF32 is in effect."""
     import mlx.core as mx
 
+    tf32_in_effect = _configure_mlx_tf32(tf32)
     SV = mx.array(dreg_model.SV, dtype=mx.float32)
     coefs = mx.array(dreg_model.coefs, dtype=mx.float32)
     sq_sv = mx.sum(SV**2, axis=1)
@@ -525,10 +674,11 @@ def _build_mlx_predict_fn(dreg_model, sv_chunk=16_384):
         y_scaled -= rho
         return y_scaled
 
+    predict.tf32 = tf32_in_effect
     return predict
 
 
-def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None):
+def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None, tf32=False):
     """Builds (and caches, on `dreg_model._scorer_cache`) a Scorer for the
     requested backend. backend=None ("auto") picks the best available tier
     via detect_backend(). An explicit backend name that isn't usable raises
@@ -545,15 +695,31 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None
 
     mlx_sv_chunk: the same lever as cupy_sv_chunk, but for the "mlx" tier
     -- how many support vectors to evaluate per Metal kernel/GEMM call;
-    None uses _build_mlx_predict_fn's own default."""
+    None uses _build_mlx_predict_fn's own default.
+
+    tf32: let the GPU tiers ("cupy", "mlx") run their float32 `X @ SV.T`
+    GEMM at TF32 input precision, on hardware that has it (Apple M5,
+    NVIDIA compute capability 8.0+). Off by default: end to end it was
+    ~1.48x faster on an A100, ~1.25x on an L40S and ~1.57x on an M5, but it
+    dropped peak agreement with real dREG from 0.99976 to 0.99620 Jaccard
+    on the CUDA cards (0.9997 to 0.9953 on the M5), and it makes results
+    depend on the GPU model. When
+    TF32 is actually in effect the smoke test uses TF32_SMOKE_TEST_ATOL
+    instead of the tier's float32 one. Ignored, with a warning, on the CPU
+    tiers. Off also overrides CUPY_TF32 / MLX_ENABLE_TF32 if set."""
     resolved = backend or detect_backend()
     if resolved not in DEFAULT_QUERY_CHUNK:
         raise ValueError(
             f"unknown backend {resolved!r}, expected one of {sorted(DEFAULT_QUERY_CHUNK)}"
         )
 
-    if resolved in dreg_model._scorer_cache:
-        return dreg_model._scorer_cache[resolved]
+    cache_key = (resolved, bool(tf32))
+    if cache_key in dreg_model._scorer_cache:
+        return dreg_model._scorer_cache[cache_key]
+
+    tf32_in_effect = False
+    if tf32 and resolved not in ("cupy", "mlx"):
+        logger.warning("--tf32 only affects the cupy and mlx backends; ignored for %s", resolved)
 
     if resolved == "cupy":
         try:
@@ -564,12 +730,16 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None
             ) from e
         try:
             cupy_kwargs = {} if cupy_sv_chunk is None else {"sv_chunk": cupy_sv_chunk}
-            cupy_predict = _build_cupy_predict_fn(dreg_model, **cupy_kwargs)
+            cupy_predict = _build_cupy_predict_fn(dreg_model, tf32=tf32, **cupy_kwargs)
+            tf32_in_effect = getattr(cupy_predict, "tf32", False)
         except Exception as e:
             raise BackendUnavailable(
                 f"cupy is installed but could not build a GPU predict function: {e}"
             ) from e
-        predict_fn = _wrap_sklearn_like(dreg_model, cupy_predict, "cupy", atol=CUPY_SMOKE_TEST_ATOL)
+        predict_fn = _wrap_sklearn_like(
+            dreg_model, cupy_predict, "cupy",
+            atol=TF32_SMOKE_TEST_ATOL if tf32_in_effect else CUPY_SMOKE_TEST_ATOL,
+        )
 
     elif resolved == "mlx":
         try:
@@ -580,12 +750,18 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None
             ) from e
         try:
             mlx_kwargs = {} if mlx_sv_chunk is None else {"sv_chunk": mlx_sv_chunk}
-            mlx_predict = _build_mlx_predict_fn(dreg_model, **mlx_kwargs)
+            mlx_predict = _build_mlx_predict_fn(dreg_model, tf32=tf32, **mlx_kwargs)
+            tf32_in_effect = getattr(mlx_predict, "tf32", False)
+        except BackendUnavailable:
+            raise
         except Exception as e:
             raise BackendUnavailable(
                 f"mlx is installed but could not build a GPU predict function: {e}"
             ) from e
-        predict_fn = _wrap_sklearn_like(dreg_model, mlx_predict, "mlx", atol=MLX_SMOKE_TEST_ATOL)
+        predict_fn = _wrap_sklearn_like(
+            dreg_model, mlx_predict, "mlx",
+            atol=TF32_SMOKE_TEST_ATOL if tf32_in_effect else MLX_SMOKE_TEST_ATOL,
+        )
 
     elif resolved == "sklearn":
         try:
@@ -597,6 +773,6 @@ def build_scorer(dreg_model, backend=None, cupy_sv_chunk=None, mlx_sv_chunk=None
     else:  # numpy
         predict_fn = dreg_model.predict
 
-    scorer = Scorer(resolved, predict_fn)
-    dreg_model._scorer_cache[resolved] = scorer
+    scorer = Scorer(resolved, predict_fn, tf32=tf32_in_effect)
+    dreg_model._scorer_cache[cache_key] = scorer
     return scorer

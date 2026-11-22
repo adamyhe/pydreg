@@ -17,6 +17,16 @@ approaches that were tried and rejected, are in
   out of scope, and where contributions help.
 - A `Changelog` link in the package metadata, shown in the PyPI sidebar.
 
+- `--tf32` (`tf32=` in `pipeline.run` and `build_scorer`): opt-in TF32 matrix
+  multiplies for both GPU backends (`cupy` on compute capability 8.0+, `mlx`
+  on M5-class GPUs). End to end on Jurkat_ChROseq_1 it is about 1.48x faster
+  on an A100, 1.25x on an L40S and 1.57x on an M5. The cost is peak agreement
+  with real dREG (0.9962 vs 0.9998 Jaccard on the CUDA cards, 0.995 vs 0.9997
+  on the M5) and GPU-model-dependent results. Off by default, which also
+  overrides `CUPY_TF32` / `MLX_ENABLE_TF32` if they are set. On `cupy` each
+  scorer applies its own setting per call, so float32 and TF32 scorers can
+  share a process.
+
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for
   reproducible peak calling.
@@ -30,6 +40,17 @@ approaches that were tried and rejected, are in
   ~1e-3 (float32 noise) and are closer to the float64 reference than before;
   peak agreement with real dREG on Jurkat_ChROseq_1 went from 0.999552 to
   0.999764 Jaccard.
+
+### Fixed
+- The `mlx` backend crashed on the Apple M5 with a smoke-test mismatch on
+  every real run. MLX runs float32 matmuls at TF32 precision by default on
+  M5-class GPUs, which put scores up to ~2.6e-3 off and dropped peak
+  agreement with real dREG on Jurkat ChRO-seq from 0.9997 to 0.9953 Jaccard
+  (same peaks, shifted boundaries). pydreg now sets
+  `MLX_ENABLE_TF32=0` unless `--tf32` is given and checks it took effect
+  (raising a clear error if mlx already locked TF32 on in the same process). Scoring on the M5 is
+  ~1.5x slower than with TF32 (~1.57x end to end), and still ~6x faster
+  than the CPU tier.
 
 ## [0.3.4] - 2026-11-01
 

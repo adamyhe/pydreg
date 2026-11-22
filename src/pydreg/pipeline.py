@@ -170,6 +170,7 @@ def run(
     query_chunk=None,
     cupy_sv_chunk=None,
     mlx_sv_chunk=None,
+    tf32=False,
     cores=1,
     peak_calling_block_width=100,
     pmv_laplace_cdf_maxpts=25000,
@@ -189,6 +190,10 @@ def run(
     library use; pydreg.cli enables it; auto-hidden if stdout isn't a terminal
     regardless). Returns a dict with dense_infp/raw_peak/peak_bed/min_score
     for programmatic use regardless of write_outputs.
+
+    tf32: let the GPU backends run their main GEMM at TF32 precision where
+    the hardware supports it -- faster, but measurably less faithful to
+    dREG and GPU-model-dependent; see pydreg.backend.build_scorer.
 
     cores: one number applied consistently across every parallel stage in
     the pipeline -- peaks.call_peaks's ProcessPoolExecutor (worker
@@ -240,10 +245,14 @@ def run(
     with _timed("loading models"):
         model, rf_model = _load_models(svr_model_path, rf_model_path)
     scorer = backend.build_scorer(
-        model, backend_name, cupy_sv_chunk=cupy_sv_chunk, mlx_sv_chunk=mlx_sv_chunk
+        model, backend_name, cupy_sv_chunk=cupy_sv_chunk, mlx_sv_chunk=mlx_sv_chunk,
+        tf32=tf32,
     )
     chunk = _resolve_query_chunk(scorer.backend, query_chunk)
-    logger.info("using %s backend (query_chunk=%d)", scorer.backend, chunk)
+    logger.info(
+        "using %s backend (query_chunk=%d%s)",
+        scorer.backend, chunk, ", TF32 GEMMs" if scorer.tf32 else "",
+    )
 
     logger.info("scanning informative positions...")
     with _timed("scanning informative positions"):

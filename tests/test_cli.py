@@ -57,3 +57,13 @@ def test_seed_is_passed_through(monkeypatch):
         monkeypatch, ["plus.bw", "minus.bw", "out", "--seed", "20260917"]
     )
     assert kwargs["seed"] == 20260917
+
+
+def test_tf32_defaults_off(monkeypatch):
+    kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out"])
+    assert kwargs["tf32"] is False
+
+
+def test_tf32_flag_is_passed_through(monkeypatch):
+    kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out", "--tf32"])
+    assert kwargs["tf32"] is True
