@@ -11,12 +11,9 @@ approaches that were tried and rejected, are in
 
 ## [Unreleased]
 
-### Added
-- This changelog.
-- A "Project status" section in the README covering maintenance mode, what is
-  out of scope, and where contributions help.
-- A `Changelog` link in the package metadata, shown in the PyPI sidebar.
+## [0.4.0] - 2026-11-22
 
+### Added
 - `--tf32` (`tf32=` in `pipeline.run` and `build_scorer`): opt-in TF32 matrix
   multiplies for both GPU backends (`cupy` on compute capability 8.0+, `mlx`
   on M5-class GPUs). End to end on Jurkat_ChROseq_1 it is about 1.48x faster
@@ -26,6 +23,10 @@ approaches that were tried and rejected, are in
   overrides `CUPY_TF32` / `MLX_ENABLE_TF32` if they are set. On `cupy` each
   scorer applies its own setting per call, so float32 and TF32 scorers can
   share a process.
+- This changelog.
+- A "Project status" section in the README covering maintenance mode, what is
+  out of scope, and where contributions help.
+- A `Changelog` link in the package metadata, shown in the PyPI sidebar.
 
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for
@@ -222,7 +223,8 @@ approaches that were tried and rejected, are in
   RF-assisted peak calling, FDR filtering, output writing), with the
   pretrained models hosted on Hugging Face.
 
-[Unreleased]: https://github.com/adamyhe/pydreg/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/adamyhe/pydreg/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/adamyhe/pydreg/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/adamyhe/pydreg/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/adamyhe/pydreg/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/adamyhe/pydreg/compare/v0.3.1.post2...v0.3.2
