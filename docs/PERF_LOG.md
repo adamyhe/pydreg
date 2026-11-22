@@ -4749,6 +4749,9 @@ mantissa. That's a fidelity question, not a scheduling one.
 **Update (2026-11-21):** the deciding measurement has now been taken on a
 real A100 node. Extraction is ~7x faster than predict and the GPU stays
 ~95% busy, so neither branch above applies. See the 2026-11-21 entry.
+Also, the "needs re-measuring under figwig" above was already out of
+date: the 2026-10-04 entry re-measured cross-cluster threaded extraction
+under figwig and rejected it (+1.2 GiB RSS for 16 concurrent clusters).
 
 ## 2026-11-18 (cont.) — cupy tier: RBF + GEMV fused into one RawKernel, `K` never materialized (~1.2x scoring, closer to the float64 reference)
 
@@ -4911,8 +4914,10 @@ unchanged.
 **Does the score error actually move peaks? Yes.** Per position, TF32's
 error (mean 4.75e-4) is well below real dREG's own float32 GPU noise
 (2.53e-3 mean), so this was checked end to end rather than assumed. Full
-merged Jurkat_ChROseq runs on the M5 with the fused kernel (2026-11-18
-mlx entry), `-p 10 --seed 1`, under `caffeinate`, identical except for
+merged Jurkat_ChROseq runs on the M5 with the fused mlx Metal kernel
+(branch `mlx-fused-rbf-gemv`, not yet on `main`; its PERF_LOG entry is
+"2026-11-18 (cont.) — mlx tier: the same RBF + GEMV fusion as a
+`mx.fast.metal_kernel`"), `-p 10 --seed 1`, under `caffeinate`, identical except for
 the TF32 setting (the TF32-on run with the probe skipped and the
 smoke-test limit raised to 5e-3 in a scratch copy):
 
