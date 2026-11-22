@@ -4940,7 +4940,7 @@ Tests: the fake-mlx fixture now records `MLX_ENABLE_TF32` so the env is
 restored; new tests cover the env default and an explicit value, the
 probe raising (and `build_scorer` surfacing it) when the fake rounds to
 TF32, and, on a real Metal GPU, a fresh subprocess getting full-float32
-GEMM accuracy. Tests: 113 -> 116.
+GEMM accuracy. Tests: 114 -> 117.
 
 ## 2026-11-20 (cont.) — one `--tf32` flag for both GPU tiers (opt-in; defaults unchanged)
 
@@ -4985,7 +4985,7 @@ overriding the env); new tests for per-`tf32` scorer caching, the CPU
 warning, cupy's compute type following the flag (with a fake
 `cupy._core` that mimics the compute-capability fallback), the looser
 tolerance applying only when TF32 is in effect, and the CLI pass-through;
-the real-Metal test is parametrized over both settings. Tests: 116 -> 125.
+the real-Metal test is parametrized over both settings. Tests: 117 -> 126.
 
 ## 2026-11-21 — fused RBF+GEMV kernel on real L40S and A100: 1.29x / 1.05x per chunk; the A100 utilization question resolved, it saturates (diagnostic only, no code change)
 
