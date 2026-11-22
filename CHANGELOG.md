@@ -24,10 +24,13 @@ approaches that were tried and rejected, are in
 ### Fixed
 - The `mlx` backend crashed on the Apple M5 with a smoke-test mismatch on
   every real run. MLX runs float32 matmuls at TF32 precision by default on
-  M5-class GPUs, which put scores up to ~2.6e-3 off. pydreg now sets
+  M5-class GPUs, which put scores up to ~2.6e-3 off and dropped peak
+  agreement with real dREG on Jurkat ChRO-seq from 0.9997 to 0.9953 Jaccard
+  (same peaks, shifted boundaries). pydreg now sets
   `MLX_ENABLE_TF32=0` and checks it took effect (raising a clear error if
   mlx already locked TF32 on in the same process). Scoring on the M5 is
-  ~1.5x slower than with TF32, and still ~6x faster than the CPU tier.
+  ~1.5x slower than with TF32 (~1.57x end to end), and still ~6x faster
+  than the CPU tier.
 
 ## [0.3.4] - 2026-11-01
 

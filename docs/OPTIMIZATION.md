@@ -255,7 +255,9 @@ the NumPy tier's own numba-fusion speedup). See `docs/PERF_LOG.md`'s
 **TF32 is switched off.** MLX runs float32 matmuls at TF32 input precision
 by default on GPUs with the hardware for it (the Apple M5's neural
 accelerators; not the M4). On an M5 that made scores up to ~2.6e-3 off
-the float64 reference and failed the smoke test on every real run, so
+the float64 reference, dropped peak agreement with real dREG from 0.9997
+to 0.9953 Jaccard on Jurkat ChRO-seq (peak boundaries shift), and failed
+the smoke test on every real run, so
 `_build_mlx_predict_fn` sets `MLX_ENABLE_TF32=0` before its first matmul
 and checks that it took effect. Error drops to ~3e-4, at ~1.5x the
 per-call time on the M5 (822 ms vs 552 ms; the NumPy tier is 5,059 ms).

@@ -4707,6 +4707,34 @@ tier on the same rows at 10 threads is 5,058.6 ms, so mlx stays 6.2x
 ahead and remains the right auto choice. `MLX_SMOKE_TEST_ATOL` is
 unchanged.
 
+**Does the score error actually move peaks? Yes.** Per position, TF32's
+error (mean 4.75e-4) is well below real dREG's own float32 GPU noise
+(2.53e-3 mean), so this was checked end to end rather than assumed. Full
+merged Jurkat_ChROseq runs on the M5 with the fused kernel (2026-11-18
+mlx entry), `-p 10 --seed 1`, under `caffeinate`, identical except for
+the TF32 setting (the TF32-on run with the probe skipped and the
+smoke-test limit raised to 5e-3 in a scratch copy):
+
+| | TF32 on | TF32 off |
+|---|---|---|
+| peak Jaccard vs real dREG | 0.995315 | 0.999654 |
+| significant peaks (dREG: 56,599) | 56,547 | 56,614 |
+| peaks overlapping a dREG peak | 56,584 | 56,600 |
+| informative scores < 0 | 3,764,158 | 3,736,429 |
+| peak score cutoff (`min_score`) | 0.0748 | 0.0746 |
+| total `scorer.predict` | 1294.8s | 2170.4s |
+| wall clock | 1506.7s | 2370.5s |
+
+TF32 on vs off: Jaccard 0.995278. On chr1/17/19/X, 23,544 informative
+positions change sign. Disagreement with dREG (1 - Jaccard) grows ~13x,
+to below the worst of the 12 validated libraries (0.997723). Nearly
+every peak still overlaps a dREG peak, so the loss is in peak
+boundaries: scores near zero cross sign, which shifts the noise estimate
+and the score cutoff, and with them where peaks start and end. An
+earlier TF32-on run (main's unfused kernel) gave the same signature
+(56,548 significant, 3,764,030 negative). TF32 stays off; on the M5 that
+costs ~1.57x wall clock.
+
 Tests: the fake-mlx fixture now records `MLX_ENABLE_TF32` so the env is
 restored; new tests cover the env default and an explicit value, the
 probe raising (and `build_scorer` surfacing it) when the fake rounds to
