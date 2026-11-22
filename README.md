@@ -155,7 +155,7 @@ pydreg is feature-complete and in maintenance mode. It implements dREG's full pe
 
 **Out of scope by design:** training new models, and changes to dREG's algorithm or scoring. pydreg aims to reproduce dREG, including its known quirks, so that results stay comparable with the original. Method changes belong in a separate tool.
 
-**Open to contributions:** performance and portability work is welcome, along with bug reports from new data types or platforms. One open question from `docs/PERF_LOG.md` is why GPU utilization doesn't saturate on fast cards such as the A100; CPU-side feature extraction is the likely limit there. See [`CHANGELOG.md`](CHANGELOG.md) for release history.
+**Open to contributions:** performance and portability work is welcome, along with bug reports from new data types or platforms. See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## Contributing
 

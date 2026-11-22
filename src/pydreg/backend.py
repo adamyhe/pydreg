@@ -369,6 +369,45 @@ def _wrap_sklearn_like(dreg_model, sk_predict, backend_name, rtol=1e-4, atol=1e-
     return predict_fn
 
 
+# One thread block per query row of `cross` (C-contiguous, n_rows x n_cols):
+# each thread strides over the row's support vectors accumulating
+# coef_j * exp(-gamma * (sq_x + sq_sv_j - 2*cross_ij)) in float32, then the
+# block reduces those partial sums in double and adds the row's total into
+# y. Fuses what used to be an ElementwiseKernel (writing the full RBF matrix
+# K) followed by a cuBLAS GEMV (reading it back), so K is never
+# materialized -- see _build_cupy_predict_fn. Every argument's type is
+# fixed by this signature, so the caller must pass gamma as np.float32 and
+# n_cols as np.int32 (RawKernel does no conversion; a wrong scalar width
+# would be read as garbage, not promoted).
+_RBF_GEMV_THREADS = 256
+_RBF_GEMV_SRC = r"""
+extern "C" __global__
+void pydreg_rbf_gemv(const float* __restrict__ cross,
+                     const float* __restrict__ sq_x,
+                     const float* __restrict__ sq_sv,
+                     const float* __restrict__ coefs,
+                     const float gamma,
+                     const int n_cols,
+                     double* __restrict__ y) {
+    const int row = blockIdx.x;
+    const float* crow = cross + (size_t)row * n_cols;
+    const float sx = sq_x[row];
+    float acc = 0.0f;
+    for (int j = threadIdx.x; j < n_cols; j += blockDim.x) {
+        acc += coefs[j] * expf(-gamma * (sx + sq_sv[j] - 2.0f * crow[j]));
+    }
+    __shared__ double partial[%d];
+    partial[threadIdx.x] = (double)acc;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) partial[threadIdx.x] += partial[threadIdx.x + k];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[row] += partial[0];
+}
+""" % _RBF_GEMV_THREADS
+
+
 def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     """Returns predict_fn(X_scaled) -> y_scaled (both host NumPy arrays --
     matching _wrap_sklearn_like's expected interface, so it composes with
@@ -381,39 +420,34 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     CuPy's own array ops support compute capability >=3.0 (see this
     module's docstring for why that matters).
 
-    The two matmuls (X @ SV.T and K @ coefs) are already cuBLAS GEMM calls
-    -- about as fast as this gets without touching precision. The glue
-    between them (sq_x + sq_sv - 2*cross, then exp(-gamma*...)) was
-    originally ~5 separate elementwise kernel launches each reading/writing
-    a full (query_chunk, sv_chunk) array to GPU global memory -- pure
-    memory-bandwidth overhead on what's fundamentally a memory-bound step
-    (same reason the NumPy tier is memory-bandwidth-, not compute-, bound;
-    see docs/OPTIMIZATION.md "Batching"). This is fused into a single kernel
-    that reads cross/sq_x/sq_sv once and writes K once, cutting that memory
-    traffic roughly 5x with no formula or precision change.
+    Per sv-chunk, X @ SV.T is a cuBLAS sgemm writing `cross`, and a single
+    fused RawKernel (_RBF_GEMV_SRC) then reads `cross` once, applies the RBF
+    formula exp(-gamma * (sq_x + sq_sv - 2*cross)) and multiplies by coefs
+    and reduces over support vectors in the same pass, accumulating straight
+    into y_scaled. The (query_chunk, sv_chunk) kernel matrix K is never
+    written to GPU memory.
 
-    Fusion was first tried via @cp.fuse(), which produced a confirmed real
-    divergence on actual GPU hardware (~3.5e-4, tripping
-    _wrap_sklearn_like's smoke test -- sklearn agreed with the NumPy
-    reference to ~5.5e-11 on the same sample, pinning the bug specifically
-    to the fused cupy path). Two suspects, either of which fuse's JIT
-    tracer could plausibly get wrong and neither confirmable without GPU
-    access: gamma was passed as a runtime Python-float *argument* (fuse's
-    tracer may not apply the same dtype-promotion guarantees eager CuPy
-    ops do), and n_sv=605,187 isn't divisible by sv_chunk (the last chunk
-    is a different, smaller shape than the rest -- a case fuse's
-    shape-based kernel caching could mishandle). cupy.ElementwiseKernel
-    below sidesteps both at once: every argument's dtype is declared
-    explicitly (no promotion ambiguity), gamma is baked in as a literal
-    rather than passed at all, and it has no shape-based tracing/caching --
-    one compiled kernel, invoked generically for any broadcastable shape,
-    the same mature mechanism CuPy's own internals use for this pattern.
-
-    It also drops one (query_chunk, sv_chunk)-shaped device buffer
-    entirely (the old separate `sqdist` intermediate no longer exists) --
-    two live buffers of that shape per iteration (`cross`, `K`) instead of
-    three, which is why sv_chunk's default could grow here without
-    exceeding the original tier's peak memory footprint.
+    History, because each step was a measured fix: the glue between the two
+    GEMMs was first ~5 separate elementwise launches, each round-tripping a
+    full (query_chunk, sv_chunk) array; @cp.fuse() was tried and produced a
+    real ~3.5e-4 divergence on GPU hardware (gamma passed as a runtime
+    Python float, and a ragged final sv-chunk, were the suspects); then a
+    cupy.ElementwiseKernel (explicit dtypes, gamma baked in as a literal)
+    wrote K, followed by a cuBLAS GEMV reading it back. Fusing the RBF and
+    GEMV steps into the RawKernel halves the per-sv-chunk memory traffic
+    (the GEMM writes `cross` once and the kernel reads it once), and on a
+    real RTX 3080 took a 4096-query chunk from 138.0 ms to 114.6 ms (1.20x),
+    leaving ~13 ms above the sgemm's own 102 ms, about the cost of reading
+    `cross` once at the card's bandwidth. It is also more accurate
+    (max |error| vs the float64 NumPy reference 3.5e-5, against 2.6e-4),
+    because K is no longer rounded to float32 before the dot product and
+    the per-row reduction runs in double. RawKernel has the same
+    no-ambiguity property ElementwiseKernel did: every argument type is
+    fixed by the CUDA signature (gamma is passed as an explicit np.float32,
+    n_cols as np.int32), with no tracing or shape-based caching. Fusing the
+    GEMM itself as well was considered and not pursued: it could save at
+    most the ~13 ms `cross` write, but only if a hand-written GEMM matched
+    cuBLAS. See docs/PERF_LOG.md's 2026-11-18 entries.
 
     sv_chunk's default (16,384, lowered from an earlier, unvalidated
     32,768) is chosen from real measurements, not a guess: a full sweep
@@ -429,8 +463,8 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     tunable via build_scorer's cupy_sv_chunk / --cupy-sv-chunk if your
     card's real headroom or bandwidth profile differs.
 
-    The two GEMMs (X @ SV.T, K @ coefs) and the fused RBF kernel run in
-    float32, not float64 -- deliberately, not a shortcut. The current
+    The GEMM (X @ SV.T) and the fused RBF/GEMV kernel's per-element math
+    run in float32, not float64 -- deliberately, not a shortcut. The current
     pretrained models are trained via Rgtsvm (dREG's GPU SVM tool; e1071
     is now just an S3-compatibility shim around it, not what actually fits
     the model), and Rgtsvm's own CUDA implementation has no double-
@@ -448,11 +482,11 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     (what both e1071's CPU mode and sklearn.svm.SVR use) is genuinely
     double-precision throughout, so those stay float64.
 
-    y_scaled accumulates in float64 despite K/coefs being float32 -- each
-    chunk's small (query_chunk,)-sized contribution is upcast before
-    adding, cheap insurance against cross-chunk summation error over the
-    37 chunks this loop runs at the default sv_chunk, independent of the
-    float32 GEMM/kernel itself.
+    y_scaled accumulates in float64 despite cross/coefs being float32: each
+    thread block reduces its float32 per-thread partial sums in double and
+    adds them into the float64 y_scaled, cheap insurance against summation
+    error across the 605,187 support vectors (37 sv-chunks at the default
+    sv_chunk), independent of the float32 GEMM itself.
 
     tf32: sets cuBLAS's float32 compute type first (_configure_cupy_tf32),
     off by default, so every caller gets full float32 unless it asks. The
@@ -463,31 +497,37 @@ def _build_cupy_predict_fn(dreg_model, sv_chunk=16_384, tf32=False):
     SV = cp.asarray(dreg_model.SV, dtype=cp.float32)
     coefs = cp.asarray(dreg_model.coefs, dtype=cp.float32)
     sq_sv = cp.sum(SV**2, axis=1)
-    gamma = dreg_model.gamma
+    gamma = np.float32(dreg_model.gamma)
     rho = dreg_model.rho
     n_sv = dreg_model.n_sv
 
-    _rbf_from_cross = cp.ElementwiseKernel(
-        "float32 cross, float32 sq_x, float32 sq_sv",
-        "float32 out",
-        # the trailing "f" on the gamma literal matters: an unsuffixed
-        # float literal is `double` in C/CUDA, which would silently
-        # promote this whole expression (and expf's argument) back to
-        # double despite every array here being float32 -- defeating the
-        # point.
-        f"out = expf(-{gamma!r}f * (sq_x + sq_sv - 2 * cross))",
-        "pydreg_rbf_from_cross",
-    )
+    _rbf_gemv = cp.RawKernel(_RBF_GEMV_SRC, "pydreg_rbf_gemv")
 
     def predict(X_scaled):
         X = cp.asarray(X_scaled, dtype=cp.float32)
-        sq_x = cp.sum(X**2, axis=1)[:, None]
-        y_scaled = cp.zeros(X.shape[0], dtype=cp.float64)
+        n = X.shape[0]
+        sq_x = cp.sum(X**2, axis=1)
+        y_scaled = cp.zeros(n, dtype=cp.float64)
+        if n == 0:
+            return cp.asnumpy(y_scaled)
         for start in range(0, n_sv, sv_chunk):
             end = min(start + sv_chunk, n_sv)
-            cross = X @ SV[start:end].T
-            K = _rbf_from_cross(cross, sq_x, sq_sv[None, start:end])
-            y_scaled += (K @ coefs[start:end]).astype(cp.float64)
+            # The kernel indexes cross as dense row-major; ascontiguousarray
+            # is a no-op for cuBLAS's C-ordered output but guards the layout.
+            cross = cp.ascontiguousarray(X @ SV[start:end].T)
+            _rbf_gemv(
+                (n,),
+                (_RBF_GEMV_THREADS,),
+                (
+                    cross,
+                    sq_x,
+                    sq_sv[start:end],
+                    coefs[start:end],
+                    gamma,
+                    np.int32(end - start),
+                    y_scaled,
+                ),
+            )
         y_scaled -= rho
         return cp.asnumpy(y_scaled)
 

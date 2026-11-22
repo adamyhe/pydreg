@@ -168,7 +168,19 @@ Two levers, in the order they're worth pulling:
    a real ~3.5e-4 divergence on actual GPU hardware (caught by the smoke
    test); `cupy.ElementwiseKernel` — CuPy's older, explicit-dtype mechanism
    — replaced it and cuts memory traffic roughly 5x. See `docs/PERF_LOG.md`'s
-   2026-07-15 entry.
+   2026-07-15 entry. Since 2026-11-18 the RBF step and the following
+   `K @ coefs` reduction are one `cupy.RawKernel`, so the kernel matrix `K`
+   is never written to GPU memory at all: cuBLAS still computes
+   `X @ SV.T`, and the custom kernel reads that result once, applies the
+   RBF formula, and reduces each row in double. That made each scoring
+   chunk 1.20x faster on an RTX 3080, 1.28x on a TITAN Xp, 1.29x on an
+   L40S, but only 1.05x on an A100, whose float32 `X @ SV.T` already runs
+   near the card's FP32 peak and is ~83% of each chunk. It also moved
+   scores *closer* to the float64 reference on every card (see
+   `docs/PERF_LOG.md`'s 2026-11-18, 2026-11-19 and 2026-11-21 entries). Fusing
+   the GEMM in too was considered and not pursued: what's left to save is
+   one write of `X @ SV.T`, worth at most ~11%, and only if a hand-written
+   GEMM matched cuBLAS.
 2. **Batch size** (`--query-chunk`, `--cupy-sv-chunk`/`--mlx-sv-chunk`) —
    real hardware showed this matters differently per platform:
    - **cupy**: a full `sv_chunk` sweep on a real TITAN Xp (4,096 through
