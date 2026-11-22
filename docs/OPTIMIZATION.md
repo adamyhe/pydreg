@@ -173,8 +173,11 @@ Two levers, in the order they're worth pulling:
    is never written to GPU memory at all: cuBLAS still computes
    `X @ SV.T`, and the custom kernel reads that result once, applies the
    RBF formula, and reduces each row in double. That made each scoring
-   chunk ~1.2x faster on an RTX 3080 and moved scores *closer* to the
-   float64 reference (see `docs/PERF_LOG.md`'s 2026-11-18 entries). Fusing
+   chunk 1.20x faster on an RTX 3080, 1.28x on a TITAN Xp, 1.29x on an
+   L40S, but only 1.05x on an A100, whose float32 `X @ SV.T` already runs
+   near the card's FP32 peak and is ~83% of each chunk. It also moved
+   scores *closer* to the float64 reference on every card (see
+   `docs/PERF_LOG.md`'s 2026-11-18, 2026-11-19 and 2026-11-21 entries). Fusing
    the GEMM in too was considered and not pursued: what's left to save is
    one write of `X @ SV.T`, worth at most ~11%, and only if a hand-written
    GEMM matched cuBLAS.

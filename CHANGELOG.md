@@ -20,9 +20,13 @@ approaches that were tried and rejected, are in
 ### Changed
 - The README's caveat about p-value noise now points to `--seed` for
   reproducible peak calling.
-- GPU (`cupy`) scoring is about 1.2x faster: the RBF step and the
-  multiplication by the SVR coefficients now run as one fused kernel, so the
-  full kernel matrix is never written to GPU memory. Scores move by at most
+- GPU (`cupy`) scoring is faster: the RBF step and the multiplication by the
+  SVR coefficients now run as one fused kernel, so the full kernel matrix is
+  never written to GPU memory. How much faster depends on the card: 1.29x per
+  scoring chunk on an L40S, 1.28x on a TITAN Xp, 1.20x on an RTX 3080, and
+  1.05x on an A100, where the unchanged float32 matrix multiply dominates.
+  End to end that took a Jurkat_ChROseq_1 run from 5:58 to 5:11 on the L40S
+  and from 7:27 to 7:09 on the A100. Scores move by at most
   ~1e-3 (float32 noise) and are closer to the float64 reference than before;
   peak agreement with real dREG on Jurkat_ChROseq_1 went from 0.999552 to
   0.999764 Jaccard.

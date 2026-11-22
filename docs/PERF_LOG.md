@@ -4746,6 +4746,10 @@ A100's real speedup lever, but the expanded-form distance
 `sq_x + sq_sv - 2*cross` cancels catastrophically at TF32's 10-bit
 mantissa. That's a fidelity question, not a scheduling one.
 
+**Update (2026-11-21):** the deciding measurement has now been taken on a
+real A100 node. Extraction is ~7x faster than predict and the GPU stays
+~95% busy, so neither branch above applies. See the 2026-11-21 entry.
+
 ## 2026-11-18 (cont.) — cupy tier: RBF + GEMV fused into one RawKernel, `K` never materialized (~1.2x scoring, closer to the float64 reference)
 
 Follows the per-chunk breakdown in the entry above (sgemm 102 ms, RBF
@@ -4848,3 +4852,96 @@ So the RawKernel compiles and is correct on CC 6.1.
 
 Not measured: the full pipeline on this host, and the second card in the
 machine (TITAN X Pascal, the same GP102 chip).
+
+## 2026-11-21 — fused RBF+GEMV kernel on real L40S and A100: 1.29x / 1.05x per chunk; the A100 utilization question resolved, it saturates (diagnostic only, no code change)
+
+Measured on Stanford's Sherlock cluster: an NVIDIA L40S (48 GB, CC 8.9) on
+a Xeon Gold 6426Y host, and an A100-SXM4-80GB (CC 8.0) on an EPYC 7763
+host, driver 550.163.01, 16 cores allocated on each. The locked
+environment (`uv sync --frozen --extra gpu`: cupy 14.1.1 with its pip
+CUDA 12.9 toolkit) ran inside a Debian 12 container, because the hosts'
+glibc 2.17 is too old for the locked wheels. Branch `cupy-fused-rbf-gemv`
+(aba2356) against `main` (3f31302), each in its own process.
+Jurkat_ChROseq_1, downloaded from the GEO URLs in
+`figures/timing_scripts_download.sh`, on node-local disk unless noted.
+Scripts were scratch-only (not committed).
+
+**Per 4096-query chunk** (200,704 real positions, the first ones after
+chr1; default `sv_chunk=16,384`; median of 49 chunks):
+
+| | L40S main | L40S fused | A100 main | A100 fused |
+|---|---|---|---|---|
+| wall per chunk | 96.4 ms | 75.0 ms (1.29x) | 119.8 ms | 113.7 ms (1.05x) |
+| sgemm `X @ SV.T` alone | 55.7 ms | 55.6 ms | 94.6 ms | 94.6 ms |
+| everything else | 40.7 ms | 19.4 ms | 25.2 ms | 19.1 ms |
+| max \|error\| vs float64 (4,096 positions) | 2.73e-4 | 3.51e-5 | 2.73e-4 | 3.51e-5 |
+
+"Everything else" is the RBF/GEMV steps plus ~1-2 ms of host scaling and
+H2D per chunk. The A100 gains least because its float32 sgemm runs at
+18.9 TFLOP/s, ~97% of the card's 19.5 TFLOP/s FP32 peak, and is 83% of
+the chunk. The L40S is the faster FP32 card of the two (32.0 TFLOP/s on
+the same sgemm). On the A100 the fused kernel reads `cross` (9.92 GB per
+chunk) at ~0.5 TB/s, about a quarter of HBM bandwidth, so the kernel may
+have headroom on HBM cards. That is at most a few ms against a 95 ms
+sgemm, so it was not investigated. Max error drops 7.8x, the same on both
+cards, in line with the 3080 (7.4x) and TITAN Xp (11x).
+
+**`sv_chunk` sweep (8,192 to 65,536):** the fused path is flat within
+1.5% from 8,192 to 32,768 on both cards. At 65,536 it is 11% slower on
+the L40S, where the sgemm itself slows (55.6 -> 64.2 ms), and flat on the
+A100. The 16,384 default stands. Max error grows with `sv_chunk` (3.5e-5
+at 16,384, 1.0e-4 at 65,536), consistent with each thread's float32
+partial sum covering more support vectors.
+
+**Full pipeline, `-p 16 --seed 1`:**
+
+| | L40S main | L40S fused | A100 main | A100 fused |
+|---|---|---|---|---|
+| total wall clock | 5:57.8 | 5:10.9 | 7:27.4 | 7:09.1 |
+| informative-position `scorer.predict` | 115.61s | 84.89s | 147.52s | 134.19s |
+| densified-position `scorer.predict` | 73.56s | 54.44s | 93.35s | 85.12s |
+| significant peaks | 48,169 | 48,171 | 48,168 | 48,171 |
+| peak Jaccard vs real dREG | 0.999553 | 0.999764 | 0.999552 | 0.999764 |
+
+Before-vs-after peak Jaccard was 0.999617 (L40S) and 0.999605 (A100).
+Agreement with dREG after the change is the same 0.999764 the 3080 run
+gave. This is within the existing noise floor, per this log's ground
+rule. The A100 run is also slower in the CPU-only stages (densify
+129-135s vs 93-111s, peak calling 131-133s vs 96-98s), a host difference
+unrelated to the GPU. The cupy tests in `tests/test_backend.py` passed on
+both cards (12 selected by `-k cupy`, none skipped), including
+`test_cupy_fused_kernel_matches_reference_on_real_gpu`.
+
+**The A100 utilization question (2026-08-20 (cont.), 2026-11-18) is
+resolved: the A100 saturates.** This is the measurement the 2026-11-18
+entry asked for, current code with `-v` on an A100 node. Runs covered
+only informative-position scanning and scoring (the same calls as
+`pipeline.run`), 4,997,104 positions, with `nvidia-smi dmon` at 1 Hz
+windowed to the scoring phase. dmon's SM% is the fraction of time any
+kernel was running, not occupancy.
+
+| A100 run | extract | predict | mean SM% | samples >= 90% |
+|---|---|---|---|---|
+| main, Lustre `$SCRATCH`, `-p 16` | 21.6s | 147.6s | 95.4 | 99% |
+| main, node-local, `-p 16` | 21.4s | 147.4s | 95.5 | 99% |
+| main, Lustre `$SCRATCH`, `-p 1` | 72.2s | 148.3s | 90.7 | 84% |
+| main, node-local, `-p 1` | 71.1s | 147.4s | 88.0 | 73% |
+| fused, node-local, `-p 16` | 20.5s | 133.8s | 94.7 | 98% |
+| fused, node-local, `-p 1` | 71.5s | 134.6s | 88.9 | 73% |
+
+At `-p 16` extraction takes ~18 ms per chunk against ~120 ms of predict,
+and the GPU is busy ~95% of the time. So neither branch of the
+2026-11-18 decision applies, and no fix is needed. Storage location
+makes no difference: the bigWigs are ~50 MB each and sit in the page
+cache after the scan. At the default `--cores 1`, extraction is ~3x
+slower (~58 ms per chunk) and utilization drops to 88-91%, but extraction
+still trails predict. The original observation is best explained by
+older code on a slower host. The 2026-07-15 A100 numbers had extraction
+at ~141 ms per chunk.
+
+The L40S shows where this is heading. With the fused kernel, `-p 1`
+extraction (66.1s) comes close to predict (86.2s), and utilization falls
+to 77% (46% of samples >= 90%). At `-p 16` (17.4s extract) it stays at
+89%. So at `--cores 1`, any further GPU speedup (fused on faster cards,
+or TF32 GEMMs on the A100) would make extraction the bottleneck. At
+`-p 16` there is a ~5x margin.
