@@ -7,6 +7,10 @@
 #
 # Both backends run with the same --cores and --seed, so their outputs
 # differ only through scoring (float32 on the GPU vs float64 on the CPU).
+# "mlx-tf32" is a third variant: the mlx backend with --tf32, i.e. TF32
+# matmuls on M5-class GPUs (on earlier chips, which lack TF32, --tf32 has
+# no effect and the run matches plain mlx). Add it to BACKENDS to measure
+# what --tf32 buys and costs; it's off by default.
 # Backend order alternates per library, so neither backend always runs on
 # a cooler machine. A completed run leaves a .done marker and is skipped on
 # re-runs, so an interrupted sweep resumes where it stopped (FORCE=1 reruns
@@ -16,7 +20,8 @@
 #   CORES     --cores value for both backends (default: all physical cores)
 #   SEED      --seed value for both backends (default: 0)
 #   LIBS      space-separated subset of libraries (default: all 12)
-#   BACKENDS  space-separated backends to run (default: "numpy mlx")
+#   BACKENDS  space-separated backends to run, from numpy, mlx and
+#             mlx-tf32 (default: "numpy mlx")
 #   FORCE     set to 1 to rerun runs that already completed
 #   DATA_DIR / OUT_DIR, as in timing_scripts_common.sh
 #
@@ -38,13 +43,19 @@ CORES="${CORES:-$(sysctl -n hw.physicalcpu)}"
 SEED="${SEED:-0}"
 read -ra LIBS <<< "${LIBS:-${LIBRARIES[*]}}"
 read -ra BACKENDS <<< "${BACKENDS:-numpy mlx}"
+for backend in "${BACKENDS[@]}"; do
+    if [[ "$backend" != numpy && "$backend" != mlx && "$backend" != mlx-tf32 ]]; then
+        echo "error: unknown backend '$backend' in BACKENDS (expected numpy, mlx, mlx-tf32)" >&2
+        exit 1
+    fi
+done
 
 # Resolve the venv's own pydreg once (syncing the mlx extra into it), so the
 # timings don't include `uv run`'s per-call environment check.
 cd "$REPO_ROOT"
 PYTHON="$(uv run --extra mlx python -c 'import sys; print(sys.executable)')"
 PYDREG="$(dirname "$PYTHON")/pydreg"
-if [[ " ${BACKENDS[*]} " == *" mlx "* ]] &&
+if [[ " ${BACKENDS[*]} " == *" mlx"* ]] &&
     ! "$PYTHON" -c 'import mlx.core as mx, sys; sys.exit(0 if mx.metal.is_available() else 1)'; then
     echo "error: mlx is installed but sees no usable Metal GPU" >&2
     exit 1
@@ -76,10 +87,12 @@ for lib in "${LIBS[@]}"; do
             continue
         fi
         rm -f "$out.done"
+        flags=(--backend "${backend%-tf32}")
+        [[ "$backend" == *-tf32 ]] && flags+=(--tf32)
         echo "== $lib ($backend)"
         if /usr/bin/time -l -o "$out.time.log" \
             "$PYDREG" "$(pl_bw "$lib")" "$(mn_bw "$lib")" "$out" \
-            -v --no-progress --backend "$backend" --cores "$CORES" --seed "$SEED" \
+            -v --no-progress "${flags[@]}" --cores "$CORES" --seed "$SEED" \
             2> "$out.log"; then
             touch "$out.done"
         else
