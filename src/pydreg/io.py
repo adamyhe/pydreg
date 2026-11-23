@@ -118,6 +118,69 @@ def fetch_raw(bw, chrom, start, end, dtype=np.float64):
     return result
 
 
+_CHECK_MIN_CHROM_BP = 100_000
+_CHECK_WINDOW_BP = 1_000_000
+
+
+def check_bigwig(bw, seed=0):
+    """Port of dREG's check_bigwig (R/bigwig_check.R), which run_dREG.R
+    runs on both strands before doing anything else and stops on failure.
+    Samples one window of up to 1 Mb at a random spot on every chromosome
+    longer than 100 kb and checks that its values are:
+
+    - integers (a non-integer value means the file was likely normalized),
+    - all one sign (a mix means the strands were likely merged),
+    - mostly single-base runs: of the runs of consecutive bases equal to 1
+      (or -1, if there are no 1s), more than 80% on average must be a
+      single base, or the reads were likely mapped as whole regions rather
+      than as 3' points. A chromosome only contributes if it has at least
+      100 runs, and the check applies only when at least two do.
+
+    Returns the list of failed checks as messages (empty if the file
+    passes). Like R, it never raises; the caller decides.
+
+    R draws the window's start unseeded (runif). Here it's seeded, so the
+    same file always gets the same verdict. The run-counting reproduces one
+    quirk of R's loop: it records a spurious single-base entry for the
+    first index and never records the final run, so the counted runs are
+    one fake point plus every real run but the last."""
+    rng = np.random.default_rng(seed)
+    is_integer = is_one_signed = True
+    point_fractions = []
+    for chrom, size in bw.chrom_sizes.items():
+        if size <= _CHECK_MIN_CHROM_BP:
+            continue
+        start = int(rng.integers(0, size - _CHECK_MIN_CHROM_BP))
+        width = min(_CHECK_WINDOW_BP, size - start)
+        vals = bw.read([chrom], [start], width=width, missing=0.0, n_jobs=_N_JOBS)[0]
+
+        is_integer &= bool(np.all(np.round(vals) == vals))
+        is_one_signed &= bool(np.all(vals >= 0) or np.all(vals <= 0))
+
+        idx = np.flatnonzero(vals == 1)
+        if idx.size == 0:
+            idx = np.flatnonzero(vals == -1)
+        if idx.size == 0:
+            continue
+        breaks = np.flatnonzero(np.diff(idx) != 1)
+        run_starts = idx[np.concatenate([[0], breaks + 1])]
+        run_ends = idx[np.concatenate([breaks, [idx.size - 1]])]
+        lengths = np.concatenate([[0], (run_ends - run_starts)[:-1]])
+        if lengths.size >= 100:
+            point_fractions.append(np.mean(lengths == 0))
+
+    failures = []
+    if not is_integer:
+        failures.append("holds non-integer values; it might be normalized")
+    if not is_one_signed:
+        failures.append("mixes positive and negative values")
+    if len(point_fractions) > 1 and np.mean(point_fractions) <= 0.8:
+        failures.append(
+            "looks like reads were mapped to regions, not single 3' positions"
+        )
+    return failures
+
+
 def write_bed_gz(df, path, columns=None):
     """Sorts `df` by (chrom, start) and writes it as a bgzipped, tabix-indexed
     BED file at `path` (which should end in .bed.gz). `columns` selects and

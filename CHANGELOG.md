@@ -11,6 +11,22 @@ approaches that were tried and rejected, are in
 
 ## [Unreleased]
 
+### Added
+- An input check on both bigWigs before the run starts, ported from dREG's
+  `check_bigwig` (which `run_dREG.R` also runs first). It samples up to 1 Mb
+  on every chromosome longer than 100 kb and stops with an error if a file
+  holds non-integer values (likely normalized), mixes positive and negative
+  values, or looks mapped to whole regions rather than 3' points. It takes
+  well under a second on real data. `--skip-input-check`
+  (`check_input=False` in `pipeline.run`) turns it off.
+
+### Fixed
+- `raw.peak.bed.gz` included the `prob = -1` rows for candidate peaks too
+  narrow to get a p-value (2,714 of 85,446 rows on Jurkat_ChROseq_1), which
+  dREG leaves out of its file. They are now dropped on write, matching
+  `run_dREG.R`. The significant-peak files and the in-memory `raw_peak`
+  result are unchanged.
+
 ## [0.4.0] - 2026-11-22
 
 ### Added
