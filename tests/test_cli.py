@@ -67,3 +67,15 @@ def test_tf32_defaults_off(monkeypatch):
 def test_tf32_flag_is_passed_through(monkeypatch):
     kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out", "--tf32"])
     assert kwargs["tf32"] is True
+
+
+def test_input_check_on_by_default(monkeypatch):
+    kwargs = _run_and_capture(monkeypatch, ["plus.bw", "minus.bw", "out"])
+    assert kwargs["check_input"] is True
+
+
+def test_skip_input_check_flag(monkeypatch):
+    kwargs = _run_and_capture(
+        monkeypatch, ["plus.bw", "minus.bw", "out", "--skip-input-check"]
+    )
+    assert kwargs["check_input"] is False

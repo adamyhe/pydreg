@@ -322,3 +322,26 @@ def test_write_outputs_parallel_matches_serial(tmp_path):
             with gzip.open(parallel_path, "rt") as f:
                 parallel_content = f.read()
             assert serial_content == parallel_content
+
+
+def test_write_outputs_drops_raw_peak_sentinel_rows(tmp_path):
+    """run_dREG.R writes raw_peak[raw_peak$prob != -1, ]; so must pydreg."""
+    import gzip
+
+    dense_infp = pd.DataFrame(
+        {"chrom": ["chr1"] * 2, "start": [0, 10], "end": [1, 11],
+         "score": [0.9, 0.8], "infp": [1, 1]}
+    )
+    raw_peak = pd.DataFrame(
+        {"chr": ["chr1", "chr1", "chr1"], "start": [0, 20, 40],
+         "end": [11, 31, 51], "score": [0.9, 0.8, 0.7],
+         "prob": [0.01, -1.0, 0.02]}
+    )
+    out_prefix = str(tmp_path / "out")
+    pipeline._write_outputs(
+        out_prefix, _FakeChromReader({"chr1": 1000}), dense_infp, raw_peak, None
+    )
+    with gzip.open(f"{out_prefix}.dREG.raw.peak.bed.gz", "rt") as f:
+        rows = [line.split("\t") for line in f.read().splitlines()]
+    assert [r[1] for r in rows] == ["0", "40"]
+    assert len(raw_peak) == 3  # the in-memory result is left untouched
