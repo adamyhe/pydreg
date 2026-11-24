@@ -1,5 +1,5 @@
 ---
-license: gpl-3.0
+license: cc-by-4.0
 tags:
   - genomics
   - bioinformatics
@@ -101,8 +101,12 @@ to produce the timing note figures, via the shared fetch helper in
 
 ## License
 
-GPL-3.0, matching the [pydreg](https://github.com/adamyhe/pydreg) source
-license these benchmark outputs support.
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). These files are
+outputs of dREG and pydreg, not copies of either program or of the dREG
+model, so the GPL-3.0 those are released under doesn't extend to them.
+Attribution means citing pydreg, dREG and the original data sources (see
+Citation below). The input libraries are public GEO data from the studies
+in the table above.
 
 ## Citation
 
