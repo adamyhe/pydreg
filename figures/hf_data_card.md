@@ -71,10 +71,10 @@ All 12 are published PRO-seq/GRO-seq/ChRO-seq libraries from GEO:
   (a bare `run_dREG.bsh` call), not the container described below.
 - **pydreg**: this repo's Python port, same model weights (converted to
   safetensors, see `adamyhe/pydreg` on the Hub). The `pydreg/` outputs are
-  pydreg 0.4.0 (fused cupy scoring kernel, float32), run 2026-11-23 with
+  pydreg 1.0.0 (fused cupy scoring kernel, float32), run 2026-11-23 with
   `--backend cupy --cores 16 --seed 0` by
   [`figures/timing_scripts_cuda.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_cuda.sh).
-  They replace an earlier, unseeded pre-0.4.0 run on the same card.
+  They replace an earlier, unseeded pre-1.0 run on the same card.
 - Both tools ran on the same machine (NVIDIA Titan Xp GPU + 16 CPU cores),
   same bigWig inputs, one library at a time, wrapped in `/usr/bin/time -v`
   for wall-clock and peak-RSS logging.

@@ -25,7 +25,7 @@ These look similar in a coarse utilization trace (both show "not pegged at
 methodology below is built to tell them apart rather than just confirm "yes,
 utilization differs."
 
-## Findings (2026-08-18; pydreg side re-measured 2026-11-23 on 0.4.0)
+## Findings (2026-08-18; pydreg side re-measured 2026-11-23 on 1.0.0)
 
 Both hypotheses were confirmed, on real hardware, as two separate and
 independently-measured mechanisms -- neither alone explains the whole gap.
@@ -70,7 +70,7 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   the identical workload -- the kernel-design gap in isolation. Notably
   tight across a 4x range of library sizes, and trending mildly *against*
   size (5.01x on G1's 17.1M positions, 5.95x on K562_groseq's 4.19M).
-  This was 4.28-4.63x (median 4.47x) before 0.4.0. 0.4.0's fused
+  This was 4.28-4.63x (median 4.47x) before 0.4.0. Its fused
   `pydreg_rbf_gemv` kernel now takes 12.5% of pydreg's GPU time, where
   the separate `pydreg_rbf_from_cross` and cuBLAS `gemv` kernels took
   ~25% and ~8%; the cuBLAS sgemm is unchanged and now 87.5%.
@@ -120,7 +120,7 @@ entries for the full before/after.)
 **Scope**: the numbers above are the full 12-library sweep on
 `cbsugpu01`'s TITAN Xp (nvidia-smi GPU 0), and every figure below is drawn
 from it. The dREG captures are from `profile_gpu_all.sh`'s 2026-09-03 run.
-The pydreg captures were redone on 2026-11-23 with pydreg 0.4.0, on the
+The pydreg captures were redone on 2026-11-23 with pydreg 1.0.0, on the
 same card, with the same `profile_gpu.sh` invocation, and paired with those
 dREG captures (dREG's code hasn't changed, so they weren't redone). The
 2026-09-03 pydreg captures, and the archived raw data, are in

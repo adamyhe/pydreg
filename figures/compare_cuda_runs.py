@@ -5,7 +5,7 @@ benchmark results and summarizes timings, per GPU and precision mode.
 Reads every $OUT_DIR/cuda/<gpu-label>/<mode>/ run directory (or the ones
 named with --gpus/--modes). Per library, it compares against the published
 results in adamyhe/pydreg-supporting-data, which since 2026-11-24 are
-this script's own 2026-11-23 run: pydreg 0.4.0 (fused cupy kernel), cupy
+this script's own 2026-11-23 run: pydreg 1.0.0 (fused cupy kernel), cupy
 backend on an NVIDIA Titan Xp, float32, --cores 16 --seed 0:
 
   - scores: max |local - published| over positions in both *.dREG.infp.bw
@@ -25,10 +25,11 @@ scores that move by even ~5e-4 flip the positions sitting right at the
 cutoff, and the neighbors densified around them. Checked against the old
 pre-0.4.0 reference, the fused kernel's score shift (max 4.4-5.0e-4) put
 1.0-2.1e-4 of positions in only one track on every library, with Jaccard
-against dREG improving on all 12. If a run fails only on positions, check
-whether the differing positions score ~0.05 before treating it as a
-regression; --position-tol 5e-4 is the tolerance to use across a scoring
-change. Jaccard against dREG is the check that matters most. The checks
+against dREG improving on all 12. With the 1.0.0 run as the reference,
+unchanged scoring code should pass at the defaults. If a run fails only on
+positions, check whether the differing positions score ~0.05 and report
+it (see BENCHMARK_PLAN.md) rather than loosening --position-tol. Jaccard
+against dREG is the check that matters most. The checks
 gate fp32 runs only: tf32 runs are expected to move scores by a few 1e-3 and peaks
 by a few 1e-3 Jaccard, so for them the numbers are reported without
 pass/fail.

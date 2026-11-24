@@ -61,7 +61,7 @@ Putting a number on mechanism 2 alone — counting only time the GPU is
 actually busy, so the idle gaps above are excluded entirely — dREG takes a
 median **5.47x** longer than pydreg for identical work (5.01-5.95x across
 the 12 libraries). Counting the whole phase including idle time, it's
-**6.75x** (6.49-7.10x). These are pydreg 0.4.0 numbers on a TITAN Xp; before
+**6.75x** (6.49-7.10x). These are pydreg 1.0.0 numbers on a TITAN Xp; before
 0.4.0's fused RBF+GEMV kernel they were 4.47x and 5.48x.
 
 One caveat worth knowing if you quote the per-operation numbers: they

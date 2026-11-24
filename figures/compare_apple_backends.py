@@ -3,7 +3,7 @@
 benchmark results and summarizes mlx vs numpy (CPU) timings.
 
 The published pydreg results (adamyhe/pydreg-supporting-data) are
-pydreg 0.4.0 on the cupy backend on an NVIDIA Titan Xp, i.e. float32
+pydreg 1.0.0 on the cupy backend on an NVIDIA Titan Xp, i.e. float32
 scoring with the fused kernel, --cores 16 --seed 0 (replaced 2026-11-24;
 see compare_cuda_runs.py). So
 "equivalent" here means, per library and backend:

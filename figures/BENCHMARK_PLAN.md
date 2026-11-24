@@ -11,7 +11,7 @@ kernels in 0.4.0, the M5 TF32 fix), so they are stale.
 
 | # | hardware | script | libraries | modes | status |
 |---|---|---|---|---|---|
-| A | NVIDIA Titan Xp node (the one the published dREG baselines ran on) | `timing_scripts_cuda.sh` | all 12 | fp32 only (compute capability 6.1 has no TF32) | to do. **Headline figures.** |
+| A | NVIDIA Titan Xp node (the one the published dREG baselines ran on) | `timing_scripts_cuda.sh` | all 12 | fp32 only (compute capability 6.1 has no TF32) | **done** 2026-11-23, see `docs/PERF_LOG.md` (2026-11-24). **Headline figures.** |
 | B | NVIDIA A100 | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
 | C | NVIDIA L40S | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
 | D | Apple M5 | `timing_scripts_apple.sh` | Jurkat_ChROseq_1 | mlx + mlx-tf32 | to do (needs a Mac, not a cluster) |

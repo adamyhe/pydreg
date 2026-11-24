@@ -5346,16 +5346,21 @@ L40S figures in the 2026-11-22 entry. Feature extraction stayed far
 below predict (14.2s vs 157.1s for the informative positions), so the
 GPU was the bottleneck throughout. Artifacts are in
 `figures/benchmark_results/1.0/nvidia-geforce-rtx-3080/`.
-## 2026-11-24 — 1.0 re-benchmark on the TITAN Xp: pydreg 0.4.0 is 5.17x faster than dREG end to end (was 4.51x); HF reference replaced (measurement only, no code change)
+## 2026-11-24 — 1.0 re-benchmark on the TITAN Xp: pydreg 1.0.0 is 5.17x faster than dREG end to end (was 4.51x); HF reference replaced (measurement only, no code change)
 
 Reran the 12-library benchmark on `cbsugpu01`'s TITAN Xp (nvidia-smi GPU
 0, compute capability 6.1, so fp32 only) with `figures/timing_scripts_cuda.sh`
-at 0.4.0 (`ad128b2`, src identical to the 0.4.0 tag): `--backend cupy
+for 1.0.0 (run A in `figures/BENCHMARK_PLAN.md`): `--backend cupy
 --cores 16 --seed 0`, one library at a time, each run waiting for an idle
 GPU and a 1-minute load average under 2. The same card ran dREG's
-published runs, so the dREG ratios are like for like.
+published runs, so the dREG ratios are like for like. Provenance: the
+sweep ran on `ad128b2` (`env.txt` records it), whose `src/` lacks only
+1.0.0's sub-second input check and its `raw.peak.bed.gz` fix; the
+`prob = -1` rows were stripped from the 12 `raw.peak.bed.gz` files
+afterwards (HF commit `75c9702`), so the published files match 1.0.0's
+output format.
 
-**End to end, vs the published pre-0.4.0 pydreg run on the same card:**
+**End to end, vs the published pre-1.0 pydreg run on the same card:**
 wall time is a median 0.871x of before (0.858-0.940x). G1, the largest
 library (17.1M positions), gains least: 0.98x on the first run of the
 sweep and 0.94x on a rerun (40.8 vs 43.4 min), with the first run's
@@ -5377,9 +5382,11 @@ both sides: that's the densification cutoff (`peaks.get_dense_infp`,
 threshold 0.05, and the `> 0.05` filter in `peaks.py`). The fused
 kernel's ~5e-4 score shift flips positions sitting at the cutoff, plus
 the neighbors densified around them. That's expected, not a regression.
-Everything passes at `--position-tol 5e-4`. These runs are now the
+Everything passes at `--position-tol 5e-4`; `summary.csv` in
+`figures/benchmark_results/1.0/nvidia-titan-xp/` is from the default
+tolerances, so it shows the positions failures as they were. These runs are now the
 published reference in `adamyhe/pydreg-supporting-data` (HF commit
-`eb40bcd`), so later same-code runs get compared against 0.4.0.
+`eb40bcd`), so later same-code runs get compared against 1.0.0.
 
 **GPU profiling** (pydreg side recaptured with `profile_gpu.sh`, paired
 with the 2026-09-03 dREG captures from the same card). Per scoring phase:
@@ -5396,4 +5403,4 @@ kernel launches at the default `query_chunk=4096`, `sv_chunk=16384`.
 Raw outputs: `/workdir/ayh8/pydreg_bench/` on cbsugpu01 (node-local).
 Re-run with `GPU_ID=0 bash figures/timing_scripts_cuda.sh`, then
 `figures/compare_cuda_runs.py`. Against the new reference, the default
-tolerances should pass for 0.4.0-equivalent code.
+tolerances should pass for unchanged scoring code.
