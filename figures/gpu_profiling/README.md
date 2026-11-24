@@ -25,7 +25,7 @@ These look similar in a coarse utilization trace (both show "not pegged at
 methodology below is built to tell them apart rather than just confirm "yes,
 utilization differs."
 
-## Findings (2026-08-18)
+## Findings (2026-08-18; pydreg side re-measured 2026-11-23 on 0.4.0)
 
 Both hypotheses were confirmed, on real hardware, as two separate and
 independently-measured mechanisms -- neither alone explains the whole gap.
@@ -47,7 +47,7 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   19.0s]` -- six full 16-batch rounds plus one short gap from the
   undersized final round of a single batch, 439.5s of pure idle inside a
   2,433.5s span. dREG loses a median **22.3%** of its own window (range
-  20.0-26.6%) to this; pydreg loses **4.2%** (3.7-4.8%).
+  20.0-26.6%) to this; pydreg loses **4.1%** (3.6-4.4%).
 - **Kernel-design gap (hypothesis 2), confirmed and sharper than
   expected -- numbers below are phase-exact** (both sides restricted to
   just the informative-positions phase, via the `start_epoch` windowing
@@ -55,21 +55,25 @@ Full narrative in `docs/PERF_LOG.md`'s 2026-08-18 entry; summary here:
   position counts both sides: Rgtsvm's
   `GTSVM::CUDA::SparseEvaluateKernelKernel256` does **8.57-9.05**
   positions per launch (~2.48ms each) vs. pydreg's
-  `sgemm_128x128x8_NT_vec` (cuBLAS) at **108.4-110.4** (~5.38ms each) --
+  `sgemm_128x128x8_NT_vec` (cuBLAS) at **108.5-111.0** (~5.79ms each) --
   a median **12.4x** fewer kernel launches for the same work. Memory
   transfers are starker still: dREG issues one Host-to-Device memcpy per
   **4.16-4.41** positions, averaging **2.1us** each (clearly
-  launch-overhead-dominated), vs. pydreg's one per **3,958-4,085**
-  positions averaging **495.5us** -- a median **942x** more transfer
+  launch-overhead-dominated), vs. pydreg's one per **3,956-4,106**
+  positions averaging **521.5us** -- a median **942x** more transfer
   calls for only ~4x more total H2D time. Textbook confirmation of "many
   small sparse-oriented operations" vs. "few large batched dense
   operations."
 - **Cleanest single number**: restricting to time the GPU is *actually
   doing something* (excluding the scheduling gap above entirely), dREG's
-  total GPU-busy time is **4.28-4.63x** pydreg's (median **4.47x**) for
+  total GPU-busy time is **5.01-5.95x** pydreg's (median **5.47x**) for
   the identical workload -- the kernel-design gap in isolation. Notably
   tight across a 4x range of library sizes, and trending mildly *against*
-  size (4.28x on G1's 17.1M positions, 4.63x on K562_groseq's 4.19M).
+  size (5.01x on G1's 17.1M positions, 5.95x on K562_groseq's 4.19M).
+  This was 4.28-4.63x (median 4.47x) before 0.4.0. 0.4.0's fused
+  `pydreg_rbf_gemv` kernel now takes 12.5% of pydreg's GPU time, where
+  the separate `pydreg_rbf_from_cross` and cuBLAS `gemv` kernels took
+  ~25% and ~8%; the cuBLAS sgemm is unchanged and now 87.5%.
 
 **Both per-operation gaps depend on pydreg's own batching defaults, so
 quote them with those attached.** dREG's per-position rates are
@@ -113,9 +117,14 @@ run, not just this phase, giving smaller ratios -- ~17x/~666x. Every
 number above supersedes those; see `docs/PERF_LOG.md`'s two 2026-08-18
 entries for the full before/after.)
 
-**Scope**: the numbers above are the full 12-library sweep
-(`profile_gpu_all.sh`, run 2026-09-03 on `cbsugpu01`), and every figure
-below is drawn from it.
+**Scope**: the numbers above are the full 12-library sweep on
+`cbsugpu01`'s TITAN Xp (nvidia-smi GPU 0), and every figure below is drawn
+from it. The dREG captures are from `profile_gpu_all.sh`'s 2026-09-03 run.
+The pydreg captures were redone on 2026-11-23 with pydreg 0.4.0, on the
+same card, with the same `profile_gpu.sh` invocation, and paired with those
+dREG captures (dREG's code hasn't changed, so they weren't redone). The
+2026-09-03 pydreg captures, and the archived raw data, are in
+`/fs/cbsubscb17/storage/projects/pydreg/figures/gpu_profiling/gpu_out`.
 
 **Counts transfer between captures; times don't.** Jurkat_PROseq is the
 one library captured both in the original 2026-08-18 pair and in the

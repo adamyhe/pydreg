@@ -70,14 +70,19 @@ All 12 are published PRO-seq/GRO-seq/ChRO-seq libraries from GEO:
   were all generated against a raw, directly-installed R/CUDA/Rgtsvm stack
   (a bare `run_dREG.bsh` call), not the container described below.
 - **pydreg**: this repo's Python port, same model weights (converted to
-  safetensors, see `adamyhe/pydreg` on the Hub), run with `--cores 16`.
+  safetensors, see `adamyhe/pydreg` on the Hub). The `pydreg/` outputs are
+  pydreg 0.4.0 (fused cupy scoring kernel, float32), run 2026-11-23 with
+  `--backend cupy --cores 16 --seed 0` by
+  [`figures/timing_scripts_cuda.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_cuda.sh).
+  They replace an earlier, unseeded pre-0.4.0 run on the same card.
 - Both tools ran on the same machine (NVIDIA Titan Xp GPU + 16 CPU cores),
   same bigWig inputs, one library at a time, wrapped in `/usr/bin/time -v`
   for wall-clock and peak-RSS logging.
 
 Exact invocations: [`figures/timing_scripts_download.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_download.sh)
 (fetches/rebuilds the 12 input bigWigs from GEO) and
-[`figures/timing_scripts_pydreg_only.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_pydreg_only.sh).
+[`figures/timing_scripts_cuda.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_cuda.sh)
+(pydreg).
 For dREG, the repo's own script instructions now favor
 [`figures/timing_scripts_dreg_apptainer.sh`](https://github.com/adamyhe/pydreg/blob/main/figures/timing_scripts_dreg_apptainer.sh)
 (runs dREG inside the [Danko-Lab/dREG-apptainer](https://github.com/Danko-Lab/dREG-apptainer)

@@ -2,8 +2,10 @@
 """Checks figures/timing_scripts_apple.sh's outputs against the published
 benchmark results and summarizes mlx vs numpy (CPU) timings.
 
-The published pydreg results (adamyhe/pydreg-supporting-data) came from
-the cupy backend on an NVIDIA Titan Xp, i.e. float32 scoring, unseeded. So
+The published pydreg results (adamyhe/pydreg-supporting-data) are
+pydreg 0.4.0 on the cupy backend on an NVIDIA Titan Xp, i.e. float32
+scoring with the fused kernel, --cores 16 --seed 0 (replaced 2026-11-24;
+see compare_cuda_runs.py). So
 "equivalent" here means, per library and backend:
 
   - scores: max |local - published| over positions present in both
@@ -15,11 +17,14 @@ the cupy backend on an NVIDIA Titan Xp, i.e. float32 scoring, unseeded. So
     tracks is at most --position-tol (default 1e-4). Not required to be 0:
     the track includes gap-filled and densified positions, which are chosen
     by score thresholds, so score differences at the 1e-4 level can flip a
-    handful.
+    handful. On the CUDA re-benchmark, a ~5e-4 score shift put 1-2e-4 of
+    positions in only one track (see compare_cuda_runs.py); if only this
+    check fails by that much, --position-tol 5e-4 is the fair tolerance.
   - peaks: `bedtools jaccard` of the local *.dREG.peak.prob.bed.gz against
     real dREG's published peaks is at least the published pydreg run's own
     Jaccard against dREG minus --jaccard-tol (default 0.001). Peak calling
-    is stochastic (QMC) and the published run was unseeded, so this asks
+    is stochastic (QMC), and even a seeded run only repeats exactly given
+    identical scores, which mlx/numpy vs cupy never are, so this asks
     "agrees with dREG as well as the published run did" rather than for
     identical peaks.
 

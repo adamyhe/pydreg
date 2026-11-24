@@ -4,8 +4,9 @@ benchmark results and summarizes timings, per GPU and precision mode.
 
 Reads every $OUT_DIR/cuda/<gpu-label>/<mode>/ run directory (or the ones
 named with --gpus/--modes). Per library, it compares against the published
-results in adamyhe/pydreg-supporting-data, which came from the cupy
-backend on an NVIDIA Titan Xp (float32, unseeded):
+results in adamyhe/pydreg-supporting-data, which since 2026-11-24 are
+this script's own 2026-11-23 run: pydreg 0.4.0 (fused cupy kernel), cupy
+backend on an NVIDIA Titan Xp, float32, --cores 16 --seed 0:
 
   - scores: max |local - published| over positions in both *.dREG.infp.bw
     tracks, at most --score-atol (default 1e-3);
@@ -13,17 +14,22 @@ backend on an NVIDIA Titan Xp (float32, unseeded):
     --position-tol (default 1e-4);
   - peaks: `bedtools jaccard` against real dREG's published peaks, at
     least the published pydreg run's own Jaccard minus --jaccard-tol
-    (default 0.001). Peak calling is stochastic and the published run was
-    unseeded, so this asks "agrees with dREG as well as before".
+    (default 0.001). Peak calling is stochastic (seeded runs repeat
+    exactly, but only on the same code and scores), so this asks "agrees
+    with dREG as well as before".
 
-These are the same checks as compare_apple_backends.py. One caveat: the
-published run predates 0.4.0's fused cupy kernel, which itself moved
-scores by up to ~1e-3 (float32 noise, closer to the float64 reference),
-so a current-code run can land near or just over --score-atol and still be
-correct. Jaccard against dREG is the check that matters most; if only
-scores/positions fail by a hair, compare against a pre-0.4.0 run before
-treating it as a regression. They gate fp32
-runs only: tf32 runs are expected to move scores by a few 1e-3 and peaks
+These are the same checks as compare_apple_backends.py. The positions
+check is the most sensitive to scoring changes. The track keeps positions
+by score thresholds (the 0.05 densification cutoff in peaks.py), so
+scores that move by even ~5e-4 flip the positions sitting right at the
+cutoff, and the neighbors densified around them. Checked against the old
+pre-0.4.0 reference, the fused kernel's score shift (max 4.4-5.0e-4) put
+1.0-2.1e-4 of positions in only one track on every library, with Jaccard
+against dREG improving on all 12. If a run fails only on positions, check
+whether the differing positions score ~0.05 before treating it as a
+regression; --position-tol 5e-4 is the tolerance to use across a scoring
+change. Jaccard against dREG is the check that matters most. The checks
+gate fp32 runs only: tf32 runs are expected to move scores by a few 1e-3 and peaks
 by a few 1e-3 Jaccard, so for them the numbers are reported without
 pass/fail.
 

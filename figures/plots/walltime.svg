@@ -41,18 +41,18 @@ text { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; fill: #202124; }
 <text x="503.4" y="492" class="tick" text-anchor="middle">4</text>
 <text x="80" y="84.1" class="tick" text-anchor="end">4</text>
 <line x1="90.0" y1="470.0" x2="530.0" y2="55.0" class="diagonal"/>
-<circle cx="481.1" cy="272.4" r="7" class="mark"><title>G1: dREG 3.32h, pydreg 0.72h</title></circle>
-<circle cx="407.0" cy="340.4" r="7" class="mark"><title>G3: dREG 1.78h, pydreg 0.40h</title></circle>
-<circle cx="399.7" cy="347.8" r="7" class="mark"><title>G5: dREG 1.68h, pydreg 0.37h</title></circle>
-<circle cx="357.3" cy="386.1" r="7" class="mark"><title>G6: dREG 1.18h, pydreg 0.26h</title></circle>
-<circle cx="356.0" cy="385.8" r="7" class="mark"><title>G7: dREG 1.16h, pydreg 0.26h</title></circle>
-<circle cx="452.5" cy="302.6" r="7" class="mark"><title>GM12878_groseq: dREG 2.61h, pydreg 0.55h</title></circle>
-<circle cx="341.9" cy="404.4" r="7" class="mark"><title>K562_groseq: dREG 1.03h, pydreg 0.22h</title></circle>
-<circle cx="349.2" cy="394.9" r="7" class="mark"><title>Jurkat_PROseq: dREG 1.10h, pydreg 0.24h</title></circle>
-<circle cx="360.2" cy="386.6" r="7" class="mark"><title>Jurkat_ChROseq_1: dREG 1.20h, pydreg 0.26h</title></circle>
-<circle cx="344.1" cy="399.0" r="7" class="mark"><title>Jurkat_ChROseq_2: dREG 1.05h, pydreg 0.23h</title></circle>
-<circle cx="395.9" cy="348.5" r="7" class="mark"><title>Jurkat_ChROseq: dREG 1.62h, pydreg 0.37h</title></circle>
-<circle cx="365.4" cy="378.7" r="7" class="mark"><title>Jurkat_leChROseq: dREG 1.26h, pydreg 0.28h</title></circle>
+<circle cx="481.1" cy="279.5" r="7" class="mark"><title>G1: dREG 3.32h, pydreg 0.68h</title></circle>
+<circle cx="407.0" cy="354.9" r="7" class="mark"><title>G3: dREG 1.78h, pydreg 0.35h</title></circle>
+<circle cx="399.7" cy="362.3" r="7" class="mark"><title>G5: dREG 1.68h, pydreg 0.33h</title></circle>
+<circle cx="357.3" cy="401.8" r="7" class="mark"><title>G6: dREG 1.18h, pydreg 0.23h</title></circle>
+<circle cx="356.0" cy="402.1" r="7" class="mark"><title>G7: dREG 1.16h, pydreg 0.23h</title></circle>
+<circle cx="452.5" cy="315.1" r="7" class="mark"><title>GM12878_groseq: dREG 2.61h, pydreg 0.50h</title></circle>
+<circle cx="341.9" cy="421.7" r="7" class="mark"><title>K562_groseq: dREG 1.03h, pydreg 0.19h</title></circle>
+<circle cx="349.2" cy="412.0" r="7" class="mark"><title>Jurkat_PROseq: dREG 1.10h, pydreg 0.21h</title></circle>
+<circle cx="360.2" cy="402.0" r="7" class="mark"><title>Jurkat_ChROseq_1: dREG 1.20h, pydreg 0.23h</title></circle>
+<circle cx="344.1" cy="415.6" r="7" class="mark"><title>Jurkat_ChROseq_2: dREG 1.05h, pydreg 0.20h</title></circle>
+<circle cx="395.9" cy="363.4" r="7" class="mark"><title>Jurkat_ChROseq: dREG 1.62h, pydreg 0.32h</title></circle>
+<circle cx="365.4" cy="395.8" r="7" class="mark"><title>Jurkat_leChROseq: dREG 1.26h, pydreg 0.24h</title></circle>
 <text x="310.0" y="525" class="axis" text-anchor="middle">dREG wall time (hours, log scale)</text>
 <text x="28" y="262.5" class="axis" text-anchor="middle" transform="rotate(-90 28 262.5)">pydreg wall time (hours, log scale)</text>
 <text x="98" y="75" class="note" text-anchor="start">Below diagonal favors pydreg</text>
