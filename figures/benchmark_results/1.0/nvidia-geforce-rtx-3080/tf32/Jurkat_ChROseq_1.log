@@ -1,0 +1,23 @@
+/home/adamyhe/github/pydreg/.venv/lib/python3.12/site-packages/numba/np/ufunc/parallel.py:373: NumbaWarning: The TBB threading layer requires TBB version 2021 update 6 or later i.e., TBB_INTERFACE_VERSION >= 12060. Found TBB_INTERFACE_VERSION = 12050. The TBB threading layer is disabled.
+  warnings.warn(problem)
+2026-11-23 03:37:24,772 INFO loading models...
+2026-11-23 03:37:27,514 INFO loading models done in 2.74s
+2026-11-23 03:37:28,517 INFO using cupy backend (query_chunk=4096, TF32 GEMMs)
+2026-11-23 03:37:28,517 INFO scanning informative positions...
+2026-11-23 03:37:33,903 INFO scanning informative positions done in 5.39s
+2026-11-23 03:37:33,903 INFO 4997104 informative positions found
+2026-11-23 03:37:33,951 INFO scoring informative positions...
+2026-11-23 03:39:25,564 INFO scoring informative positions: 13.68s extracting features, 115.42s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 03:39:25,572 INFO scoring informative positions done in 115.75s
+2026-11-23 03:39:25,572 INFO densifying and merging into broad peaks...
+2026-11-23 03:39:25,729 INFO informative score distribution: min=-0.1929 q01=-0.0371 median=0.0016 q99=0.9527 max=1.5833; negative=2244852 zero=0 noise=4489704 sigma=0.0109834
+2026-11-23 03:39:41,379 INFO scoring gap-filled positions: 7.90s extracting features, 3.25s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 03:40:59,998 INFO scoring 10bp-densified broad-peak positions: 11.89s extracting features, 73.19s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 03:41:01,499 INFO densifying and merging into broad peaks done in 98.91s
+2026-11-23 03:41:01,499 INFO min_score=0.0759, 7705649 dense positions, 47949 broad peaks
+2026-11-23 03:41:01,499 INFO calling peaks...
+2026-11-23 03:41:06,165 INFO calling 43813 broad peaks in 452 blocks of up to 100 with 16 peak-calling process(es) (pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=0.001, pmv_laplace_tail_tol=1e-06, seed=0)
+2026-11-23 03:42:23,013 INFO peak-calling profile: 1237.89s block CPU time, 1210.85s in 82860 pmv_laplace call(s) / 7691184 CDF eval(s), 20.51s non-pmv find_rf_peaks, 6.53s other block overhead
+2026-11-23 03:42:23,042 INFO calling peaks done in 83.55s
+2026-11-23 03:42:23,042 INFO 85578 raw candidate peaks, 48192 significant
+2026-11-23 03:42:26,248 INFO writing outputs done in 3.21s

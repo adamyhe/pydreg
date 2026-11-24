@@ -19,7 +19,9 @@
 # resumes where it stopped (FORCE=1 reruns everything).
 #
 # Environment overrides:
-#   GPU_ID        GPU index, as nvidia-smi numbers them (default: 0)
+#   GPU_ID        GPU index (or UUID), as nvidia-smi numbers them (default:
+#                 the first entry of CUDA_VISIBLE_DEVICES if it's already
+#                 set, e.g. by SLURM for the allocated GPU; else 0)
 #   GPU_LABEL     output directory name for this card (default: derived from
 #                 the GPU name, e.g. nvidia-titan-xp)
 #   CORES         --cores value (default: 16, matching the published runs)
@@ -30,7 +32,11 @@
 #   IDLE_UTIL     max GPU utilization %, to count as idle (default: 5)
 #   IDLE_MEM_MIB  max GPU memory in use, to count as idle (default: 2048;
 #                 raise it on a desktop card that also drives a display)
-#   MAX_LOAD      max 1-minute load average, to count as idle (default: 2)
+#   MAX_LOAD      max 1-minute load average, to count as idle (default: 2).
+#                 The load average covers the whole node, so on a shared
+#                 cluster node either request it exclusively or set
+#                 MAX_LOAD=off to skip this check (the GPU checks still
+#                 apply to the allocated GPU)
 #   WAIT_IDLE     seconds to wait for idle before giving up (default: 3600)
 #   FORCE         set to 1 to rerun runs that already completed
 #   DATA_DIR / OUT_DIR, as in timing_scripts_common.sh
@@ -48,6 +54,11 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/timing_scripts_common.sh"
 
+# Respect a GPU that's already been chosen (SLURM sets CUDA_VISIBLE_DEVICES
+# to the allocated one) rather than silently benchmarking device 0.
+if [[ -z "${GPU_ID:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    GPU_ID="${CUDA_VISIBLE_DEVICES%%,*}"
+fi
 GPU_ID="${GPU_ID:-0}"
 CORES="${CORES:-16}"
 SEED="${SEED:-0}"
@@ -104,7 +115,7 @@ busy_reason() {
         echo "GPU utilization ${max_util}% > ${IDLE_UTIL}%"
     elif (( mem > IDLE_MEM_MIB )); then
         echo "GPU memory in use ${mem} MiB > ${IDLE_MEM_MIB} MiB"
-    elif awk -v l="$load" -v m="$MAX_LOAD" 'BEGIN { exit !(l > m) }'; then
+    elif [[ "$MAX_LOAD" != off ]] && awk -v l="$load" -v m="$MAX_LOAD" 'BEGIN { exit !(l > m) }'; then
         echo "load average ${load} > ${MAX_LOAD}"
     fi
 }

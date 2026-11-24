@@ -187,3 +187,5 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Committed benchmark results (small text artifacts only; see figures/BENCHMARK_PLAN.md)
+!figures/benchmark_results/**/*.log

@@ -5312,3 +5312,37 @@ contributes to every query, so the full GEMM is required. Any further
 reduction in scoring work would have to approximate the SVR (e.g.
 Nystrom or reduced-set methods), which changes scores and is out of
 scope.
+
+## 2026-11-23 (cont.) — 1.0 re-benchmark, run E: RTX 3080, Jurkat_ChROseq_1, fp32 vs `--tf32` (measurement only, no code change)
+
+First run of the 1.0 re-benchmark (`figures/BENCHMARK_PLAN.md`), made
+with the new `figures/timing_scripts_cuda.sh`. Ryzen 7 9800X3D (16
+threads) + RTX 3080 10GB under WSL2, driver 621.14, cupy 14.1.1,
+Jurkat_ChROseq_1 on local NVMe, `--cores 16 --seed 0`. The code was
+`src/`-identical to `a8eae1f`, which includes the input check and the
+raw-peak fix. The script's idle check held each run until GPU
+utilization was at most 15% (this card's display baseline is 2-8%), and
+between runs it waited for the fp32 run's own load average to decay.
+
+| | fp32 | tf32 | |
+|---|---|---|---|
+| wall clock | 380.7s | 302.5s | 1.26x |
+| informative `scorer.predict` | 157.1s | 115.4s | 1.36x |
+| densified `scorer.predict` | 111.0s | 73.2s | 1.52x |
+| gap-filled `scorer.predict` | 4.2s | 3.3s | |
+| peak calling | 83.6s | 83.5s | |
+| max RSS | 6.18 GiB | 6.18 GiB | |
+| Jaccard vs real dREG | 0.999793 | 0.996183 | |
+
+Compared with the published (pre-0.4.0, Titan Xp) run: the fp32 max
+|score diff| was 5.0e-4, and Jaccard vs dREG rose from 0.999363 to
+0.999793. 1.60e-4 of positions were present in only one run, just over
+`compare_cuda_runs.py`'s 1e-4 tolerance. This is consistent with 0.4.0's
+fused kernel moving scores near the gap-fill/densify thresholds, rather
+than a regression, given that peak agreement improved. The tolerance
+means something again once the Titan Xp rerun replaces the published
+data. The TF32 cost on this card (Jaccard 0.9962) matches the A100 and
+L40S figures in the 2026-11-22 entry. Feature extraction stayed far
+below predict (14.2s vs 157.1s for the informative positions), so the
+GPU was the bottleneck throughout. Artifacts are in
+`figures/benchmark_results/1.0/nvidia-geforce-rtx-3080/`.
