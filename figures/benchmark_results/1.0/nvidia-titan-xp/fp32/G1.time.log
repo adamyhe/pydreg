@@ -1,0 +1,23 @@
+	Command being timed: "/home2/ayh8/pydreg/.venv/bin/pydreg /workdir/ayh8/pydreg_bench/data/G1.pl.bw /workdir/ayh8/pydreg_bench/data/G1.mn.bw /workdir/ayh8/pydreg_bench/output/cuda/nvidia-titan-xp/fp32/G1 -v --no-progress --backend cupy --cores 16 --seed 0"
+	User time (seconds): 9578.69
+	System time (seconds): 90.43
+	Percent of CPU this job got: 395%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 40:46.39
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 10236880
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 4760
+	Minor (reclaiming a frame) page faults: 5352715
+	Voluntary context switches: 1039091
+	Involuntary context switches: 493578
+	Swaps: 0
+	File system inputs: 1191576
+	File system outputs: 1629032
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
