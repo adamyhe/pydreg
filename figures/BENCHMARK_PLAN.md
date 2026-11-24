@@ -154,13 +154,16 @@ For tf32, there is no pass/fail. Expect Jaccard vs dREG around 0.996 and
 
 ## After all runs are in (maintainer)
 
-- Upload run A's outputs to the HF dataset's `pydreg/` folder, or copy them
-  to `figures/benchmark_data/pydreg/` for a local preview, and rerun
-  `plot_walltime.py`, `plot_memory.py`, `plot_peak_agreement.py` and
-  `plot_score_exactness.py`.
-- Update the README's Performance numbers from run A's medians, add the
-  cross-hardware table from B-E, append a `docs/PERF_LOG.md` entry, and
-  update the technical note.
+- **Done.** Upload run A's outputs to the HF dataset's `pydreg/` folder (HF
+  commit `eb40bcd`), or copy them to `figures/benchmark_data/pydreg/` for a
+  local preview, and rerun `plot_walltime.py`, `plot_memory.py`,
+  `plot_peak_agreement.py` and `plot_score_exactness.py`. A rerun on
+  2026-11-24 reproduced the committed SVGs byte for byte. Any file in
+  `figures/benchmark_data/` overrides HF, so clear out stale ones first.
+- **Done**, except the technical note, which lives outside this repo. Update
+  the README's Performance numbers from run A's medians, add the
+  cross-hardware table from B-E, append a `docs/PERF_LOG.md` entry
+  (2026-11-24 (cont.)), and update the technical note.
 - Then cut 1.0.0: version bump, `Development Status :: 5 - Production/Stable`,
   CHANGELOG, `CITATION.cff`.
 

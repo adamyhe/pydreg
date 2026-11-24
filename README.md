@@ -19,7 +19,19 @@ pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA
   <img src="https://raw.githubusercontent.com/adamyhe/pydreg/main/figures/plots/memory.svg" alt="dREG versus pydreg peak RSS" width="45%">
 </p>
 
-Peak calls from pydreg have ~0.999 Jaccard similarity with official dREG peak calls.
+Peak calls from pydreg agree with official dREG peak calls at a median 0.99967 Jaccard index (range 0.99840-0.99991) across the same 12 libraries.
+
+On other hardware, for one library (Jurkat ChRO-seq replicate 1, about 5M informative positions), with `--seed 0`:
+
+| hardware | wall time | with `--tf32` | peak RSS | Jaccard vs dREG (`--tf32`) |
+|---|---|---|---|---|
+| NVIDIA L40S | 5.3 min | 4.4 min (1.21x) | 6.0 GiB | 0.99979 (0.99618) |
+| NVIDIA RTX 3080 | 6.3 min | 5.0 min (1.26x) | 6.2 GiB | 0.99979 (0.99618) |
+| NVIDIA A100 | 7.4 min | 4.9 min (1.51x) | 6.0 GiB | 0.99979 (0.99618) |
+| NVIDIA Titan Xp | 13.7 min | n/a | 5.8 GiB | 0.99979 |
+| Apple M5, `mlx` | 27.2 min | 18.1 min (1.50x) | 4.9 GiB | 0.99951 (0.99469) |
+
+The NVIDIA runs used 16 CPU cores and the M5 run used its 10. dREG took 72 min on this library on the Titan Xp node. Peak calling runs on the CPU, so the host CPU matters too: the A100's node is slower than the L40S's here. Without `--tf32`, every NVIDIA GPU gives identical output. Full logs are in [`figures/benchmark_results/1.0/`](figures/benchmark_results/1.0/).
 
 ## Installation
 
@@ -65,7 +77,7 @@ Options:
 | flag                                  | default          | meaning                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--backend {auto,cupy,mlx,sklearn,numpy}` | `auto`       | Scoring backend. `auto` uses `cupy` when a usable CUDA device is detected, `mlx` when a usable Apple Silicon (Metal) GPU is detected, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected (see `docs/OPTIMIZATION.md` for why). An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
-| `--tf32`                              | off              | Let the GPU backends (`cupy`, `mlx`) run their main matrix multiply at TF32 precision on hardware that has it (NVIDIA compute capability 8.0+, Apple M5). About 1.48x faster end to end on an A100, 1.25x on an L40S and 1.57x on an M5, but peaks agree less closely with real dREG (Jaccard 0.996 vs 0.9998 on Jurkat ChRO-seq with CUDA, 0.995 vs 0.9997 on the M5; same peaks, shifted boundaries) and results then depend on the GPU model. Off overrides `CUPY_TF32`/`MLX_ENABLE_TF32`. Ignored on CPU backends (see `docs/OPTIMIZATION.md`). |
+| `--tf32`                              | off              | Let the GPU backends (`cupy`, `mlx`) run their main matrix multiply at TF32 precision on hardware that has it (NVIDIA compute capability 8.0+, Apple M5). About 1.51x faster end to end on an A100, 1.21x on an L40S and 1.50x on an M5, but peaks agree less closely with real dREG (Jaccard 0.996 vs 0.9998 on Jurkat ChRO-seq replicate 1 with CUDA, 0.995 vs 0.9995 on the M5; same peaks, shifted boundaries) and results then depend on the GPU model. Off overrides `CUPY_TF32`/`MLX_ENABLE_TF32`. Ignored on CPU backends (see `docs/OPTIMIZATION.md`). |
 | `-p`, `--cores N`                     | `1`              | Cores pydreg is allowed to use, applied consistently across the pipeline: worker processes for the final peak-calling stage (embarrassingly parallel across broad candidate peaks) *and* numba's thread count for the parallelized feature-extraction/informative-position-scanning kernels — one number, not two independently-tunable ones. **Set this to the max number of cores you can spare on your machine** — the default of `1` is just a safe, non-surprising starting point, not a recommendation.                                                                     |
 | `--svr-model PATH`                    | pretrained       | Local SVR scorer model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                                           |
 | `--rf-model PATH`                     | pretrained       | Local random-forest peak-splitter model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                           |
