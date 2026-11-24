@@ -5294,3 +5294,21 @@ new tests: a float32 scorer built before a TF32 one stays float32 (fake,
 and on a real GPU with bit-identical output), and `CUPY_TF32=1` is
 overridden and then restored. The full suite passed on the L40S (127
 passed, 2 skipped: Metal-only). Tests: 126 -> 129.
+
+## 2026-11-23 — skipping negligible support vectors via a norm bound: ruled out, nothing to skip (diagnostic only, no code change)
+
+Idea: an RBF term `exp(-gamma * ||x - sv||^2)` is negligible when the
+distance is large, and `||x - sv|| >= | ||x|| - ||sv|| |`, so sorting SVs
+by norm could let each query chunk skip a provably negligible range of the
+GEMM without changing scores beyond float32 noise.
+
+Measured on the pretrained SVR (605,187 SVs x 360 features), using 100
+randomly drawn SVs as stand-in queries (the SVs are training positions,
+so they sit in the same feature distribution as real queries):
+`gamma = 1/360`, SV norms span 14.5-27.1 (median 18.7). The fraction of
+(query, SV) pairs with `exp(-gamma d^2) < 1e-12` was **0%**, and the norm
+bound would have skipped **0%**. With `gamma` this small, every SV
+contributes to every query, so the full GEMM is required. Any further
+reduction in scoring work would have to approximate the SVR (e.g.
+Nystrom or reduced-set methods), which changes scores and is out of
+scope.

@@ -124,3 +124,51 @@ def test_write_bigwig_roundtrips_int_coordinates(tmp_path):
     vals = r.read(["chr1"], [0], width=20, missing=0.0)[0]
     np.testing.assert_allclose(vals[:10], 1.5, atol=1e-6)
     np.testing.assert_allclose(vals[10:], 2.5, atol=1e-6)
+
+
+def _point_reads(size, n_reads, sign=1, seed=0):
+    """Single-base 3' read counts: isolated 1s (and a few 2s) at random spots."""
+    rng = np.random.default_rng(seed)
+    vals = np.zeros(size, dtype=np.float32)
+    pos = rng.choice(np.arange(0, size, 3), n_reads, replace=False)
+    vals[pos] = rng.choice([1, 1, 1, 2], n_reads)
+    return sign * vals
+
+
+def test_check_bigwig_passes_point_read_counts(array_reader):
+    bw = array_reader({
+        "chr1": _point_reads(1_200_000, 50_000, sign=-1),
+        "chr2": _point_reads(1_200_000, 50_000, sign=-1, seed=1),
+        "chrM": np.full(16_569, 0.5, dtype=np.float32),  # <=100 kb: skipped
+    })
+    assert io.check_bigwig(bw) == []
+
+
+def test_check_bigwig_flags_normalized_values(array_reader):
+    bw = array_reader({"chr1": _point_reads(1_200_000, 50_000) * 0.37})
+    assert any("non-integer" in f for f in io.check_bigwig(bw))
+
+
+def test_check_bigwig_flags_mixed_signs(array_reader):
+    vals = _point_reads(1_200_000, 50_000)
+    vals[::2] *= -1
+    assert any("mixes" in f for f in io.check_bigwig(array_reader({"chr1": vals})))
+
+
+def test_check_bigwig_flags_region_mapped_reads(array_reader):
+    def regions(seed):
+        vals = np.zeros(1_200_000, dtype=np.float32)
+        for s in np.random.default_rng(seed).choice(np.arange(0, 1_199_900, 100), 5_000, replace=False):
+            vals[s:s + 30] = 1
+        return vals
+
+    bw = array_reader({"chr1": regions(0), "chr2": regions(1)})
+    assert any("regions" in f for f in io.check_bigwig(bw))
+
+
+def test_check_bigwig_point_check_needs_two_chromosomes(array_reader):
+    """R only applies the point-read check when more than one chromosome
+    has >=100 runs of 1s."""
+    vals = np.zeros(1_200_000, dtype=np.float32)
+    vals[: 1_200_000 // 100 * 100].reshape(-1, 100)[:, :30] = 1
+    assert io.check_bigwig(array_reader({"chr1": vals})) == []

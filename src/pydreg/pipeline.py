@@ -137,6 +137,25 @@ def _score_positions(
     return scores
 
 
+def _check_inputs(readers):
+    """Raises ValueError listing every failed io.check_bigwig check across
+    `readers` ({path: reader}), mirroring run_dREG.R's stop() on a failed
+    check_bigwig."""
+    problems = [
+        f"{path} {failure}"
+        for path, bw in readers.items()
+        for failure in io.check_bigwig(bw)
+    ]
+    if problems:
+        raise ValueError(
+            "input bigWigs don't look like dREG input (unnormalized, "
+            "single-signed, 3'-point read counts):\n  "
+            + "\n  ".join(problems)
+            + "\nSee https://github.com/Danko-Lab/dREG#data-preparation. "
+            "Pass --skip-input-check (check_input=False) to run anyway."
+        )
+
+
 def _resolve_query_chunk(scorer_backend, query_chunk=None):
     if query_chunk is not None:
         return query_chunk
@@ -177,6 +196,7 @@ def run(
     pmv_laplace_cdf_eps=1e-3,
     pmv_laplace_tail_tol=stats.PMV_LAPLACE_FAST_TAIL_TOL,
     seed=None,
+    check_input=True,
     write_outputs=True,
     progress=False,
 ):
@@ -234,12 +254,18 @@ def run(
     RF split forest are all deterministic -- so this single value is passed
     straight through to peaks.call_peaks, which is where it's documented
     (including what "reproducible" does and doesn't cover). None (the
-    default) leaves the QMC integration unseeded, as it has always been."""
+    default) leaves the QMC integration unseeded, as it has always been.
+
+    check_input: run io.check_bigwig on both bigWigs first, as run_dREG.R
+    does, and raise ValueError if either looks normalized, mixes signs, or
+    has region-mapped reads. False skips it (the CLI's --skip-input-check)."""
     numba.set_num_threads(cores)
     threadpoolctl.threadpool_limits(limits=cores)
     io.set_reader_threads(cores)
     bw_plus = BigWigReader(plus_bw_path)
     bw_minus = BigWigReader(minus_bw_path)
+    if check_input:
+        _check_inputs({plus_bw_path: bw_plus, minus_bw_path: bw_minus})
 
     logger.info("loading models...")
     with _timed("loading models"):
@@ -373,9 +399,13 @@ def _write_outputs(out_prefix, bw_plus, dense_infp, raw_peak, peak_bed, cores=1)
         ),
     ]
 
-    if raw_peak is not None and len(raw_peak) > 0:
+    # run_dREG.R writes raw_peak[raw_peak$prob != -1, ]: the prob == -1
+    # sentinel rows (peaks too narrow for a p-value) never reach the file,
+    # though they stay in the in-memory result, as they do in R.
+    raw_out = None if raw_peak is None else raw_peak[raw_peak["prob"] != -1]
+    if raw_out is not None and len(raw_out) > 0:
         bedgz_tasks.append(
-            partial(io.write_bed_gz, raw_peak, f"{out_prefix}.dREG.raw.peak.bed.gz")
+            partial(io.write_bed_gz, raw_out, f"{out_prefix}.dREG.raw.peak.bed.gz")
         )
 
     if peak_bed is not None and len(peak_bed) > 0:

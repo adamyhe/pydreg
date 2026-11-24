@@ -149,6 +149,14 @@ def main(argv=None):
         "Two runs at different seeds, diffed, measure how much of the "
         "called-peak set is FDR-boundary noise",
     )
+    parser.add_argument(
+        "--skip-input-check",
+        action="store_true",
+        help="skip dREG's input check, which samples both bigWigs and stops "
+        "if either holds non-integer (normalized) values, mixes positive "
+        "and negative values, or looks region-mapped rather than "
+        "3'-point-mapped",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
         "--no-progress",
@@ -191,6 +199,7 @@ def main(argv=None):
         pmv_laplace_cdf_eps=args.pmv_laplace_cdf_eps,
         pmv_laplace_tail_tol=pmv_laplace_tail_tol,
         seed=args.seed,
+        check_input=not args.skip_input_check,
         progress=not args.no_progress,
     )
 
