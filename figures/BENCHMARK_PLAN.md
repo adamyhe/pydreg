@@ -14,7 +14,7 @@ kernels in 0.4.0, the M5 TF32 fix), so they are stale.
 | A | NVIDIA Titan Xp node (the one the published dREG baselines ran on) | `timing_scripts_cuda.sh` | all 12 | fp32 only (compute capability 6.1 has no TF32) | **done** 2026-11-23, see `docs/PERF_LOG.md` (2026-11-24). **Headline figures.** |
 | B | NVIDIA A100 | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
 | C | NVIDIA L40S | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
-| D | Apple M5 | `timing_scripts_apple.sh` | Jurkat_ChROseq_1 | mlx + mlx-tf32 | to do (needs a Mac, not a cluster) |
+| D | Apple M5 | `timing_scripts_apple.sh` | Jurkat_ChROseq_1 | mlx + mlx-tf32 | **done**, see below |
 | E | NVIDIA RTX 3080 (desktop) | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | **done**, see below |
 
 Run A is the only one that has to cover all 12 libraries, because it is the
@@ -182,3 +182,33 @@ merge that was never pushed. Artifacts are in
 | Jaccard vs dREG | 0.999793 | 0.996183 |
 | max score diff vs published | 5.0e-4 | 2.35e-3 |
 | positions in only one run | 1.60e-4 (check fails, expected, see above) | 1.16e-3 |
+
+## Run D: Apple M5 (done 2026-11-24)
+
+pydreg 1.0.0 on Mac17,4 (Apple M5, 10-core CPU, 16 GiB), macOS 27.2.1, on
+AC power, mlx 0.32.0, Jurkat_ChROseq_1 on the internal SSD, `--cores 10
+--seed 0` (all physical cores; the CUDA runs used 16). Provenance: the
+runs used `3e2f384` (`env.txt` records it as 0.4.0), whose `src/` is
+identical to `a8eae1f`. The two backends ran as separate invocations, mlx
+first, with a 5 min cooldown in between, under `caffeinate -ims`. `pmset
+-g log` shows no sleep during the window. `timing_scripts_apple.sh`
+doesn't write `env.txt`, so those were written by hand. Artifacts are in
+`figures/benchmark_results/1.0/apple-m5/`.
+
+| | mlx | mlx-tf32 |
+|---|---|---|
+| wall time | 1634.0 s | 1088.6 s (1.50x) |
+| scoring informative positions | 863.5 s | 531.3 s (1.63x) |
+| densify + merge (incl. gap-fill/densified scoring) | 622.5 s | 403.7 s |
+| peak calling | 128.2 s | 135.0 s |
+| peak RSS | 4.93 GiB | 6.00 GiB |
+| Jaccard vs dREG | 0.999513 | 0.994692 |
+| max score diff vs published | 2.25e-4 | 3.75e-3 |
+| positions in only one run | 6.84e-5 (passes) | 1.54e-3 |
+
+Checked against the 1.0.0 TITAN Xp run (run A). mlx's Jaccard vs dREG
+(0.999513) is a little below cupy's (0.999793), within tolerance: the two
+kernels' float32 scores differ at the 1e-4 level.
+
+TF32 costs more agreement on the M5 than on the NVIDIA cards (0.994692
+vs 0.996183 Jaccard) and buys more speed (1.50x vs 1.21-1.26x end to end).
