@@ -12,8 +12,8 @@ kernels in 0.4.0, the M5 TF32 fix), so they are stale.
 | # | hardware | script | libraries | modes | status |
 |---|---|---|---|---|---|
 | A | NVIDIA Titan Xp node (the one the published dREG baselines ran on) | `timing_scripts_cuda.sh` | all 12 | fp32 only (compute capability 6.1 has no TF32) | **done** 2026-11-23, see `docs/PERF_LOG.md` (2026-11-24). **Headline figures.** |
-| B | NVIDIA A100 | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
-| C | NVIDIA L40S | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | to do |
+| B | NVIDIA A100 | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | **done**, see below |
+| C | NVIDIA L40S | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | **done**, see below |
 | D | Apple M5 | `timing_scripts_apple.sh` | Jurkat_ChROseq_1 | mlx + mlx-tf32 | **done**, see below |
 | E | NVIDIA RTX 3080 (desktop) | `timing_scripts_cuda.sh` | Jurkat_ChROseq_1 | fp32 + tf32 | **done**, see below |
 
@@ -211,4 +211,52 @@ Checked against the 1.0.0 TITAN Xp run (run A). mlx's Jaccard vs dREG
 kernels' float32 scores differ at the 1e-4 level.
 
 TF32 costs more agreement on the M5 than on the NVIDIA cards (0.994692
-vs 0.996183 Jaccard) and buys more speed (1.50x vs 1.21-1.26x end to end).
+vs 0.996183 Jaccard). It buys 1.50x end to end, about the same as on the
+A100 (1.51x) and more than on the L40S and 3080 (1.21x, 1.26x).
+
+## Run B: A100-SXM4-80GB (done 2026-11-23)
+
+Sherlock node `sh03-16n09`, AMD EPYC 7763 (16 threads), driver
+550.163.01, cupy 14.1.1, Jurkat_ChROseq_1, `--cores 16 --seed 0`. The
+runs used `3e2f384`, whose `src/` is identical to `a8eae1f`. The artifacts
+don't record whether the node was exclusive. Artifacts are in
+`figures/benchmark_results/1.0/nvidia-a100-sxm4-80gb/`.
+
+| | fp32 | tf32 |
+|---|---|---|
+| wall time | 442.6 s | 292.9 s (1.51x) |
+| scoring informative positions | 136.0 s | 44.0 s |
+| densify + merge (incl. gap-fill/densified scoring) | 132.0 s | 73.8 s |
+| peak calling | 142.1 s | 143.6 s |
+| peak RSS | 6.01 GiB | 6.00 GiB |
+| Jaccard vs dREG | 0.999793 | 0.996183 |
+| max score diff vs published | 5.0e-4 | 2.35e-3 |
+| positions in only one run | 1.60e-4 (check fails, expected, see above) | 1.16e-3 |
+
+The fp32 output is identical to the 3080's and the TITAN Xp's on every
+check. Peak calling, which runs on the CPU, is the slowest of the four
+NVIDIA machines (142 s vs 100 s on the L40S and 84 s on the 3080), so the
+A100's fp32 wall time trails both cards. TF32 gives the A100 its biggest
+scoring speedup (3.1x on informative positions).
+
+## Run C: L40S (done 2026-11-23)
+
+Sherlock node `sh04-06n10`, Intel Xeon Gold 6426Y (16 threads), driver
+550.163.01, cupy 14.1.1, Jurkat_ChROseq_1, `--cores 16 --seed 0`. The
+runs used `3e2f384`, whose `src/` is identical to `a8eae1f`. The artifacts
+don't record whether the node was exclusive. Artifacts are in
+`figures/benchmark_results/1.0/nvidia-l40s/`.
+
+| | fp32 | tf32 |
+|---|---|---|
+| wall time | 318.5 s | 262.8 s (1.21x) |
+| scoring informative positions | 88.5 s | 53.8 s |
+| densify + merge (incl. gap-fill/densified scoring) | 97.5 s | 74.4 s |
+| peak calling | 100.2 s | 102.5 s |
+| peak RSS | 6.00 GiB | 6.00 GiB |
+| Jaccard vs dREG | 0.999793 | 0.996183 |
+| max score diff vs published | 5.0e-4 | 2.35e-3 |
+| positions in only one run | 1.60e-4 (check fails, expected, see above) | 1.16e-3 |
+
+The fp32 output is identical to the other NVIDIA runs on every check.
+It's the fastest machine benchmarked, in both modes.
