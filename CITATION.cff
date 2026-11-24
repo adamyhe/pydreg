@@ -6,8 +6,8 @@ message: >-
   README's "Citation" section) to credit the underlying method.
 type: software
 title: pydreg
-version: 0.4.0
-date-released: '2026-11-22'
+version: 1.0.0
+date-released: '2026-11-24'
 abstract: >-
   An inference-only Python port of dREG (Danko Lab) for detecting active
   transcriptional regulatory elements (promoters and enhancers) from

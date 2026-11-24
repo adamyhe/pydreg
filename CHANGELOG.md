@@ -2,14 +2,23 @@
 
 All notable changes to pydreg are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
-uses [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump marks a
-change to default output or the public interface).
+uses [Semantic Versioning](https://semver.org/). Since 1.0.0, a major bump
+marks a breaking change to the CLI or Python API, or a change to default output
+beyond float32 noise; a minor bump adds to the interface without breaking it;
+a patch bump fixes bugs or speeds things up without changing output. Before
+1.0.0, a minor bump marked a change to default output or the public interface.
 
 Performance changes are summarized here; the full measurements, including
 approaches that were tried and rejected, are in
 [`docs/PERF_LOG.md`](docs/PERF_LOG.md).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-24
+
+First stable release. The code is unchanged from 0.4.0 apart from the input
+check and the `raw.peak.bed.gz` fix below. This release re-benchmarks it on
+five GPUs.
 
 ### Added
 - An input check on both bigWigs before the run starts, ported from dREG's
@@ -19,6 +28,24 @@ approaches that were tried and rejected, are in
   values, or looks mapped to whole regions rather than 3' points. It takes
   well under a second on real data. `--skip-input-check`
   (`check_input=False` in `pipeline.run`) turns it off.
+
+### Changed
+- Development status is now `5 - Production/Stable`, and the versioning rule
+  above now follows standard post-1.0 semantic versioning.
+- Re-benchmarked on the NVIDIA TITAN Xp that ran dREG's published baselines,
+  across all 12 libraries: a median 5.17x faster than dREG end to end (was
+  4.51x), 5.67x lower peak memory (was 5.38x), and 0.99967 Jaccard agreement
+  with dREG's peaks (was 0.99908). The `adamyhe/pydreg-supporting-data`
+  dataset now holds these runs, and the figures are redrawn from them.
+- The README's Performance section has a cross-hardware table for one library
+  (TITAN Xp, RTX 3080, A100, L40S, Apple M5), and its `--tf32` figures come
+  from the same runs: 1.51x faster end to end on an A100, 1.21x on an L40S and
+  1.50x on an M5.
+- New benchmark tooling: `figures/timing_scripts_cuda.sh` (a CUDA sweep that
+  waits for an idle GPU before each run and is safe under SLURM),
+  `figures/compare_cuda_runs.py`, an `mlx-tf32` variant in the Apple scripts,
+  and `figures/BENCHMARK_PLAN.md`. Each run's logs are in
+  `figures/benchmark_results/1.0/`.
 
 ### Fixed
 - `raw.peak.bed.gz` included the `prob = -1` rows for candidate peaks too
@@ -239,7 +266,8 @@ approaches that were tried and rejected, are in
   RF-assisted peak calling, FDR filtering, output writing), with the
   pretrained models hosted on Hugging Face.
 
-[Unreleased]: https://github.com/adamyhe/pydreg/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/adamyhe/pydreg/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/adamyhe/pydreg/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/adamyhe/pydreg/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/adamyhe/pydreg/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/adamyhe/pydreg/compare/v0.3.2...v0.3.3
