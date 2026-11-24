@@ -5404,3 +5404,59 @@ Raw outputs: `/workdir/ayh8/pydreg_bench/` on cbsugpu01 (node-local).
 Re-run with `GPU_ID=0 bash figures/timing_scripts_cuda.sh`, then
 `figures/compare_cuda_runs.py`. Against the new reference, the default
 tolerances should pass for unchanged scoring code.
+
+## 2026-11-24 (cont.) — 1.0 re-benchmark, runs B-D: A100, L40S and Apple M5 on Jurkat_ChROseq_1, fp32 vs TF32 (measurement only, no code change)
+
+The cross-hardware half of the 1.0 re-benchmark (`figures/BENCHMARK_PLAN.md`
+runs B-D). All three ran on `3e2f384`, whose `src/` is identical to
+`a8eae1f`, on Jurkat_ChROseq_1 with `--seed 0`. The A100 (`sh03-16n09`,
+EPYC 7763) and L40S (`sh04-06n10`, Xeon Gold 6426Y) are Sherlock nodes,
+driver 550.163.01, cupy 14.1.1, `--cores 16`, run with
+`timing_scripts_cuda.sh`; the artifacts don't record whether the nodes
+were exclusive. The M5 (Mac17,4, 16 GiB, macOS 27.2.1, mlx 0.32.0) ran
+`timing_scripts_apple.sh` with `--cores 10` (all its cores) under
+`caffeinate -ims`, with a 5 min cooldown between backends; its `env.txt`
+files were written by hand. With run E (2026-11-23 (cont.)) and run A's
+Jurkat_ChROseq_1 row (2026-11-24):
+
+| | TITAN Xp | RTX 3080 | A100 | L40S | M5 (mlx) |
+|---|---|---|---|---|---|
+| wall clock, fp32 | 823.5s | 380.7s | 442.6s | 318.5s | 1634.0s |
+| wall clock, TF32 | n/a | 302.5s (1.26x) | 292.9s (1.51x) | 262.8s (1.21x) | 1088.6s (1.50x) |
+| informative scoring, fp32 / TF32 | 311.8s | 157.5s / 115.8s | 136.0s / 44.0s | 88.5s / 53.8s | 863.5s / 531.3s |
+| peak calling | 212.0s | 83.6s | 142.1s | 100.2s | 128.2s |
+| max RSS, fp32 | 5.80 GiB | 6.18 GiB | 6.01 GiB | 6.00 GiB | 4.93 GiB |
+| Jaccard vs real dREG, fp32 | 0.999793 | 0.999793 | 0.999793 | 0.999793 | 0.999513 |
+| Jaccard vs real dREG, TF32 | n/a | 0.996183 | 0.996183 | 0.996183 | 0.994692 |
+
+**fp32 output is identical across all four NVIDIA GPUs:** same max
+|score diff| against the published pre-0.4.0 run (5.02e-4), same share of
+positions in only one run (1.60e-4, the expected positions-check miss
+explained in the TITAN Xp entry), same Jaccard. TF32 output is also
+identical between the A100, L40S and 3080. The fused cupy kernel's
+float32 result therefore doesn't depend on the GPU model, and TF32's
+doesn't either among these Ampere/Ada cards. mlx's float32 scores differ
+from cupy's at the 1e-4 level (max 2.25e-4 against run A, 6.84e-5 of
+positions in only one run, both inside tolerance), which costs a little
+agreement (0.999513 vs 0.999793).
+
+**Where the time goes.** On the datacenter cards the CPU decides the fp32
+ranking, not the GPU: the A100 scores 1.16x faster than the 3080
+(136.0s vs 157.5s) but its EPYC host takes 142s to call peaks against the
+9800X3D's 84s, so it finishes last of the three. TF32 helps the A100 most
+(3.1x on informative scoring, 1.51x end to end, up from the 1.48x
+measured on 2026-11-22). On the
+L40S it is 1.64x on scoring and 1.21x end to end (was 1.25x). Peak calling
+doesn't change with TF32 on any machine.
+
+**M5.** TF32 buys 1.50x end to end and 1.63x on scoring, and costs more
+agreement than on NVIDIA (0.994692 vs 0.996183). The earlier M5 figures
+(1.57x, 0.995315 vs 0.999654, 2026-11-21) were for the merged
+Jurkat_ChROseq library with `--seed 1`, so they aren't directly
+comparable. TF32 also raised peak RSS from 4.93 to 6.00 GiB; that wasn't
+investigated. The M5 is about 5x slower than the L40S in fp32, almost
+all in scoring and densified scoring.
+
+The README's cross-hardware table and `--tf32` row come from this table.
+Artifacts are in `figures/benchmark_results/1.0/{nvidia-a100-sxm4-80gb,nvidia-l40s,apple-m5}/`;
+the outputs aren't on HF.
