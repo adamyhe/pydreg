@@ -5312,3 +5312,95 @@ contributes to every query, so the full GEMM is required. Any further
 reduction in scoring work would have to approximate the SVR (e.g.
 Nystrom or reduced-set methods), which changes scores and is out of
 scope.
+
+## 2026-11-23 (cont.) — 1.0 re-benchmark, run E: RTX 3080, Jurkat_ChROseq_1, fp32 vs `--tf32` (measurement only, no code change)
+
+First run of the 1.0 re-benchmark (`figures/BENCHMARK_PLAN.md`), made
+with the new `figures/timing_scripts_cuda.sh`. Ryzen 7 9800X3D (16
+threads) + RTX 3080 10GB under WSL2, driver 621.14, cupy 14.1.1,
+Jurkat_ChROseq_1 on local NVMe, `--cores 16 --seed 0`. The code was
+`src/`-identical to `a8eae1f`, which includes the input check and the
+raw-peak fix. The script's idle check held each run until GPU
+utilization was at most 15% (this card's display baseline is 2-8%), and
+between runs it waited for the fp32 run's own load average to decay.
+
+| | fp32 | tf32 | |
+|---|---|---|---|
+| wall clock | 380.7s | 302.5s | 1.26x |
+| informative `scorer.predict` | 157.1s | 115.4s | 1.36x |
+| densified `scorer.predict` | 111.0s | 73.2s | 1.52x |
+| gap-filled `scorer.predict` | 4.2s | 3.3s | |
+| peak calling | 83.6s | 83.5s | |
+| max RSS | 6.18 GiB | 6.18 GiB | |
+| Jaccard vs real dREG | 0.999793 | 0.996183 | |
+
+Compared with the published (pre-0.4.0, Titan Xp) run: the fp32 max
+|score diff| was 5.0e-4, and Jaccard vs dREG rose from 0.999363 to
+0.999793. 1.60e-4 of positions were present in only one run, just over
+`compare_cuda_runs.py`'s 1e-4 tolerance. This is consistent with 0.4.0's
+fused kernel moving scores near the gap-fill/densify thresholds, rather
+than a regression, given that peak agreement improved. The tolerance
+means something again once the Titan Xp rerun replaces the published
+data. The TF32 cost on this card (Jaccard 0.9962) matches the A100 and
+L40S figures in the 2026-11-22 entry. Feature extraction stayed far
+below predict (14.2s vs 157.1s for the informative positions), so the
+GPU was the bottleneck throughout. Artifacts are in
+`figures/benchmark_results/1.0/nvidia-geforce-rtx-3080/`.
+## 2026-11-24 — 1.0 re-benchmark on the TITAN Xp: pydreg 1.0.0 is 5.17x faster than dREG end to end (was 4.51x); HF reference replaced (measurement only, no code change)
+
+Reran the 12-library benchmark on `cbsugpu01`'s TITAN Xp (nvidia-smi GPU
+0, compute capability 6.1, so fp32 only) with `figures/timing_scripts_cuda.sh`
+for 1.0.0 (run A in `figures/BENCHMARK_PLAN.md`): `--backend cupy
+--cores 16 --seed 0`, one library at a time, each run waiting for an idle
+GPU and a 1-minute load average under 2. The same card ran dREG's
+published runs, so the dREG ratios are like for like. Provenance: the
+sweep ran on `ad128b2` (`env.txt` records it), whose `src/` lacks only
+1.0.0's sub-second input check and its `raw.peak.bed.gz` fix; the
+`prob = -1` rows were stripped from the 12 `raw.peak.bed.gz` files
+afterwards (HF commit `75c9702`), so the published files match 1.0.0's
+output format.
+
+**End to end, vs the published pre-1.0 pydreg run on the same card:**
+wall time is a median 0.871x of before (0.858-0.940x). G1, the largest
+library (17.1M positions), gains least: 0.98x on the first run of the
+sweep and 0.94x on a rerun (40.8 vs 43.4 min), with the first run's
+peak RSS 0.9 GB above the rerun's. Treat the first run as a cold-start
+outlier; the rerun replaced it. G1's densifying (596s) and peak-calling
+(494s) stages, which 0.4.0 didn't touch, make up a larger share of its
+time than on the other libraries. Against dREG: median **5.17x** wall time
+(4.88-5.38x, was 4.51x) and **5.67x** lower peak RSS (3.89-6.89x, was
+5.38x). Peak Jaccard against real dREG: median **0.999671**
+(0.998397-0.999910), higher than the published pydreg run on all 12
+(was median 0.999084 by `plot_peak_agreement.py`).
+
+**Score/position equivalence.** Max |score - published| was 4.4-5.0e-4,
+inside the 1e-3 check. The positions check (at most 1e-4 of positions in
+only one infp track) failed on every library at 1.0-2.1e-4. On
+K562_groseq, 665 positions were only in the new track and 610 only in
+the old, spread over all chromosomes, with a median score of 0.050 on
+both sides: that's the densification cutoff (`peaks.get_dense_infp`,
+threshold 0.05, and the `> 0.05` filter in `peaks.py`). The fused
+kernel's ~5e-4 score shift flips positions sitting at the cutoff, plus
+the neighbors densified around them. That's expected, not a regression.
+Everything passes at `--position-tol 5e-4`; `summary.csv` in
+`figures/benchmark_results/1.0/nvidia-titan-xp/` is from the default
+tolerances, so it shows the positions failures as they were. These runs are now the
+published reference in `adamyhe/pydreg-supporting-data` (HF commit
+`eb40bcd`), so later same-code runs get compared against 1.0.0.
+
+**GPU profiling** (pydreg side recaptured with `profile_gpu.sh`, paired
+with the 2026-09-03 dREG captures from the same card). Per scoring phase:
+the GPU is busy ~95% of the time as before (pydreg loses 4.1% to idle
+gaps, 3.6-4.4%, was 4.2%), and kernel time drops 17-22%. That's where the
+speedup comes from, not from fewer idle gaps. The cuBLAS
+`sgemm_128x128x8_NT_vec` is now 87.5% of pydreg's GPU time, and the fused
+`pydreg_rbf_gemv` 12.5%. Before, `pydreg_rbf_from_cross` and `gemv` took
+~25% and ~8%. dREG's GPU-busy time is now a median **5.47x** pydreg's
+(5.01-5.95x, was 4.47x), and 6.75x counting idle time (was 5.48x). The
+per-operation ratios don't move: 942x more H2D memcpys and 12.4x more
+kernel launches at the default `query_chunk=4096`, `sv_chunk=16384`.
+
+Raw outputs: `/workdir/ayh8/pydreg_bench/` on cbsugpu01 (node-local).
+Re-run with `GPU_ID=0 bash figures/timing_scripts_cuda.sh`, then
+`figures/compare_cuda_runs.py`. Against the new reference, the default
+tolerances should pass for unchanged scoring code.

@@ -1,0 +1,21 @@
+2026-11-24 02:56:16,949 INFO loading models...
+2026-11-24 02:56:46,369 INFO loading models done in 29.42s
+2026-11-24 02:57:06,683 INFO using cupy backend (query_chunk=4096)
+2026-11-24 02:57:06,683 INFO scanning informative positions...
+2026-11-24 02:57:39,450 INFO scanning informative positions done in 32.77s
+2026-11-24 02:57:39,451 INFO 17120769 informative positions found
+2026-11-24 02:57:39,451 INFO scoring informative positions...
+2026-11-24 03:16:37,751 INFO scoring informative positions: 70.47s extracting features, 1136.07s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-24 03:16:37,816 INFO scoring informative positions done in 1138.37s
+2026-11-24 03:16:37,816 INFO densifying and merging into broad peaks...
+2026-11-24 03:16:39,229 INFO informative score distribution: min=-0.2510 q01=-0.0363 median=0.0002 q99=0.5960 max=1.6586; negative=8419751 zero=0 noise=16839502 sigma=0.00997545
+2026-11-24 03:17:46,635 INFO scoring gap-filled positions: 14.08s extracting features, 7.80s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-24 03:26:20,768 INFO scoring 10bp-densified broad-peak positions: 37.77s extracting features, 443.17s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-24 03:26:33,837 INFO densifying and merging into broad peaks done in 596.02s
+2026-11-24 03:26:33,838 INFO min_score=0.0689, 22267920 dense positions, 111425 broad peaks
+2026-11-24 03:26:33,838 INFO calling peaks...
+2026-11-24 03:27:09,302 INFO calling 101680 broad peaks in 1028 blocks of up to 100 with 16 peak-calling process(es) (pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=0.001, pmv_laplace_tail_tol=1e-06, seed=0)
+2026-11-24 03:34:40,256 INFO peak-calling profile: 7141.07s block CPU time, 7013.85s in 170255 pmv_laplace call(s) / 18540112 CDF eval(s), 95.64s non-pmv find_rf_peaks, 31.58s other block overhead
+2026-11-24 03:34:48,127 INFO calling peaks done in 494.29s
+2026-11-24 03:34:48,127 INFO 180298 raw candidate peaks, 75894 significant
+2026-11-24 03:35:14,832 INFO writing outputs done in 26.71s

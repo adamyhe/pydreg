@@ -1,0 +1,21 @@
+2026-11-23 18:12:30,153 INFO loading models...
+2026-11-23 18:12:34,058 INFO loading models done in 3.90s
+2026-11-23 18:12:35,044 INFO using cupy backend (query_chunk=4096)
+2026-11-23 18:12:35,044 INFO scanning informative positions...
+2026-11-23 18:12:53,133 INFO scanning informative positions done in 18.09s
+2026-11-23 18:12:53,133 INFO 4997104 informative positions found
+2026-11-23 18:12:53,133 INFO scoring informative positions...
+2026-11-23 18:14:21,560 INFO scoring informative positions: 18.01s extracting features, 87.91s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 18:14:21,588 INFO scoring informative positions done in 88.45s
+2026-11-23 18:14:21,588 INFO densifying and merging into broad peaks...
+2026-11-23 18:14:21,973 INFO informative score distribution: min=-0.1934 q01=-0.0371 median=0.0017 q99=0.9527 max=1.5837; negative=2232174 zero=0 noise=4464348 sigma=0.0110148
+2026-11-23 18:14:41,611 INFO scoring gap-filled positions: 5.76s extracting features, 2.25s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 18:15:56,404 INFO scoring 10bp-densified broad-peak positions: 13.15s extracting features, 55.52s in scorer.predict (these overlap, so they don't sum to this step's wall time)
+2026-11-23 18:15:59,068 INFO densifying and merging into broad peaks done in 97.48s
+2026-11-23 18:15:59,068 INFO min_score=0.0761, 7701289 dense positions, 47869 broad peaks
+2026-11-23 18:15:59,068 INFO calling peaks...
+2026-11-23 18:16:10,805 INFO calling 43701 broad peaks in 448 blocks of up to 100 with 16 peak-calling process(es) (pmv_laplace_cdf_maxpts=25000, pmv_laplace_cdf_eps=0.001, pmv_laplace_tail_tol=1e-06, seed=0)
+2026-11-23 18:17:39,196 INFO peak-calling profile: 1373.94s block CPU time, 1340.24s in 82730 pmv_laplace call(s) / 7668422 CDF eval(s), 25.53s non-pmv find_rf_peaks, 8.16s other block overhead
+2026-11-23 18:17:39,272 INFO calling peaks done in 100.20s
+2026-11-23 18:17:39,272 INFO 85440 raw candidate peaks, 48170 significant
+2026-11-23 18:17:46,145 INFO writing outputs done in 6.87s

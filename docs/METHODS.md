@@ -14,7 +14,7 @@ end to end, including several upstream quirks that would look like bugs in
 isolation but are kept deliberately because the pretrained model's expected
 output depends on them. This has been validated directly: across 12 real
 PRO-seq/GRO-seq/ChRO-seq libraries, pydreg's called peaks agree with real
-dREG's at a **median 0.999084 Jaccard index** (range 0.997723-0.999406;
+dREG's at a **median 0.999671 Jaccard index** (range 0.998397-0.999910;
 the fraction of the union of both peak sets that both implementations
 agree on) — near-total agreement, with only the small residual expected from
 inherent randomization in the p-value calculation (see "Peak calling"

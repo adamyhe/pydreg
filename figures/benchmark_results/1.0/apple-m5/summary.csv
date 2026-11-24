@@ -1,0 +1,3 @@
+library,backend,pass,max_abs_score_diff,only_in_one_frac,jaccard_vs_dreg,published_jaccard_vs_dreg,jaccard_vs_published_pydreg,wall_s,scoring_s,peak_rss_gib
+Jurkat_ChROseq_1,mlx,yes,0.00022467970848083496,6.842777513256745e-05,0.999513,0.999793,0.999681,1633.98,863.55,4.92822265625
+Jurkat_ChROseq_1,mlx-tf32,n/a,0.003746628761291504,0.0015388316121760083,0.994692,0.999793,0.99464,1088.58,531.31,6.00103759765625

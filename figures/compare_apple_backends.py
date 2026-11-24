@@ -2,8 +2,10 @@
 """Checks figures/timing_scripts_apple.sh's outputs against the published
 benchmark results and summarizes mlx vs numpy (CPU) timings.
 
-The published pydreg results (adamyhe/pydreg-supporting-data) came from
-the cupy backend on an NVIDIA Titan Xp, i.e. float32 scoring, unseeded. So
+The published pydreg results (adamyhe/pydreg-supporting-data) are
+pydreg 1.0.0 on the cupy backend on an NVIDIA Titan Xp, i.e. float32
+scoring with the fused kernel, --cores 16 --seed 0 (replaced 2026-11-24;
+see compare_cuda_runs.py). So
 "equivalent" here means, per library and backend:
 
   - scores: max |local - published| over positions present in both
@@ -15,13 +17,21 @@ the cupy backend on an NVIDIA Titan Xp, i.e. float32 scoring, unseeded. So
     tracks is at most --position-tol (default 1e-4). Not required to be 0:
     the track includes gap-filled and densified positions, which are chosen
     by score thresholds, so score differences at the 1e-4 level can flip a
-    handful.
+    handful. On the CUDA re-benchmark, a ~5e-4 score shift put 1-2e-4 of
+    positions in only one track (see compare_cuda_runs.py); if only this
+    check fails by that much, --position-tol 5e-4 is the fair tolerance.
   - peaks: `bedtools jaccard` of the local *.dREG.peak.prob.bed.gz against
     real dREG's published peaks is at least the published pydreg run's own
     Jaccard against dREG minus --jaccard-tol (default 0.001). Peak calling
-    is stochastic (QMC) and the published run was unseeded, so this asks
+    is stochastic (QMC), and even a seeded run only repeats exactly given
+    identical scores, which mlx/numpy vs cupy never are, so this asks
     "agrees with dREG as well as the published run did" rather than for
     identical peaks.
+
+The checks gate numpy and mlx runs only. mlx-tf32 runs (mlx with --tf32)
+are expected to move scores by a few 1e-3 and peaks by a few 1e-3
+Jaccard on M5-class GPUs, so for them the numbers are reported without
+pass/fail, along with their speedup over plain mlx.
 
 Also reported, without pass/fail: Jaccard against the published pydreg
 peaks, and numpy-vs-mlx score/peak agreement when both ran.
@@ -55,7 +65,9 @@ from _common import LIBRARIES, fetch
 from plot_peak_agreement import sorted_bed
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BACKENDS = ("numpy", "mlx")
+BACKENDS = ("numpy", "mlx", "mlx-tf32")
+# Backends the equivalence checks gate; mlx-tf32 is reported, not gated.
+GATED = ("numpy", "mlx")
 
 # Per-chromosome reads go in windows of this many bp, bounding memory at a
 # few hundred MB however large the chromosome.
@@ -177,11 +189,13 @@ def main() -> int:
                 "peaks": j_dreg >= reference_j - args.jaccard_tol,
             }
             failed = [name for name, ok in checks.items() if not ok]
-            failures += [f"{lib} ({backend}): {name}" for name in failed]
+            gated = backend in GATED
+            if gated:
+                failures += [f"{lib} ({backend}): {name}" for name in failed]
             rows.append({
                 "library": lib,
                 "backend": backend,
-                "pass": not failed,
+                "pass": ("yes" if not failed else "NO") if gated else "n/a",
                 "max_abs_score_diff": scores["max_abs_diff"],
                 "only_in_one_frac": scores["only_frac"],
                 "jaccard_vs_dreg": j_dreg,
@@ -192,7 +206,7 @@ def main() -> int:
                 "peak_rss_gib": timing.get("rss_gib"),
             })
 
-        if set(done) == set(BACKENDS):
+        if set(GATED) <= set(done):
             pair = compare_scores(
                 apple_dir / "numpy" / f"{lib}.dREG.infp.bw",
                 apple_dir / "mlx" / f"{lib}.dREG.infp.bw",
@@ -214,12 +228,12 @@ def main() -> int:
         return "-" if value is None else format(value, spec)
 
     print(
-        f"\n{'library':<18}{'backend':<8}{'pass':<6}{'max|dscore|':>12}{'only-frac':>11}"
+        f"\n{'library':<18}{'backend':<10}{'pass':<6}{'max|dscore|':>12}{'only-frac':>11}"
         f"{'J(dREG)':>10}{'J(pub)':>10}{'wall s':>9}{'score s':>9}{'RSS GiB':>9}"
     )
     for r in rows:
         print(
-            f"{r['library']:<18}{r['backend']:<8}{'yes' if r['pass'] else 'NO':<6}"
+            f"{r['library']:<18}{r['backend']:<10}{r['pass']:<6}"
             f"{r['max_abs_score_diff']:>12.2e}{r['only_in_one_frac']:>11.2e}"
             f"{r['jaccard_vs_dreg']:>10.6f}{r['published_jaccard_vs_dreg']:>10.6f}"
             f"{fmt(r['wall_s'], '.1f'):>9}{fmt(r['scoring_s'], '.1f'):>9}"
@@ -233,8 +247,8 @@ def main() -> int:
         (lib, b["numpy"]["wall_s"] / b["mlx"]["wall_s"],
          b["numpy"]["scoring_s"] / b["mlx"]["scoring_s"])
         for lib, b in by_lib.items()
-        if set(b) == set(BACKENDS)
-        and all(b[k]["wall_s"] and b[k]["scoring_s"] for k in BACKENDS)
+        if set(GATED) <= set(b)
+        and all(b[k]["wall_s"] and b[k]["scoring_s"] for k in GATED)
     ]
     if speedups:
         print(f"\n{'library':<18}{'wall speedup':>14}{'scoring speedup':>17}")
@@ -244,6 +258,22 @@ def main() -> int:
             f"{'median':<18}{np.median([s[1] for s in speedups]):>13.2f}x"
             f"{np.median([s[2] for s in speedups]):>16.2f}x"
         )
+
+    tf32 = [
+        (lib, b["mlx"]["wall_s"] / b["mlx-tf32"]["wall_s"],
+         b["mlx"]["scoring_s"] / b["mlx-tf32"]["scoring_s"],
+         b["mlx-tf32"]["jaccard_vs_dreg"], b["mlx"]["jaccard_vs_dreg"])
+        for lib, b in by_lib.items()
+        if {"mlx", "mlx-tf32"} <= set(b)
+        and all(b[k]["wall_s"] and b[k]["scoring_s"] for k in ("mlx", "mlx-tf32"))
+    ]
+    if tf32:
+        print(
+            f"\n--tf32 vs mlx\n{'library':<18}{'wall speedup':>14}{'scoring speedup':>17}"
+            f"{'J(dREG) tf32':>14}{'J(dREG) mlx':>13}"
+        )
+        for lib, wall, scoring, j_tf32, j_mlx in tf32:
+            print(f"{lib:<18}{wall:>13.2f}x{scoring:>16.2f}x{j_tf32:>14.6f}{j_mlx:>13.6f}")
 
     summary = apple_dir / "summary.csv"
     with summary.open("w", newline="") as f:

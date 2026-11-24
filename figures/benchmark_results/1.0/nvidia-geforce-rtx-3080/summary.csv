@@ -1,0 +1,3 @@
+gpu,mode,library,pass,max_abs_score_diff,only_in_one_frac,jaccard_vs_dreg,published_jaccard_vs_dreg,jaccard_vs_published_pydreg,wall_s,scoring_s,peak_calling_s,peak_rss_gib,dreg_wall_s,dreg_peak_rss_gib,speedup_vs_dreg,rss_reduction_vs_dreg,dreg_same_hardware
+nvidia-geforce-rtx-3080,fp32,Jurkat_ChROseq_1,NO,0.0005021095275878906,0.0001603509179213639,0.999793,0.999363,0.999516,380.69,157.48,83.61,6.182483673095703,4334.0,36.146034240722656,11.384591137145708,5.846523201997161,False
+nvidia-geforce-rtx-3080,tf32,Jurkat_ChROseq_1,n/a,0.0023462101817131042,0.001158424133209045,0.996183,0.999363,0.996207,302.47,115.75,83.55,6.182212829589844,4334.0,36.146034240722656,14.328693754752535,5.84677933889907,False
