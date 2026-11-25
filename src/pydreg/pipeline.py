@@ -74,7 +74,7 @@ def _score_positions(
     each cluster's binning (features._binned_sums_batch_numba), not the
     clusters themselves or their reads and cumsums. Threading across
     clusters was measured and rejected for its memory cost (see
-    docs/OPTIMIZATION.md's "Feature-extraction clustering" section).
+    docs/OPTIMIZATION.md's "Keeping the GPU busy" section).
 
     progress: show a tqdm progress bar over positions scored
     (auto-hidden if stdout isn't a terminal).

@@ -18,6 +18,15 @@ approaches that were tried and rejected, are in
 - Tests that `call_peaks` passes `pmv_laplace_cdf_maxpts` and
   `pmv_laplace_cdf_eps` through to the p-value calculation, and that
   `stats.set_pmv_laplace_cdf_options` rejects invalid values.
+### Changed
+- The README is shorter. Its Usage section lists only the main options, and
+  the full option reference, output files and Python API moved to a new
+  [`docs/CLI.md`](docs/CLI.md). The cross-hardware timing table moved to
+  `docs/OPTIMIZATION.md`, and the README's caveats moved to
+  `docs/METHODS.md`.
+- `docs/METHODS.md` and `docs/OPTIMIZATION.md` are rewritten in plain
+  language for users. The dated history and exact measurements stay in
+  `docs/PERF_LOG.md`.
 
 ## [1.0.0] - 2026-11-24
 
