@@ -123,8 +123,8 @@ def _binned_sums_batch_numba(csum, offsets, window_sizes, half_n_windows, n_feat
     win specifically for the `cupy` backend, where predict is fast enough
     that extraction is already the dominant, unhidden cost for at least the
     gap-filled-positions step on real hardware (TITAN Xp *and* A100, not
-    just top-end cards -- see docs/OPTIMIZATION.md's "Real measurements"
-    table).
+    just top-end cards -- see docs/OPTIMIZATION.md's "Keeping the GPU busy"
+    section).
 
     parallel=True + prange over positions: each position's output row is
     computed independently of every other (no cross-position reduction, no

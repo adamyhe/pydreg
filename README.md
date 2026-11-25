@@ -36,127 +36,60 @@ The NVIDIA runs used 16 CPU cores and the M5 run used its 10. dREG took 72 min o
 ## Installation
 
 ```bash
-pip install pydreg[gpu]
+pip install pydreg[gpu]   # Linux with an NVIDIA GPU
+pip install pydreg[mlx]   # macOS with Apple Silicon
 pydreg --help
 ```
 
-Or with [uv](https://docs.astral.sh/uv/) — `uv tool install` if you only need the `pydreg` CLI (isolated environment, nothing else to manage):
+Or, to install just the `pydreg` command into its own isolated environment with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install pydreg[gpu]
-pydreg --help
 ```
 
-If you want the Python API (`from pydreg import pipeline`, see below) available in your own project instead, use `uv add pydreg[gpu]` there, or `uv pip install pydreg[gpu]` into an already-active environment.
+To use the Python API in your own project, run `uv add pydreg[gpu]` there instead.
 
-`[gpu]` installs [CuPy](https://cupy.dev/) and enables GPU-accelerated scoring on Linux with an NVIDIA GPU (auto-selected whenever one's detected). On macOS with Apple Silicon, install `[mlx]` instead (`pip install pydreg[mlx]`) for GPU-accelerated scoring via [MLX](https://github.com/ml-explore/mlx) on the machine's Metal GPU (also auto-selected whenever usable). Neither is required, but CPU-only scoring is **much** slower and so is not generally recommended.
+The `[gpu]` and `[mlx]` extras turn on GPU scoring, and pydreg picks the GPU up automatically when one is available. Neither extra is required, but scoring on the CPU is **much** slower, so it isn't generally recommended. Requirements:
 
-**GPU requirement (NVIDIA/`cupy`):** compute capability ≥3.0 (essentially any CUDA-capable NVIDIA GPU from the last decade-plus, including older Pascal-class cards). Scoring runs pydreg's own RBF kernel implementation directly on a CuPy device array (`pydreg.backend._build_cupy_predict_fn`), with the RBF step and the SVR-coefficient multiply fused into one CUDA kernel, and enables broad CUDA compatibility and fp32 support. Matrix multiplies run at full float32 precision unless you pass `--tf32` (see the options table below). v0.1.x used cuML, which came with significant GPU restrictions (no Pascal support) and no fp32 support — see `docs/OPTIMIZATION.md` for the full writeup, including why that library was dropped in favor of a handrolled `cupy` SVM implementation.
+- **NVIDIA (`[gpu]`):** compute capability 3.0 or newer, which covers essentially any CUDA GPU from the last decade, including older Pascal cards.
+- **Apple Silicon (`[mlx]`):** any M1 or later Mac.
 
-**GPU requirement (Apple Silicon/`mlx`):** any Apple Silicon Mac (M1 or later) with a working Metal GPU. Scoring runs the same RBF kernel formula directly on an MLX device array (`pydreg.backend._build_mlx_predict_fn`), using the same fused design as a Metal kernel. On M5-class GPUs, pydreg turns off MLX's default TF32 matmuls so scores stay faithful to real dREG (`--tf32` turns them back on). See `docs/OPTIMIZATION.md` for the full writeup and real-hardware benchmark numbers.
-
-Pretrained model weights (an RBF-kernel SVR scorer and a small random-forest peak-splitter) are downloaded automatically from [`adamyhe/pydreg`](https://huggingface.co/adamyhe/pydreg) on Hugging Face the first time they're needed, and cached locally by `huggingface_hub`.
-
-If you already have compatible exported model files, pass them with `--svr-model /path/to/svm.model.safetensors.zst` and `--rf-model /path/to/rf.model.safetensors.zst`, or use `pipeline.run(..., svr_model_path=..., rf_model_path=...)` from Python.
+The pretrained models are downloaded from [Hugging Face](https://huggingface.co/adamyhe/pydreg) the first time they're needed and cached after that.
 
 ## Usage
 
-### CLI
-
 ```bash
-pydreg plus.bw minus.bw out_prefix --verbose --cores 8
+pydreg plus.bw minus.bw out_prefix --cores 8 --verbose
 ```
 
-- `plus.bw`/`minus.bw`: strand-specific bigWig files (3′-mapped, point-mode, unnormalized **read counts** — the same input format the original dREG expects). See [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) for the Danko lab's pipeline. `minus.bw` may be positive- or negative-signed — `pydreg` takes the absolute value of both strands during feature extraction (matching the original C implementation), so sign convention doesn't affect scoring.
-- `out_prefix`: prefix for all output files (see below).
+`plus.bw` and `minus.bw` are strand-specific bigWigs of raw, unnormalized, 3′-mapped read counts. This is the same input dREG takes, and the Danko lab's [proseq2.0](https://github.com/Danko-Lab/proseq2.0/) pipeline produces it. The options most people will want:
 
-Options:
+| flag | what it does |
+|---|---|
+| `-p`, `--cores N` | CPU cores to use (default 1). Set this to as many as you can spare. |
+| `--backend` | `auto` (default) picks the GPU if one is usable, otherwise the CPU. |
+| `--tf32` | Faster on newer GPUs (A100, L40S, RTX 30-series and newer, Apple M5), but agrees slightly less closely with dREG. |
+| `--seed N` | Makes peak calls exactly repeatable from run to run. |
+| `-v`, `--verbose` | Print progress messages. |
 
-**Primary options.** These are the main options that most people will want to set based on their system.
-
-| flag                                  | default          | meaning                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--backend {auto,cupy,mlx,sklearn,numpy}` | `auto`       | Scoring backend. `auto` uses `cupy` when a usable CUDA device is detected, `mlx` when a usable Apple Silicon (Metal) GPU is detected, otherwise pure NumPy. scikit-learn is selectable explicitly but is not auto-selected (see `docs/OPTIMIZATION.md` for why). An explicit choice raises if that backend isn't actually usable, rather than silently falling back. |
-| `--tf32`                              | off              | Let the GPU backends (`cupy`, `mlx`) run their main matrix multiply at TF32 precision on hardware that has it (NVIDIA compute capability 8.0+, Apple M5). About 1.51x faster end to end on an A100, 1.21x on an L40S and 1.50x on an M5, but peaks agree less closely with real dREG (Jaccard 0.996 vs 0.9998 on Jurkat ChRO-seq replicate 1 with CUDA, 0.995 vs 0.9995 on the M5; same peaks, shifted boundaries) and results then depend on the GPU model. Off overrides `CUPY_TF32`/`MLX_ENABLE_TF32`. Ignored on CPU backends (see `docs/OPTIMIZATION.md`). |
-| `-p`, `--cores N`                     | `1`              | Cores pydreg is allowed to use, applied consistently across the pipeline: worker processes for the final peak-calling stage (embarrassingly parallel across broad candidate peaks) *and* numba's thread count for the parallelized feature-extraction/informative-position-scanning kernels — one number, not two independently-tunable ones. **Set this to the max number of cores you can spare on your machine** — the default of `1` is just a safe, non-surprising starting point, not a recommendation.                                                                     |
-| `--svr-model PATH`                    | pretrained       | Local SVR scorer model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                                           |
-| `--rf-model PATH`                     | pretrained       | Local random-forest peak-splitter model file (`.safetensors` or `.safetensors.zst`) instead of downloading/loading the default Hugging Face weight.                                                                                                                                                                                           |
-| `--skip-input-check`                  | off              | Skip the input check, ported from dREG's `check_bigwig`, that runs before anything else. It samples both bigWigs and stops if either holds non-integer (normalized) values, mixes positive and negative values, or looks mapped to whole regions rather than 3′ points. |
-| `--no-progress`                       | off              | Disable tqdm progress bars (auto-hidden anyway when stdout isn't a terminal).                                                                                                                                                                                                                                                                 |
-| `-v`, `--verbose`                     | off              | Log progress at INFO level.                                                                                                                                                                                                                                                                                                                   |
-
-**Additional tuning arguments**. These change how pydreg handles batching. These are safe to tune, but the default settings used will generally work well across most systems. In particular, there's no real performance gain from increasing chunk size, at least in my testing.
-
-| flag                                  | default          | meaning      |
-| ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--peak-calling-block-width N`        | `100`            | Candidate broad peaks handed to each peak-calling worker per task; smaller blocks improve load balancing on uneven peak sizes. Tune alongside `--cores`.                                                                                                                                                                         |
-| `--query-chunk N`                     | backend-specific | Positions scored per batch; defaults to a size tuned per backend (`pydreg.backend.DEFAULT_QUERY_CHUNK`). Pure batching — does not change scores.                                                                                                                                                                                              |
-| `--cupy-sv-chunk N`                   | `16384`          | Support vectors (of 605,187) evaluated per GPU kernel/GEMM call for the `cupy` backend specifically. The main lever for trading GPU memory for fewer, larger, better-amortized kernel launches — measured memory-bandwidth-bound (not launch-overhead-bound) on both a TITAN Xp and an A100, so growing this past the default buys no throughput, only more VRAM (see `docs/OPTIMIZATION.md`). Pure batching — does not change scores. |
-| `--mlx-sv-chunk N`                    | `16384`          | The same lever as `--cupy-sv-chunk`, but for the `mlx` backend specifically. Unlike `cupy`, throughput does measurably degrade well past the default (confirmed on a real Apple M4), and an unchunked call can crash outright past Metal's hard per-buffer allocation limit — see `docs/OPTIMIZATION.md`. Pure batching at/below the default — does not change scores. |
-
-**Arguments that will change results.** `--pv-adjust`/`--pv-threshold` are genuine statistical choices. The rest reproduce specific constants/tolerances from legacy dREG's own hardcoded behavior; pydreg's >0.999 Jaccard agreement with real dREG was measured at their defaults, so moving off those defaults is unexplored territory — nothing downstream validates the result against R at other values.
-
-| flag                         | default | meaning                                                                                                                                                                                                         |
-| ---------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--pv-adjust METHOD`         | `fdr`   | Multiple-testing correction method (any `statsmodels.stats.multitest.multipletests` method name).                                                                                                               |
-| `--pv-threshold P`           | `0.05`  | Significance threshold applied after correction.                                                                                                                                                                |
-| `--smoothwidth N`            | `4`     | Smoothing window used during peak-splitting; matches legacy dREG's own hardcoded `smoothwidth=4` in `find_rf_peaks`.                                                                                            |
-| `--pmv-laplace-cdf-maxpts N` | `25000` | Max integration points for the per-summit p-value's quasi-Monte-Carlo integral; matches R's `mvtnorm::pmvnorm()`/`GenzBretz()` default. Only lower this if you want to trade fidelity with R for further speed. |
-| `--pmv-laplace-cdf-eps EPS`  | `0.001` | Absolute/relative tolerance for the same integral; also matches R's default. Only lower this (i.e. tighten precision) if you specifically want to exceed R's own reference precision, at real speed cost.       |
-| `--pmv-laplace-tail-tol TOL` | `1e-6`  | Stops the per-summit p-value's z-grid integration early once the remaining tail's provable worst-case error falls below `TOL`, trading a bounded amount of fidelity for speed — unlike the two rows above, this changes *how much* of the integral is evaluated, not just how precisely. The `1e-6` default was validated on a full real production run against real dREG with no measurable fidelity cost (same peaks called, indistinguishable Jaccard agreement — see `docs/OPTIMIZATION.md`). Pass `0.0` for exact, bit-for-bit-with-R behavior. |
-| `--pmv-laplace-exact`        | off     | Shorthand for `--pmv-laplace-tail-tol 0.0` (exact, slower). Ignored if `--pmv-laplace-tail-tol` is also given.                                                                                                    |
-| `--seed N`                   | unset   | Seeds the randomized quasi-Monte-Carlo integration behind the per-summit p-value — the only stochastic step in the pipeline — making the called peaks reproducible run-to-run, and reproducible independently of `--cores`. Unset by default: each p-value draws fresh OS entropy, as it always has. Reproducibility holds for a fixed environment and a fixed set of `--pmv-laplace-*` settings, not across platforms or SciPy versions. Diffing two runs at different seeds measures how much of your called-peak set is FDR-boundary noise. |
-
-### Python API
+From Python:
 
 ```python
 from pydreg import pipeline
 
-result = pipeline.run(
-    "plus.bw",
-    "minus.bw",
-    "out_prefix",
-    backend_name=None,
-    svr_model_path=None,
-    rf_model_path=None,
-    cores=8
-)
-# result: {"dense_infp": ..., "raw_peak": ..., "peak_bed": ..., "min_score": ...}
+result = pipeline.run("plus.bw", "minus.bw", "out_prefix", cores=8)
 ```
 
-Pass `write_outputs=False` to get the result dict back without writing files, if you just want to work with the DataFrames directly.
+The main output is `{out_prefix}.dREG.peak.full.bed.gz`, the significant peaks with their scores and p-values. pydreg also writes a per-position score bigWig and a few other peak tracks.
 
-### Output files
+**[`docs/CLI.md`](docs/CLI.md)** has every option, the full list of output files and the Python API.
 
-Given `out_prefix`, pydreg writes:
+## Documentation
 
-| file                                                  | contents                                                      |
-| ----------------------------------------------------- | ------------------------------------------------------------- |
-| `{out_prefix}.dREG.infp.bw`                           | Every informative position and its raw dREG score.            |
-| `{out_prefix}.dREG.raw.peak.bed.gz` (+`.tbi`)         | All candidate peaks before FDR filtering.                     |
-| `{out_prefix}.dREG.peak.full.bed.gz` (+`.tbi`)        | Significant peaks: chrom, start, end, score, p-value, center. |
-| `{out_prefix}.dREG.peak.score.bed.gz`/`.bw` (+`.tbi`) | Significant peaks' scores only.                               |
-| `{out_prefix}.dREG.peak.prob.bed.gz`/`.bw` (+`.tbi`)  | Significant peaks' `1 - p-value`.                             |
-
-`.bed.gz` files are bgzipped and tabix-indexed; `.bw` files are standard bigWig tracks.
-
-## How it works
-
-1. **Informative-position scan** — tiles the genome looking for positions with any transcriptional signal on either strand, to avoid scoring silent regions.
-2. **Feature extraction** — for each informative position, bins nearby read counts into multiple nested window sizes ("zoom levels") per strand, producing a fixed-length feature vector.
-3. **Scoring** — an RBF-kernel SVR (605,187 support vectors, trained on the original dREG data) maps each feature vector to a dREG score in ~[0, 1].
-4. **Peak calling** — merges scored positions into broad candidate regions, refines local maxima with a small random-forest model to decide where to split adjacent peaks, computes a per-peak p-value, and applies FDR control to select significant peaks.
-
-See `docs/METHODS.md` for a plain-language walkthrough of each stage, and `docs/OPTIMIZATION.md` for the performance design choices layered on top without changing any of the above. `docs/PLANNING.md`/`docs/PERF_LOG.md` are the underlying comprehensive design/research records (full algorithmic spec, every upstream R quirk and why it's kept, every benchmark) for anyone going deeper.
-
-This is validated directly against the original: on real test data, pydreg's called peaks agree with real dREG's at a >0.999 Jaccard index.
-
-## Caveats
-
-- `minus.bw`'s sign doesn't matter: both informative-position detection and feature extraction take the absolute value of the minus-strand signal (the latter matching the original C's `bigwig_readi(..., abs=1, ...)` read call, which strips sign from both strands before any binning) — see `docs/PLANNING.md` for the sourced trace.
-- Chromosome/contig selection follows the original plus-strand-driven scan: contigs present only in `plus.bw` can still be scored, with the missing `minus.bw` contig treated as all-zero signal during feature extraction; contigs present only in `minus.bw` are not discovered by the initial informative-position scan.
-- A handful of upstream R bugs/quirks are faithfully replicated rather than fixed, because the pretrained model's expected behavior was produced by that exact code (e.g. a `mean()`-argument-binding bug in the p-value calculation, an off-by-one in broad-peak merging that drops the last group per chromosome, and others) — see `docs/PLANNING.md` for the full list and reasoning.
-- Peak-calling p-values have small inherent run-to-run noise (the per-summit p-value's underlying quasi-Monte-Carlo integral is unseeded, matching the original R implementation's `mvtnorm::pmvnorm`, which is also unseeded) — this doesn't affect which peaks are called significant in practice, and is reflected in the >0.999 (not exactly 1.0) Jaccard index above. Pass `--seed` (or `seed=` in the Python API) to make peak calling reproducible, including across different `--cores` values.
+- [`docs/CLI.md`](docs/CLI.md) covers all options, output files and the Python API.
+- [`docs/METHODS.md`](docs/METHODS.md) explains how the algorithm works, in plain language.
+- [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md) explains why pydreg is faster than dREG and how the backends differ.
+- [`docs/PLANNING.md`](docs/PLANNING.md) and [`docs/PERF_LOG.md`](docs/PERF_LOG.md) are the detailed design and benchmark records, for contributors.
 
 ## Project status
 
