@@ -21,17 +21,7 @@ pydreg is substantially faster and less memory demanding than dREG. On an NVIDIA
 
 Peak calls from pydreg agree with official dREG peak calls at a median 0.99967 Jaccard index (range 0.99840-0.99991) across the same 12 libraries.
 
-On other hardware, for one library (Jurkat ChRO-seq replicate 1, about 5M informative positions), with `--seed 0`:
-
-| hardware | wall time | with `--tf32` | peak RSS | Jaccard vs dREG (`--tf32`) |
-|---|---|---|---|---|
-| NVIDIA L40S | 5.3 min | 4.4 min (1.21x) | 6.0 GiB | 0.99979 (0.99618) |
-| NVIDIA RTX 3080 | 6.3 min | 5.0 min (1.26x) | 6.2 GiB | 0.99979 (0.99618) |
-| NVIDIA A100 | 7.4 min | 4.9 min (1.51x) | 6.0 GiB | 0.99979 (0.99618) |
-| NVIDIA Titan Xp | 13.7 min | n/a | 5.8 GiB | 0.99979 |
-| Apple M5, `mlx` | 27.2 min | 18.1 min (1.50x) | 4.9 GiB | 0.99951 (0.99469) |
-
-The NVIDIA runs used 16 CPU cores and the M5 run used its 10. dREG took 72 min on this library on the Titan Xp node. Peak calling runs on the CPU, so the host CPU matters too: the A100's node is slower than the L40S's here. Without `--tf32`, every NVIDIA GPU gives identical output. Full logs are in [`figures/benchmark_results/1.0/`](figures/benchmark_results/1.0/).
+Timings on other NVIDIA GPUs and Apple Silicon, with and without `--tf32`, are in [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md#other-hardware).
 
 ## Installation
 
