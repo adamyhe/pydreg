@@ -14,6 +14,16 @@ approaches that were tried and rejected, are in
 
 ## [Unreleased]
 
+### Changed
+- The README is shorter. Its Usage section lists only the main options, and
+  the full option reference, output files and Python API moved to a new
+  [`docs/CLI.md`](docs/CLI.md). The cross-hardware timing table moved to
+  `docs/OPTIMIZATION.md`, and the README's caveats moved to
+  `docs/METHODS.md`.
+- `docs/METHODS.md` and `docs/OPTIMIZATION.md` are rewritten in plain
+  language for users. The dated history and exact measurements stay in
+  `docs/PERF_LOG.md`.
+
 ## [1.0.0] - 2026-11-24
 
 First stable release. The code is unchanged from 0.4.0 apart from the input
