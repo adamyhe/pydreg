@@ -136,7 +136,7 @@ def test_call_peaks_parallel_matches_serial(monkeypatch, rf_model):
     )
 
 
-def test_call_peaks_threads_pmv_laplace_tail_tol_to_workers(monkeypatch, rf_model):
+def test_call_peaks_threads_pmv_laplace_options_to_workers(monkeypatch, rf_model):
     x = np.arange(0, 2000, 10)
     y = 0.8 * np.exp(-((x - 500) ** 2) / (2 * 80**2))
     y += 0.9 * np.exp(-((x - 1500) ** 2) / (2 * 80**2))
@@ -164,6 +164,8 @@ def test_call_peaks_threads_pmv_laplace_tail_tol_to_workers(monkeypatch, rf_mode
         call_peaks(
             dense_infp, peak_broad, 0.05, rf_model,
             pv_adjust="none", pv_threshold=1.0, cores=1,
+            pmv_laplace_cdf_maxpts=5000,
+            pmv_laplace_cdf_eps=2e-3,
             pmv_laplace_tail_tol=1e-6,
         )
         # call_peaks's own serial-path _init_peak_worker call runs in this
@@ -172,8 +174,10 @@ def test_call_peaks_threads_pmv_laplace_tail_tol_to_workers(monkeypatch, rf_mode
         # actually reached stats.set_pmv_laplace_tail_tol() rather than
         # being silently dropped somewhere in call_peaks's plumbing.
         assert stats.get_pmv_laplace_tail_tol() == 1e-6
+        assert stats.get_pmv_laplace_cdf_options() == {"maxpts": 5000, "eps": 2e-3}
     finally:
         stats.set_pmv_laplace_tail_tol(0.0)
+        stats.set_pmv_laplace_cdf_options()
 
 
 def test_attach_seed_keys_is_positional_not_dispatch_dependent():

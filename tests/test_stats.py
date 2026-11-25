@@ -7,6 +7,7 @@ from pydreg.stats import (
     build_cormat,
     get_laplace_quantile,
     get_laplace_sigma,
+    get_pmv_laplace_cdf_options,
     get_pmv_laplace_profile,
     get_pmv_laplace_tail_tol,
     pmv_laplace,
@@ -75,6 +76,19 @@ def test_pmv_laplace_cdf_options_keep_result_in_unit_interval():
     finally:
         set_pmv_laplace_cdf_options()
     assert 0.0 <= p <= 1.0
+
+
+def test_pmv_laplace_cdf_options_round_trip_and_validate():
+    try:
+        set_pmv_laplace_cdf_options(maxpts=1000, eps=5e-3)
+        assert get_pmv_laplace_cdf_options() == {"maxpts": 1000, "eps": 5e-3}
+        with pytest.raises(ValueError):
+            set_pmv_laplace_cdf_options(maxpts=0)
+        with pytest.raises(ValueError):
+            set_pmv_laplace_cdf_options(eps=0.0)
+    finally:
+        set_pmv_laplace_cdf_options()
+    assert get_pmv_laplace_cdf_options() == {"maxpts": 25000, "eps": 1e-3}
 
 
 def test_pmv_laplace_tail_tol_rejects_negative():

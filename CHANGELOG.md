@@ -14,6 +14,10 @@ approaches that were tried and rejected, are in
 
 ## [Unreleased]
 
+### Added
+- Tests that `call_peaks` passes `pmv_laplace_cdf_maxpts` and
+  `pmv_laplace_cdf_eps` through to the p-value calculation, and that
+  `stats.set_pmv_laplace_cdf_options` rejects invalid values.
 ### Changed
 - The README is shorter. Its Usage section lists only the main options, and
   the full option reference, output files and Python API moved to a new
